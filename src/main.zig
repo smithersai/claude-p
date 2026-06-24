@@ -48,6 +48,8 @@ pub fn main() !void {
             .setting_sources = opts.setting_sources,
             .add_dirs = opts.add_dirs.items,
             .mcp_configs = opts.mcp_configs.items,
+            .extra_hooks = opts.extra_hooks.items,
+            .setting_json = opts.setting_json,
             .verbose = opts.verbose,
             .session_start_timeout_ms = @as(u64, opts.timeout_seconds) * 1000,
             .idle_progress_timeout_ms = @as(u64, opts.idle_timeout_seconds) * 1000,
@@ -55,7 +57,12 @@ pub fn main() !void {
         }) catch |err| {
             try stderrWriter().print("claude-p daemon: {s}\n", .{@errorName(err)});
             try stderrWriter().flush();
-            std.process.exit(2);
+            // Exit codes per SPEC §2.7: idle watchdog → 124 (timeout family),
+            // everything else (session-start timeout, spawn failure) → 2.
+            std.process.exit(switch (err) {
+                error.IdleTimeout => 124,
+                else => 2,
+            });
         };
         std.process.exit(code);
     }
@@ -111,6 +118,8 @@ pub fn main() !void {
         .setting_sources = opts.setting_sources,
         .add_dirs = opts.add_dirs.items,
         .mcp_configs = opts.mcp_configs.items,
+        .extra_hooks = opts.extra_hooks.items,
+        .setting_json = opts.setting_json,
         .verbose = opts.verbose,
         .timeout_ms = @as(u64, opts.timeout_seconds) * 1000,
         .debug = opts.debug,

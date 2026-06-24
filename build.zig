@@ -80,6 +80,11 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) integ_tests.linkSystemLibrary("proc");
     const run_integ_tests = b.addRunArtifact(integ_tests);
     run_integ_tests.has_side_effects = true;
+    // Daemon-mode integration tests spawn the built `claude-p` binary as a
+    // subprocess (it reads/writes the real stdin/stdout). Hand it the path and
+    // make sure the binary is built first.
+    run_integ_tests.setEnvironmentVariable("CLAUDE_P_BIN", b.getInstallPath(.bin, "claude-p"));
+    run_integ_tests.step.dependOn(b.getInstallStep());
     const integ_step = b.step("test-integration", "Run integration tests against the real `claude` binary (set CLAUDE_P_E2E=1)");
     integ_step.dependOn(&run_integ_tests.step);
 }

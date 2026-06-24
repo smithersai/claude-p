@@ -32,6 +32,11 @@ pub const Options = struct {
     setting_sources: ?[]const u8 = null,
     add_dirs: []const []const u8 = &.{},
     mcp_configs: []const []const u8 = &.{},
+    /// Caller-supplied hooks merged into the generated settings (SPEC §2.8).
+    extra_hooks: []const hook_mod.ExtraHook = &.{},
+    /// Optional JSON object whose top-level keys are merged into the generated
+    /// settings (SPEC §2.9). `null` for none.
+    setting_json: ?[]const u8 = null,
     verbose: bool = false,
     timeout_ms: u64 = 300_000,
     /// Override `claude` binary path (testing).
@@ -329,7 +334,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     const trace_start: i128 = std.time.nanoTimestamp();
     trace(opts, trace_start, "run() entered");
 
-    var harness = try hook_mod.create(allocator);
+    var harness = try hook_mod.create(allocator, opts.extra_hooks, opts.setting_json);
     defer harness.deinit();
     trace(opts, trace_start, "hook harness ready (FIFO + relay script + --settings)");
 

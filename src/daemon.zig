@@ -51,6 +51,11 @@ pub const Options = struct {
     setting_sources: ?[]const u8 = null,
     add_dirs: []const []const u8 = &.{},
     mcp_configs: []const []const u8 = &.{},
+    /// Caller-supplied hooks merged into the generated settings (SPEC §2.8).
+    extra_hooks: []const hook_mod.ExtraHook = &.{},
+    /// Optional JSON object whose top-level keys are merged into the generated
+    /// settings (SPEC §2.9). `null` for none.
+    setting_json: ?[]const u8 = null,
     verbose: bool = false,
     claude_path: ?[]const u8 = null,
     cols: u16 = 120,
@@ -312,6 +317,31 @@ fn emitPong(writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
 }
 
+/// Emit a terminal `result`/`error` envelope just before the daemon tears
+/// down on a watchdog trip (idle / session-start timeout). The `reason` is a
+/// stable machine-readable string (`idle_timeout`, `session_start_timeout`)
+/// so a hub gets a deterministic turn-failed signal instead of having to infer
+/// failure from a dead pipe (SPEC §2.7). `session_id` is best-effort — empty
+/// when `SessionStart` never fired.
+fn emitErrorResult(writer: *std.Io.Writer, reason: []const u8, session_id: []const u8, duration_ms: u64) !void {
+    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("result");
+    try jw.objectField("subtype");
+    try jw.write("error");
+    try jw.objectField("is_error");
+    try jw.write(true);
+    try jw.objectField("error");
+    try jw.write(reason);
+    try jw.objectField("session_id");
+    try jw.write(session_id);
+    try jw.objectField("duration_ms");
+    try jw.write(duration_ms);
+    try jw.endObject();
+    try writer.writeAll("\n");
+}
+
 /// Return true if `fd` has data available to read, without blocking.
 /// Uses poll(2) with a 0 timeout. POLLHUP / POLLERR also report as readable
 /// so a subsequent read() can pick up EOF.
@@ -333,7 +363,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     trace(opts, trace_start, "daemon.run() entered");
 
     // ----------- 1. Hook harness + argv + env -----------
-    var harness = try hook_mod.create(allocator);
+    var harness = try hook_mod.create(allocator, opts.extra_hooks, opts.setting_json);
     defer harness.deinit();
 
     const claude_bin = opts.claude_path orelse "claude";
@@ -415,6 +445,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     var state: State = .waiting_for_ready;
     var transcript_path: ?[]u8 = null;
     defer if (transcript_path) |p| allocator.free(p);
+    // Captured from the SessionStart hook; best-effort session id used to tag
+    // a terminal error-result frame on a watchdog trip (empty until then).
+    var session_id: []u8 = try allocator.dupe(u8, "");
+    defer allocator.free(session_id);
     var tailer: ?stream_mod.Tailer = null;
     defer if (tailer) |*t| t.deinit();
 
@@ -487,10 +521,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
         }
 
         if (state == .waiting_for_ready and now_ns > session_start_deadline_ns) {
+            const dur_ms: u64 = @intCast(@divTrunc(now_ns - trace_start, std.time.ns_per_ms));
+            emitErrorResult(stdout, "session_start_timeout", session_id, dur_ms) catch {};
+            stdout.flush() catch {};
             return RunError.SessionStartTimeout;
         }
         if (idleTimedOut(state, shared.last_output_ns.load(.seq_cst), now_ns, opts.idle_progress_timeout_ms)) {
             traceFmt(opts, trace_start, "idle timeout: no PTY activity since busy start", .{});
+            const since: i128 = if (turn_start_ns != 0) turn_start_ns else trace_start;
+            const dur_ms: u64 = @intCast(@divTrunc(now_ns - since, std.time.ns_per_ms));
+            emitErrorResult(stdout, "idle_timeout", session_id, dur_ms) catch {};
+            stdout.flush() catch {};
             return RunError.IdleTimeout;
         }
         if (shared.exited.load(.seq_cst)) {
@@ -611,6 +652,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
                             // own system entries.
                             if (state == .waiting_for_ready) {
                                 const sid = (hook_mod.extractSessionId(allocator, ev.payload) catch null) orelse try allocator.dupe(u8, "");
+                                // Retain the id for a later watchdog error frame.
+                                allocator.free(session_id);
+                                session_id = try allocator.dupe(u8, sid);
                                 defer allocator.free(sid);
                                 emitSystemInit(stdout, sid) catch {};
                                 stdout.flush() catch {};
@@ -797,6 +841,39 @@ test "emitPong: shape is a single-line pong object with ts" {
     try testing.expect(std.mem.endsWith(u8, out, "\n"));
     try testing.expect(std.mem.indexOf(u8, out, "\"type\":\"pong\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"ts\":") != null);
+}
+
+test "emitErrorResult: terminal error envelope with reason + session_id" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitErrorResult(&aw.writer, "idle_timeout", "sess-1", 1234);
+    buf = aw.toArrayList();
+    const out = buf.items;
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("result", obj.get("type").?.string);
+    try testing.expectEqualStrings("error", obj.get("subtype").?.string);
+    try testing.expect(obj.get("is_error").?.bool);
+    try testing.expectEqualStrings("idle_timeout", obj.get("error").?.string);
+    try testing.expectEqualStrings("sess-1", obj.get("session_id").?.string);
+    try testing.expectEqual(@as(i64, 1234), obj.get("duration_ms").?.integer);
+}
+
+test "emitErrorResult: empty session_id when SessionStart never fired" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitErrorResult(&aw.writer, "session_start_timeout", "", 0);
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("session_start_timeout", obj.get("error").?.string);
+    try testing.expectEqualStrings("", obj.get("session_id").?.string);
 }
 
 test "idleTimedOut: busy + stale last_output trips" {

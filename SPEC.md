@@ -167,6 +167,7 @@ until stdin EOF (then it shuts down after the current turn) or the child exits.
 | init | `{"type":"system","subtype":"init","session_id":"…"}` | Once, after `SessionStart` hook fires. |
 | transcript lines | raw JSONL from the session transcript | Streamed live as `claude` flushes them. |
 | result | per-turn result envelope (see §3 `stream-json`) | Once per finished turn (on `Stop` hook). |
+| error result | `{"type":"result","subtype":"error","is_error":true,"error":"<reason>","session_id":"…","duration_ms":<ms>}` | Once, immediately before the daemon tears down on a watchdog trip (see below). |
 | pong | `{"type":"pong","ts":<unix_ms>}` | In response to each `ping`. |
 
 **ping/pong liveness contract.** The `pong` is produced by the daemon's main
@@ -178,6 +179,71 @@ daemon loop still answers pings); detecting a stuck *child* is the caller's job
 answers pings in every state (`waiting_for_ready`, `idle`, `busy`) and during a
 long busy turn — a healthy long turn never blocks the loop. Absence of `pong`
 within the caller's timeout means the daemon loop itself is stuck.
+
+**Error-result contract (no silent teardown).** When the daemon gives up on a
+turn it MUST first emit a terminal `error result` frame on stdout, *then* exit
+with the corresponding non-zero code. A hub driving the daemon must never have
+to infer failure from a dead pipe alone. The `error` field carries a stable
+machine-readable reason:
+
+| `error` value | Trigger | Exit code |
+| ------------- | ------- | --------- |
+| `session_start_timeout` | `SessionStart` hook never fired within `--session-start-timeout` | `2` |
+| `idle_timeout` | Busy turn produced no PTY output for `--idle-timeout` ms | `124` |
+
+`session_id` is best-effort (empty if `SessionStart` never fired).
+`duration_ms` is wall time from the turn's dispatch (or `run()` entry, for a
+session-start timeout) to the trip. Normal completion still emits the ordinary
+`result` frame on the `Stop` hook; this frame is strictly the failure path.
+
+### 2.8 Extra hooks (`--extra-hook`)
+
+`claude-p` owns `--settings` outright (a user-supplied `--settings` is
+rejected) because it injects its own `SessionStart`/`Stop` relay hooks — those
+are the turn-lifecycle signal. A caller that still needs its *own* hooks (e.g. a
+`PostToolUse` file-change tracker) supplies them with `--extra-hook`, which the
+wrapper **merges into** the generated settings instead of letting the caller
+clobber them:
+
+```
+--extra-hook PostToolUse='/path/to/tracker.sh'
+--extra-hook Stop='/path/to/also-on-stop.sh'   # appended alongside our relay
+```
+
+- Format is `<Event>=<command>`. A missing `=`, an empty event, or an empty
+  command is a hard parse error (no silent drop).
+- Repeatable. Multiple hooks for the same event accumulate.
+- Each becomes a `{"matcher":"*","hooks":[{"type":"command","command":<cmd>}]}`
+  group. Tool-name filtering, if needed, is the caller's job inside its script.
+- An `--extra-hook` for `SessionStart`/`Stop` is **appended to** claude-p's own
+  relay group for that event (both run); it never replaces the relay.
+
+This is the supported path for the `meridian` integration to keep its
+`PostToolUse` file-change hook while ceding `--settings` and turn-completion
+detection to `claude-p`.
+
+### 2.9 Extra settings (`--setting-json`)
+
+Because `claude-p` owns `--settings`, a caller cannot add its own top-level
+Claude Code settings keys. `--setting-json` closes that gap: it takes a JSON
+**object** whose top-level keys are **merged into** the generated settings
+alongside the relay `hooks`.
+
+```
+--setting-json '{"showThinkingSummaries":true}'
+```
+
+- The value must be a JSON object (a non-object, or invalid JSON, is a hard
+  parse error — no silent drop).
+- Each top-level key is written into the generated settings object.
+- A `hooks` key inside `--setting-json` is **ignored** — claude-p's own relay
+  hooks (plus any `--extra-hook`) are authoritative for turn detection.
+- Last occurrence wins if repeated.
+
+This is the supported path for `meridian` to enable `showThinkingSummaries`
+(which bypasses the server-side thinking-redaction flag so the embedded
+`claude`'s thinking blocks stream their summary text, not just a signature)
+without owning `--settings`.
 
 ## 3. Output format fidelity
 
@@ -222,6 +288,8 @@ claude-p [OPTIONS] [PROMPT]
   --input-file <path>          Read prompt from file (multiline).
   --verbose                    Forwarded to `claude`.
   --timeout <seconds>          Wrapper wall-time cap (default 300s).
+  --extra-hook <Event>=<cmd>   Merge an extra Claude hook into the generated
+                               settings (repeatable). See §2.8.
   --debug                      Wrapper-level debug logs to stderr.
   -h, --help                   Print help.
   -v, --version                Print version.

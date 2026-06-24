@@ -13,6 +13,152 @@ fn e2eEnabled() bool {
     return std.process.hasEnvVar(std.heap.page_allocator, "CLAUDE_P_E2E") catch false;
 }
 
+/// Path to the built `claude-p` binary. build.zig sets CLAUDE_P_BIN on the
+/// integration run; fall back to the conventional install path otherwise.
+fn claudePBin() []const u8 {
+    return std.posix.getenv("CLAUDE_P_BIN") orelse "zig-out/bin/claude-p";
+}
+
+/// Make a unique temp dir under $TMPDIR for a daemon subprocess test. Caller
+/// owns the returned path and should delete the tree.
+fn makeTmpDir(allocator: std.mem.Allocator) ![]u8 {
+    const root = std.posix.getenv("TMPDIR") orelse "/tmp";
+    const pid: i32 = @intCast(std.posix.system.getpid());
+    const stamp: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+    const dir = try std.fmt.allocPrint(allocator, "{s}/claude-p-itest-{d}-{x}", .{ root, pid, stamp });
+    try std.fs.cwd().makePath(dir);
+    return dir;
+}
+
+fn writeExecScript(dir: []const u8, name: []const u8, body: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+    var f = try std.fs.cwd().createFile(path, .{ .mode = 0o755 });
+    defer f.close();
+    try f.writeAll(body);
+    return path;
+}
+
+// P0-2: a watchdog trip must emit a terminal error-result frame on stdout
+// *before* the daemon exits — never a silent dead pipe (SPEC §2.7). This is
+// deterministic and needs no real `claude`: a fake child that stays alive but
+// never fires the SessionStart hook forces the session-start-timeout path.
+test "daemon: session-start timeout emits error frame + exit 2" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        std.fs.cwd().deleteTree(tmp) catch {};
+        allocator.free(tmp);
+    }
+    // Fake claude: ignore all args, stay alive, emit nothing.
+    const fake = try writeExecScript(tmp, "fake-claude.sh", "#!/bin/sh\nexec sleep 30\n", allocator);
+    defer allocator.free(fake);
+
+    var child = std.process.Child.init(&.{
+        claudePBin(), "daemon",
+        "--claude-path", fake,
+        "--timeout",    "2", // session-start deadline (seconds)
+        "--idle-timeout", "0",
+    }, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    // EOF stdin immediately; in waiting_for_ready this does not short-circuit
+    // shutdown, so the session-start deadline (2s) fires first.
+    child.stdin.?.close();
+    child.stdin = null;
+
+    const out = try child.stdout.?.readToEndAlloc(allocator, 1 << 20);
+    defer allocator.free(out);
+    const term = try child.wait();
+
+    // Exactly the session-start-timeout error frame, then exit 2.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"session_start_timeout\"") != null);
+    try assertErrorFrame(allocator, out, "session_start_timeout");
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 2 }, term);
+}
+
+/// Assert `out` contains a JSONL line that is a well-formed terminal error
+/// result with the given reason.
+fn assertErrorFrame(allocator: std.mem.Allocator, out: []const u8, reason: []const u8) !void {
+    var it = std.mem.splitScalar(u8, out, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{ .ignore_unknown_fields = true }) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const obj = parsed.value.object;
+        const ty = obj.get("type") orelse continue;
+        if (ty != .string or !std.mem.eql(u8, ty.string, "result")) continue;
+        const err = obj.get("error") orelse continue;
+        if (err == .string and std.mem.eql(u8, err.string, reason)) {
+            try std.testing.expectEqualStrings("error", obj.get("subtype").?.string);
+            try std.testing.expect(obj.get("is_error").?.bool);
+            return; // found it
+        }
+    }
+    return error.ErrorFrameNotFound;
+}
+
+// P0-1: an `--extra-hook PostToolUse=<cmd>` must actually fire against the real
+// `claude` — this is the validation boundary we flagged (does matcher "*" fire
+// for PostToolUse?). The hook touches a sentinel; a tool-using prompt should
+// trigger it.
+test "real claude: --extra-hook PostToolUse fires on tool use" {
+    if (!e2eEnabled()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        std.fs.cwd().deleteTree(tmp) catch {};
+        allocator.free(tmp);
+    }
+    const sentinel = try std.fmt.allocPrint(allocator, "{s}/fired", .{tmp});
+    defer allocator.free(sentinel);
+    // Drain stdin (the hook payload) to avoid SIGPIPE, then record the hit.
+    const hook_body = try std.fmt.allocPrint(
+        allocator,
+        "#!/bin/sh\ncat >/dev/null\necho fired >> \"{s}\"\n",
+        .{sentinel},
+    );
+    defer allocator.free(hook_body);
+    const hook = try writeExecScript(tmp, "ptu.sh", hook_body, allocator);
+    defer allocator.free(hook);
+
+    const extra = try std.fmt.allocPrint(allocator, "PostToolUse={s}", .{hook});
+    defer allocator.free(extra);
+
+    var child = std.process.Child.init(&.{
+        claudePBin(),                     "daemon",
+        "--dangerously-skip-permissions", "--extra-hook",
+        extra,                            "--timeout",
+        "120",
+    }, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    // One tool-forcing turn, then EOF → daemon finishes the turn and shuts down.
+    try child.stdin.?.writeAll(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":" ++
+            "\"Use the Bash tool to run exactly: echo hello. Then reply DONE.\"}}\n",
+    );
+    child.stdin.?.close();
+    child.stdin = null;
+
+    const out = try child.stdout.?.readToEndAlloc(allocator, 1 << 22);
+    defer allocator.free(out);
+    _ = try child.wait();
+
+    // A result frame for the turn must have been emitted...
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"result\"") != null);
+    // ...and the PostToolUse hook must have fired (sentinel exists).
+    std.fs.cwd().access(sentinel, .{}) catch {
+        return error.PostToolUseHookDidNotFire;
+    };
+}
+
 test "real claude: text output for trivial prompt" {
     if (!e2eEnabled()) return error.SkipZigTest;
 

@@ -1,6 +1,9 @@
 //! CLI argument parser. Mirrors a useful subset of `claude -p`'s surface
 //! and forwards unknown flags through to the child `claude` invocation.
 const std = @import("std");
+const hook = @import("hook.zig");
+
+pub const ExtraHook = hook.ExtraHook;
 
 pub const OutputFormat = enum {
     text,
@@ -23,6 +26,8 @@ pub const ParseError = error{
     StreamJsonRequiresVerbose,
     BadInteger,
     BadFloat,
+    InvalidExtraHook,
+    InvalidSettingJson,
     OutOfMemory,
 };
 
@@ -66,6 +71,11 @@ pub const Options = struct {
     add_dirs: std.ArrayList([]const u8) = .{},
     /// `--mcp-config` may be repeated.
     mcp_configs: std.ArrayList([]const u8) = .{},
+    /// `--extra-hook <Event>=<cmd>` may be repeated; parsed into {event,command}.
+    extra_hooks: std.ArrayList(ExtraHook) = .{},
+    /// `--setting-json <json>`: a JSON object whose top-level keys are merged
+    /// into the generated settings (SPEC §2.9). Last occurrence wins.
+    setting_json: ?[]const u8 = null,
 
     /// Arguments we don't recognize: passed through verbatim to `claude`.
     passthrough: std.ArrayList([]const u8) = .{},
@@ -76,6 +86,7 @@ pub const Options = struct {
         self.passthrough.deinit(allocator);
         self.add_dirs.deinit(allocator);
         self.mcp_configs.deinit(allocator);
+        self.extra_hooks.deinit(allocator);
     }
 };
 
@@ -146,6 +157,12 @@ const help_text =
     \\  --idle-timeout <seconds>        Daemon-mode idle progress watchdog:
     \\                                  kill if no PTY output for this long
     \\                                  while busy. 0 disables. (default: 180)
+    \\  --extra-hook <Event>=<cmd>      Merge an extra Claude hook into the
+    \\                                  generated settings (repeatable). e.g.
+    \\                                  --extra-hook PostToolUse=/path/track.sh
+    \\  --setting-json <json>           Merge a JSON object's top-level keys into
+    \\                                  the generated settings. e.g.
+    \\                                  --setting-json '{"showThinkingSummaries":true}'
     \\  --debug                         Wrapper debug logs to stderr
     \\  --                              End of options; remaining tokens go to PROMPT
     \\  -h, --help                      Print this help
@@ -283,6 +300,20 @@ pub fn parse(allocator: std.mem.Allocator, argv_in: []const []const u8) ParseErr
             i = try consumeVariadicInto(allocator, argv, i, &opts.add_dirs);
         } else if (std.mem.eql(u8, a, "--mcp-config")) {
             i = try consumeVariadicInto(allocator, argv, i, &opts.mcp_configs);
+        } else if (std.mem.eql(u8, a, "--extra-hook")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingValue;
+            const h = hook.parseExtraHook(argv[i]) catch return ParseError.InvalidExtraHook;
+            try opts.extra_hooks.append(allocator, h);
+        } else if (std.mem.eql(u8, a, "--setting-json")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingValue;
+            // Validate up front: must be a JSON object (no silent drop).
+            var probe = std.json.parseFromSlice(std.json.Value, allocator, argv[i], .{}) catch
+                return ParseError.InvalidSettingJson;
+            defer probe.deinit();
+            if (probe.value != .object) return ParseError.InvalidSettingJson;
+            opts.setting_json = argv[i];
         } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--print")) {
             // claude's print mode is what we *emulate*. Passing it through
             // would either no-op or fight with our hooks. Reject loudly.
@@ -542,6 +573,42 @@ test "parse: rejects --print (claude print mode is unavailable here)" {
 
 test "parse: rejects user --settings (conflicts with our hook injection)" {
     try testing.expectError(ParseError.UnsupportedFlag, parse(testing.allocator, &.{ "--settings", "{}" }));
+}
+
+test "parse: --extra-hook accumulates parsed event/command (repeatable)" {
+    var opts = try parse(testing.allocator, &.{
+        "--extra-hook", "PostToolUse=/x/track.sh",
+        "--extra-hook", "Stop=/x/also.sh",
+        "hi",
+    });
+    defer opts.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), opts.extra_hooks.items.len);
+    try testing.expectEqualStrings("PostToolUse", opts.extra_hooks.items[0].event);
+    try testing.expectEqualStrings("/x/track.sh", opts.extra_hooks.items[0].command);
+    try testing.expectEqualStrings("Stop", opts.extra_hooks.items[1].event);
+}
+
+test "parse: --extra-hook with no value errors" {
+    try testing.expectError(ParseError.MissingValue, parse(testing.allocator, &.{"--extra-hook"}));
+}
+
+test "parse: --extra-hook malformed (no '=') errors" {
+    try testing.expectError(ParseError.InvalidExtraHook, parse(testing.allocator, &.{ "--extra-hook", "PostToolUse" }));
+}
+
+test "parse: --setting-json accepts a JSON object" {
+    var opts = try parse(testing.allocator, &.{ "--setting-json", "{\"showThinkingSummaries\":true}", "hi" });
+    defer opts.deinit(testing.allocator);
+    try testing.expectEqualStrings("{\"showThinkingSummaries\":true}", opts.setting_json.?);
+}
+
+test "parse: --setting-json rejects non-object / invalid JSON" {
+    try testing.expectError(ParseError.InvalidSettingJson, parse(testing.allocator, &.{ "--setting-json", "[1,2,3]" }));
+    try testing.expectError(ParseError.InvalidSettingJson, parse(testing.allocator, &.{ "--setting-json", "not json" }));
+}
+
+test "parse: --setting-json with no value errors" {
+    try testing.expectError(ParseError.MissingValue, parse(testing.allocator, &.{"--setting-json"}));
 }
 
 test "parse: stream-json without --verbose is rejected (matches claude -p)" {
