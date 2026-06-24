@@ -146,6 +146,39 @@ then falls back to constructing a `Summary` from the Stop payload's
 for `--output-format text`; the transcript path also fills in usage,
 duration_api_ms, num_turns.
 
+### 2.7 Daemon mode (long-lived multi-turn)
+
+`claude-p daemon` keeps one interactive `claude` session alive across many
+turns instead of spawning per prompt. It reads newline-delimited JSON frames
+on stdin and emits `claude -p`-compatible JSONL on stdout. The session lives
+until stdin EOF (then it shuts down after the current turn) or the child exits.
+
+**stdin frames (hub → daemon):**
+
+| Frame | Shape | Effect |
+| ----- | ----- | ------ |
+| user message | `{"type":"user","message":{"role":"user","content":"…"}}` (also accepts top-level `content`, or a content-block array) | Queued; dispatched to the PTY when the session is idle. |
+| ping | `{"type":"ping"}` | Health probe. Handled inline in the main event loop; answered immediately with a `pong`. Never queued, never reaches `claude`. |
+
+**stdout frames (daemon → hub):**
+
+| Frame | Shape | When |
+| ----- | ----- | ---- |
+| init | `{"type":"system","subtype":"init","session_id":"…"}` | Once, after `SessionStart` hook fires. |
+| transcript lines | raw JSONL from the session transcript | Streamed live as `claude` flushes them. |
+| result | per-turn result envelope (see §3 `stream-json`) | Once per finished turn (on `Stop` hook). |
+| pong | `{"type":"pong","ts":<unix_ms>}` | In response to each `ping`. |
+
+**ping/pong liveness contract.** The `pong` is produced by the daemon's main
+event loop — the same loop that drains the PTY, pumps the transcript, and
+dispatches prompts. A `pong` therefore proves the loop is not wedged. It does
+**not** prove the child `claude` is healthy (a wedged `claude` with a live
+daemon loop still answers pings); detecting a stuck *child* is the caller's job
+(e.g. observing the child's API-socket / transcript activity). The daemon
+answers pings in every state (`waiting_for_ready`, `idle`, `busy`) and during a
+long busy turn — a healthy long turn never blocks the loop. Absence of `pong`
+within the caller's timeout means the daemon loop itself is stuck.
+
 ## 3. Output format fidelity
 
 | `--output-format` | Stdout                                                                                                                        |
@@ -246,7 +279,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result;
 5. **`emit.zig`** — golden tests: text, json, stream-json formats produce
    the expected stdout shapes from synthetic Summaries.
 6. **`driver.zig`** — argv assembly + shell-quoting (unit-level, no PTY).
-7. **End-to-end against real `claude`** (gated on `CLAUDE_P_E2E=1`):
+7. **`daemon.zig`** — stdin frame classification: `parseUserMessageContent`
+   round-trips user frames (string / block-array / top-level content); a
+   `{"type":"ping"}` frame is recognized as a ping (not a user message); a
+   user frame is not misread as a ping.
+8. **End-to-end against real `claude`** (gated on `CLAUDE_P_E2E=1`):
    `zig build test-integration` runs `tests/integration.zig`. These tests
    exercise the full path with no mocks.
 

@@ -1,6 +1,6 @@
 {
   "name": "claude-p",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Drop-in replacement for `claude -p` that drives the interactive `claude` UI inside an in-process zmux PTY session.",
   "keywords": [
     "claude",

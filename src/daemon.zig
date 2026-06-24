@@ -195,6 +195,20 @@ fn parseUserMessageContent(allocator: std.mem.Allocator, line: []const u8) !?[]u
     return null;
 }
 
+/// True if `line` is a `{"type":"ping"}` health-probe frame. Cheap classifier
+/// run before `parseUserMessageContent` in the stdin loop so a ping is answered
+/// with a `pong` and never queued as a prompt (see SPEC §2.7).
+fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const tval = parsed.value.object.get("type") orelse return false;
+    if (tval != .string) return false;
+    return std.mem.eql(u8, tval.string, "ping");
+}
+
 /// Read the byte range [start_pos..end_pos) from a file via pread. Caller
 /// owns the returned slice.
 fn readFileRange(allocator: std.mem.Allocator, path: []const u8, start_pos: u64, end_pos: u64) ![]u8 {
@@ -280,6 +294,20 @@ fn emitSystemInit(writer: *std.Io.Writer, session_id: []const u8) !void {
     try jw.write("init");
     try jw.objectField("session_id");
     try jw.write(session_id);
+    try jw.endObject();
+    try writer.writeAll("\n");
+}
+
+/// Emit a `{"type":"pong","ts":<unix_ms>}` health-probe response. Produced by
+/// the main event loop in reply to a `ping` frame; its arrival proves the loop
+/// is not wedged (see SPEC §2.7).
+fn emitPong(writer: *std.Io.Writer) !void {
+    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("pong");
+    try jw.objectField("ts");
+    try jw.write(std.time.milliTimestamp());
     try jw.endObject();
     try writer.writeAll("\n");
 }
@@ -411,9 +439,53 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     const session_start_deadline_ns: i128 = trace_start + @as(i128, @intCast(opts.session_start_timeout_ms)) * std.time.ns_per_ms;
     var stdin_eof = false;
 
+    // PTY byte-rate trace: emit one structured line per interval so we can
+    // see whether Ink keeps rendering during a real wedge (spinner ticking
+    // → pty_delta > 0) vs. a fully stuck process (pty_delta == 0).
+    //
+    // Configurable via CLAUDE_P_PTY_TRACE:
+    //   unset                  -> default 60s interval
+    //   "0"/"off"/"false"/"no" -> disabled (no trace lines)
+    //   <positive integer>     -> interval in seconds
+    var pty_trace_enabled = true;
+    var pty_trace_interval_ns: i128 = 60 * std.time.ns_per_s;
+    if (std.posix.getenv("CLAUDE_P_PTY_TRACE")) |raw| {
+        const v = std.mem.trim(u8, raw, " \t\r\n");
+        if (v.len == 0) {
+            // empty -> keep default
+        } else if (std.mem.eql(u8, v, "0") or
+            std.ascii.eqlIgnoreCase(v, "off") or
+            std.ascii.eqlIgnoreCase(v, "false") or
+            std.ascii.eqlIgnoreCase(v, "no"))
+        {
+            pty_trace_enabled = false;
+        } else if (std.fmt.parseInt(u32, v, 10)) |secs| {
+            if (secs > 0) pty_trace_interval_ns = @as(i128, secs) * std.time.ns_per_s;
+        } else |_| {
+            // unparseable -> keep default 60s
+        }
+    }
+    var next_pty_trace_ns: i128 = trace_start + pty_trace_interval_ns;
+    var last_pty_bytes_seen: u64 = 0;
+
     while (true) {
         // ----- timeout checks -----
         const now_ns: i128 = std.time.nanoTimestamp();
+
+        if (pty_trace_enabled and now_ns >= next_pty_trace_ns) {
+            const cur_bytes = shared.bytes_seen.load(.seq_cst);
+            const delta = cur_bytes - last_pty_bytes_seen;
+            const last_out: i64 = shared.last_output_ns.load(.seq_cst);
+            const last_out_age_ms: i64 = if (last_out == 0) -1 else @intCast(@divTrunc(now_ns - @as(i128, last_out), std.time.ns_per_ms));
+            const turn_age_ms: i64 = if (turn_start_ns == 0) -1 else @intCast(@divTrunc(now_ns - turn_start_ns, std.time.ns_per_ms));
+            const transcript_pos: u64 = if (tailer) |t| t.pos else 0;
+            std.debug.print("[pty-trace] state={s} pty_bytes={d} pty_delta={d} last_byte_age_ms={d} turn_age_ms={d} transcript_pos={d}\n", .{
+                @tagName(state), cur_bytes, delta, last_out_age_ms, turn_age_ms, transcript_pos,
+            });
+            last_pty_bytes_seen = cur_bytes;
+            next_pty_trace_ns = now_ns + pty_trace_interval_ns;
+        }
+
         if (state == .waiting_for_ready and now_ns > session_start_deadline_ns) {
             return RunError.SessionStartTimeout;
         }
@@ -616,7 +688,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
             }
             while (std.mem.indexOfScalar(u8, stdin_buf.items, '\n')) |nl| {
                 const line = stdin_buf.items[0..nl];
-                if (try parseUserMessageContent(allocator, line)) |content| {
+                if (isPingFrame(allocator, line)) {
+                    // Answered inline by the main loop — proves the loop is live.
+                    emitPong(stdout) catch {};
+                    stdout.flush() catch {};
+                } else if (try parseUserMessageContent(allocator, line)) |content| {
                     try prompt_queue.append(allocator, content);
                 }
                 std.mem.copyForwards(u8, stdin_buf.items, stdin_buf.items[nl + 1 ..]);
@@ -693,6 +769,34 @@ test "parseUserMessageContent: non-user type returns null" {
 
 test "parseUserMessageContent: malformed returns null" {
     try testing.expectEqual(@as(?[]u8, null), try parseUserMessageContent(testing.allocator, "not json"));
+}
+
+test "isPingFrame: ping frame recognized" {
+    try testing.expect(isPingFrame(testing.allocator, "{\"type\":\"ping\"}"));
+    try testing.expect(isPingFrame(testing.allocator, "{\"type\":\"ping\",\"id\":7}"));
+}
+
+test "isPingFrame: user frame is not a ping" {
+    const line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}";
+    try testing.expect(!isPingFrame(testing.allocator, line));
+}
+
+test "isPingFrame: malformed / non-ping returns false" {
+    try testing.expect(!isPingFrame(testing.allocator, "not json"));
+    try testing.expect(!isPingFrame(testing.allocator, "{\"type\":\"system\"}"));
+    try testing.expect(!isPingFrame(testing.allocator, "{\"foo\":1}"));
+}
+
+test "emitPong: shape is a single-line pong object with ts" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitPong(&aw.writer);
+    buf = aw.toArrayList();
+    const out = buf.items;
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\"type\":\"pong\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"ts\":") != null);
 }
 
 test "idleTimedOut: busy + stale last_output trips" {

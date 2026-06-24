@@ -20,7 +20,7 @@ pub const Result = driver.Result;
 pub const Usage = transcript.Usage;
 pub const OutputFormat = args.OutputFormat;
 
-pub const version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 0 };
+pub const version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 2 };
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     return driver.run(allocator, opts);
