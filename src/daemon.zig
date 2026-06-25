@@ -78,6 +78,11 @@ pub const RunError = error{
     SpawnFailed,
 } || std.mem.Allocator.Error;
 
+/// Defensive window between injecting ESC for an `interrupt` and synthesizing
+/// the `interrupted` result. Lets a genuinely-racing real Stop win first; the
+/// spike shows generation ceases ~200ms after ESC, so 1.5s is ample headroom.
+const interrupt_synth_window_ns: i128 = 1500 * std.time.ns_per_ms;
+
 const State = enum {
     /// Spawned, waiting for SessionStart hook.
     waiting_for_ready,
@@ -214,6 +219,19 @@ fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
     return std.mem.eql(u8, tval.string, "ping");
 }
 
+/// True if `line` is a `{"type":"interrupt"}` cancel frame. Classified in the
+/// stdin loop like `isPingFrame`; only acts while `busy` (SPEC §2.7, path B).
+fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const tval = parsed.value.object.get("type") orelse return false;
+    if (tval != .string) return false;
+    return std.mem.eql(u8, tval.string, "interrupt");
+}
+
 /// Read the byte range [start_pos..end_pos) from a file via pread. Caller
 /// owns the returned slice.
 fn readFileRange(allocator: std.mem.Allocator, path: []const u8, start_pos: u64, end_pos: u64) ![]u8 {
@@ -334,6 +352,27 @@ fn emitErrorResult(writer: *std.Io.Writer, reason: []const u8, session_id: []con
     try jw.write(true);
     try jw.objectField("error");
     try jw.write(reason);
+    try jw.objectField("session_id");
+    try jw.write(session_id);
+    try jw.objectField("duration_ms");
+    try jw.write(duration_ms);
+    try jw.endObject();
+    try writer.writeAll("\n");
+}
+
+/// Emit a terminal `result`/`interrupted` envelope after an `interrupt` frame
+/// cancels a turn (SPEC §2.7, path B). Not an error — `subtype:"interrupted"`
+/// lets the hub tell a cancel apart from a normal completion. ESC does not fire
+/// the Stop hook, so the daemon synthesizes this instead of waiting for one.
+fn emitInterruptedResult(writer: *std.Io.Writer, session_id: []const u8, duration_ms: u64) !void {
+    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("result");
+    try jw.objectField("subtype");
+    try jw.write("interrupted");
+    try jw.objectField("is_error");
+    try jw.write(false);
     try jw.objectField("session_id");
     try jw.write(session_id);
     try jw.objectField("duration_ms");
@@ -467,6 +506,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     }
 
     var turn_start_ns: i128 = 0;
+    // Non-zero while an `interrupt` frame is in flight: timestamp of the ESC
+    // injection. After a short defensive window (letting a genuinely-racing real
+    // Stop win) the loop synthesizes an `interrupted` result and returns to idle
+    // — ESC does not fire Stop, so we must not wait for one (SPEC §2.7, path B).
+    var interrupt_pending_ns: i128 = 0;
     // Bytes already accounted for in a prior turn's result envelope. Lets us
     // compute per-turn totals from the JSONL slice [turn_start_pos..tailer.pos).
     var turn_start_pos: u64 = 0;
@@ -518,6 +562,26 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
             });
             last_pty_bytes_seen = cur_bytes;
             next_pty_trace_ns = now_ns + pty_trace_interval_ns;
+        }
+
+        // ----- interrupt synthesis (path B) — runs BEFORE the idle watchdog -----
+        // ESC stops generation but never fires Stop, so after a short defensive
+        // window we synthesize the `interrupted` result and return to idle. This
+        // wins over the idle watchdog so an interrupt never decays into an
+        // idle_timeout error (and works even when --idle-timeout is disabled).
+        if (interrupt_pending_ns != 0) {
+            if (state != .busy) {
+                // A genuinely-racing real Stop already finished the turn.
+                interrupt_pending_ns = 0;
+            } else if (now_ns - interrupt_pending_ns > interrupt_synth_window_ns) {
+                const dur_ms: u64 = @intCast(@divTrunc(now_ns - turn_start_ns, std.time.ns_per_ms));
+                emitInterruptedResult(stdout, session_id, dur_ms) catch {};
+                stdout.flush() catch {};
+                if (tailer) |t| turn_start_pos = t.pos;
+                state = .idle;
+                interrupt_pending_ns = 0;
+                traceFmt(opts, trace_start, "interrupt: synthesized interrupted result", .{});
+            }
         }
 
         if (state == .waiting_for_ready and now_ns > session_start_deadline_ns) {
@@ -736,6 +800,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
                     // Answered inline by the main loop — proves the loop is live.
                     emitPong(stdout) catch {};
                     stdout.flush() catch {};
+                } else if (isInterruptFrame(allocator, line)) {
+                    // Cancel the in-flight turn. Only meaningful while busy; a
+                    // no-op otherwise (no inject, no frame — SPEC §2.7 / B-2).
+                    if (state == .busy and interrupt_pending_ns == 0) {
+                        traceFmt(opts, trace_start, "interrupt frame: injecting ESC", .{});
+                        session.writeInput("\x1b") catch {};
+                        interrupt_pending_ns = std.time.nanoTimestamp();
+                    } else {
+                        traceFmt(opts, trace_start, "interrupt frame ignored (state={s})", .{@tagName(state)});
+                    }
                 } else if (try parseUserMessageContent(allocator, line)) |content| {
                     try prompt_queue.append(allocator, content);
                 }
@@ -829,6 +903,36 @@ test "isPingFrame: malformed / non-ping returns false" {
     try testing.expect(!isPingFrame(testing.allocator, "not json"));
     try testing.expect(!isPingFrame(testing.allocator, "{\"type\":\"system\"}"));
     try testing.expect(!isPingFrame(testing.allocator, "{\"foo\":1}"));
+}
+
+test "isInterruptFrame: interrupt frame recognized (with/without id)" {
+    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
+    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\",\"id\":7}"));
+}
+
+test "isInterruptFrame: ping/user/malformed are not interrupts" {
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":\"ping\"}"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "not json"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"foo\":1}"));
+}
+
+test "emitInterruptedResult: result/interrupted envelope, not an error" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitInterruptedResult(&aw.writer, "sess-9", 4321);
+    buf = aw.toArrayList();
+    const out = buf.items;
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("result", obj.get("type").?.string);
+    try testing.expectEqualStrings("interrupted", obj.get("subtype").?.string);
+    try testing.expect(!obj.get("is_error").?.bool);
+    try testing.expectEqualStrings("sess-9", obj.get("session_id").?.string);
+    try testing.expectEqual(@as(i64, 4321), obj.get("duration_ms").?.integer);
 }
 
 test "emitPong: shape is a single-line pong object with ts" {

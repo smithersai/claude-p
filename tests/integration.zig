@@ -38,6 +38,32 @@ fn writeExecScript(dir: []const u8, name: []const u8, body: []const u8, allocato
     return path;
 }
 
+/// Poll-read a child's stdout into `acc` until `needle` appears or the deadline
+/// elapses. Used to drive a long-lived daemon subprocess line-by-line.
+fn readStdoutUntil(
+    allocator: std.mem.Allocator,
+    fd: std.posix.fd_t,
+    acc: *std.ArrayList(u8),
+    needle: []const u8,
+    deadline_ms: i64,
+) !void {
+    if (std.mem.indexOf(u8, acc.items, needle) != null) return;
+    var rbuf: [4096]u8 = undefined;
+    const start = std.time.milliTimestamp();
+    while (std.time.milliTimestamp() - start < deadline_ms) {
+        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&pfd, 100) catch 0;
+        if (ready == 0) continue;
+        if ((pfd[0].revents & std.posix.POLL.IN) != 0) {
+            const n = std.posix.read(fd, &rbuf) catch 0;
+            if (n == 0) break; // EOF
+            try acc.appendSlice(allocator, rbuf[0..n]);
+            if (std.mem.indexOf(u8, acc.items, needle) != null) return;
+        } else break; // HUP/ERR
+    }
+    return error.NeedleNotFound;
+}
+
 // P0-2: a watchdog trip must emit a terminal error-result frame on stdout
 // *before* the daemon exits — never a silent dead pipe (SPEC §2.7). This is
 // deterministic and needs no real `claude`: a fake child that stays alive but
@@ -262,4 +288,55 @@ test "real claude: stream-json arrives as JSONL ending in a result line" {
     try result.write(std.testing.allocator, &dup_aw.writer, .stream_json);
     dup = dup_aw.toArrayList();
     try std.testing.expectEqual(@as(usize, 0), dup.items.len);
+}
+
+// Phase 1 / B-3..B-6: an `interrupt` frame cancels the in-flight turn, the
+// daemon synthesizes a terminal `interrupted` result (ESC fires no Stop), the
+// session stays reusable, and the daemon process is never killed. Real claude.
+test "real claude: interrupt cancels turn, synthesizes interrupted, session reusable" {
+    if (!e2eEnabled()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var child = std.process.Child.init(&.{
+        claudePBin(), "daemon",
+        "--dangerously-skip-permissions",
+        "--idle-timeout", "0", // watchdog OFF: interrupt synthesis must stand alone
+    }, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const out_fd = child.stdout.?.handle;
+
+    var acc: std.ArrayList(u8) = .{};
+    defer acc.deinit(allocator);
+
+    // Session ready.
+    try readStdoutUntil(allocator, out_fd, &acc, "\"subtype\":\"init\"", 120_000);
+
+    // Kick off a long turn, then let it get well underway before interrupting.
+    try child.stdin.?.writeAll(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":" ++
+            "\"Count from 1 to 500, one number per line, nothing else. Do not stop early.\"}}\n",
+    );
+    std.Thread.sleep(4 * std.time.ns_per_s);
+
+    // Interrupt → expect a synthesized interrupted result quickly (B-3/B-4).
+    try child.stdin.?.writeAll("{\"type\":\"interrupt\"}\n");
+    try readStdoutUntil(allocator, out_fd, &acc, "\"subtype\":\"interrupted\"", 10_000);
+    // B-4: never decayed into an idle_timeout.
+    try std.testing.expect(std.mem.indexOf(u8, acc.items, "idle_timeout") == null);
+
+    // B-5/B-6: same session still answers the next prompt (proves the daemon and
+    // its zmux session were not torn down).
+    const mark = acc.items.len;
+    try child.stdin.?.writeAll(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Reply with exactly: REUSE_OK\"}}\n",
+    );
+    try readStdoutUntil(allocator, out_fd, &acc, "\"subtype\":\"success\"", 90_000);
+    try std.testing.expect(acc.items.len > mark);
+
+    child.stdin.?.close();
+    child.stdin = null;
+    _ = child.wait() catch {};
 }

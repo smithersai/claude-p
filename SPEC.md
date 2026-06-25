@@ -159,6 +159,7 @@ until stdin EOF (then it shuts down after the current turn) or the child exits.
 | ----- | ----- | ------ |
 | user message | `{"type":"user","message":{"role":"user","content":"…"}}` (also accepts top-level `content`, or a content-block array) | Queued; dispatched to the PTY when the session is idle. |
 | ping | `{"type":"ping"}` | Health probe. Handled inline in the main event loop; answered immediately with a `pong`. Never queued, never reaches `claude`. |
+| interrupt | `{"type":"interrupt"}` | Cancel the in-flight turn (see below). Only acts while `busy`; a no-op otherwise. Does **not** kill the daemon or the session. |
 
 **stdout frames (daemon → hub):**
 
@@ -179,6 +180,24 @@ daemon loop still answers pings); detecting a stuck *child* is the caller's job
 answers pings in every state (`waiting_for_ready`, `idle`, `busy`) and during a
 long busy turn — a healthy long turn never blocks the loop. Absence of `pong`
 within the caller's timeout means the daemon loop itself is stuck.
+
+**Interrupt contract (cancel without teardown).** An `interrupt` frame cancels
+the current turn the way `zmuxd`'s `sendKey(ESC)` does — without killing the
+daemon or losing the session. While `busy`, the daemon injects ESC (`0x1b`)
+into the PTY. A Phase 0 spike (`src/spike_interrupt.zig`) established that ESC
+**reliably stops generation and leaves the session reusable, but does NOT fire
+the Stop hook**. So the daemon cannot wait for a Stop that never comes (that
+would hang until `--idle-timeout`). Instead, after a short defensive window
+(letting any genuinely-racing real Stop win), it **synthesizes** a terminal
+result frame and returns to `idle`:
+
+```
+{"type":"result","subtype":"interrupted","is_error":false,"session_id":"…","duration_ms":<ms>}
+```
+
+`subtype:"interrupted"` lets the hub distinguish a cancel from a normal
+completion. An `interrupt` while not `busy` is a no-op (no inject, no frame).
+The session stays live: the next `user` frame runs normally.
 
 **Error-result contract (no silent teardown).** When the daemon gives up on a
 turn it MUST first emit a terminal `error result` frame on stdout, *then* exit
