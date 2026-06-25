@@ -128,8 +128,10 @@ pub fn main() !void {
     var env_map = try std.process.getEnvMap(allocator);
     defer env_map.deinit();
     var it = env_map.iterator();
-    while (it.next()) |e|
+    while (it.next()) |e| {
+        if (driver.shouldStripChildEnv(e.key_ptr.*)) continue; // clean top-level child session
         try env_list.append(allocator, try std.fmt.allocPrint(allocator, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
+    }
     try env_list.append(allocator, try std.fmt.allocPrint(allocator, "CLAUDE_P_FIFO={s}", .{harness.fifo_path}));
     try env_list.append(allocator, try allocator.dupe(u8, "TERM=xterm-256color"));
 

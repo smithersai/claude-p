@@ -423,6 +423,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     defer env_map.deinit();
     var env_it = env_map.iterator();
     while (env_it.next()) |e| {
+        // Drop the parent's Claude Code nesting markers so the child claude is a
+        // clean top-level session (writes its own transcript). See
+        // driver.shouldStripChildEnv.
+        if (driver_mod.shouldStripChildEnv(e.key_ptr.*)) continue;
         try env_list.append(
             allocator,
             try std.fmt.allocPrint(allocator, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }),

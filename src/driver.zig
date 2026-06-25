@@ -91,6 +91,21 @@ pub const RunError = error{
 } || std.mem.Allocator.Error;
 
 /// Build the argv for the child `claude` invocation.
+/// True for env vars a parent Claude Code session exports that mark a *nested*
+/// invocation. If the child `claude` inherits them it behaves as a nested/child
+/// session and does NOT persist a standalone transcript — the file claude-p
+/// tails for stream-json. Stripping them makes the child a clean top-level
+/// session regardless of where claude-p was launched from (e.g. from inside
+/// Claude Code). Mirrors meridian's pane-env stripping. Note: only the
+/// `CLAUDE_CODE_` family is stripped — `CLAUDE_CONFIG_DIR` (auth/config) and
+/// other `CLAUDE_*` vars are preserved.
+pub fn shouldStripChildEnv(key: []const u8) bool {
+    if (std.mem.eql(u8, key, "CLAUDECODE")) return true;
+    if (std.mem.eql(u8, key, "AI_AGENT")) return true;
+    if (std.mem.startsWith(u8, key, "CLAUDE_CODE_")) return true;
+    return false;
+}
+
 pub fn buildArgv(
     allocator: std.mem.Allocator,
     binary: []const u8,
@@ -359,11 +374,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
         for (env_list.items) |s| allocator.free(s);
         env_list.deinit(allocator);
     }
-    // Inherit existing environment.
+    // Inherit existing environment, minus the parent's Claude Code nesting
+    // markers (see shouldStripChildEnv) so the child is a clean top-level session.
     var env_iter = try std.process.getEnvMap(allocator);
     defer env_iter.deinit();
     var it = env_iter.iterator();
     while (it.next()) |e| {
+        if (shouldStripChildEnv(e.key_ptr.*)) continue;
         try env_list.append(
             allocator,
             try std.fmt.allocPrint(allocator, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }),
@@ -850,6 +867,24 @@ pub fn stripCsi(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 // -------- tests --------
 
 const testing = std.testing;
+
+test "shouldStripChildEnv: nested-session markers stripped, config/unrelated kept" {
+    // Stripped: a parent Claude Code session's nesting markers — inherited by the
+    // child `claude` they make it act as a nested session and suppress the
+    // standalone transcript that claude-p tails for stream-json.
+    try testing.expect(shouldStripChildEnv("CLAUDECODE"));
+    try testing.expect(shouldStripChildEnv("AI_AGENT"));
+    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_SESSION_ID"));
+    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_CHILD_SESSION"));
+    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_ENTRYPOINT"));
+    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_EXECPATH"));
+    // Kept: auth/config and unrelated vars (must NOT be stripped).
+    try testing.expect(!shouldStripChildEnv("CLAUDE_CONFIG_DIR")); // auth lives here
+    try testing.expect(!shouldStripChildEnv("CLAUDE_P_FIFO"));
+    try testing.expect(!shouldStripChildEnv("PATH"));
+    try testing.expect(!shouldStripChildEnv("HOME"));
+    try testing.expect(!shouldStripChildEnv("HTTPS_PROXY"));
+}
 
 test "buildArgv: minimal" {
     var argv = try buildArgv(testing.allocator, "/bin/claude", "{}", .{
