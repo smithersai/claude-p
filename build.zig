@@ -46,6 +46,30 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
 
     // ------------------------------------------------------------------
+    // spike-interrupt — Phase 0 throwaway experiment (interrupt-frame spec).
+    // `zig build spike-interrupt -- esc|double-esc|ctrl-c`
+    // ------------------------------------------------------------------
+    const spike = b.addExecutable(.{
+        .name = "spike-interrupt",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/spike_interrupt.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "claude_p", .module = claude_p },
+                .{ .name = "zmux", .module = zmux_mod },
+            },
+        }),
+    });
+    if (target.result.os.tag == .linux) spike.linkSystemLibrary("util");
+    if (target.result.os.tag == .macos) spike.linkSystemLibrary("proc");
+    const spike_run = b.addRunArtifact(spike);
+    if (b.args) |args| spike_run.addArgs(args);
+    const spike_step = b.step("spike-interrupt", "Run the interrupt-frame Phase 0 spike (esc|double-esc|ctrl-c)");
+    spike_step.dependOn(&spike_run.step);
+
+    // ------------------------------------------------------------------
     // tests
     // ------------------------------------------------------------------
     const mod_tests = b.addTest(.{ .root_module = claude_p });
