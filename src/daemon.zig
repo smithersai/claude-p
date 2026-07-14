@@ -619,6 +619,12 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
                                 trace(opts, trace_start, "daemon ready for prompts");
                             }
                         },
+                        .user_prompt_submit => {
+                            // Daemon tracks turn liveness via its prompt queue
+                            // + idle watchdog; the hook fires (registered in
+                            // the shared settings) but needs no action here.
+                            trace(opts, trace_start, "UserPromptSubmit hook fired");
+                        },
                         .stop => {
                             trace(opts, trace_start, "Stop hook fired");
                             if (transcript_path == null) {

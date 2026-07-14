@@ -80,6 +80,7 @@ pub const Result = struct {
 pub const RunError = error{
     SessionStartTimeout,
     StopTimeout,
+    PromptNotAccepted,
     TranscriptUnavailable,
     SpawnFailed,
     NoPromptSupplied,
@@ -209,6 +210,52 @@ pub const ink_enter_debounce_ms: u64 = 120;
 /// dismiss the trust dialog and our `2` lands on a half-rendered screen.
 pub const dialog_quiescence_ms: u64 = 80;
 
+/// After typing the prompt we expect claude to acknowledge it — either the
+/// UserPromptSubmit hook fires or the session transcript appears on disk (its
+/// first line is the user turn). If neither happens within this window, Ink
+/// dropped our keystrokes (the same mid-render key-drop the dialog handling
+/// fights) and the turn never started. Tuned well above the sub-second submit
+/// latency so we never re-inject a prompt that merely registered late.
+pub const prompt_accept_timeout_ms: u64 = 4000;
+
+/// Total prompt (re-)injection attempts before giving up. The first is the
+/// normal type after SessionStart; the rest are re-injections. Bounds a fully
+/// wedged launch to ~prompt_accept_timeout_ms × max_prompt_injections instead
+/// of the full `--timeout`: previously a dropped prompt meant claude-p waited
+/// the entire wall-clock cap for a Stop the never-started turn never sends
+/// (the 60-minute "StopTimeout" hang).
+pub const max_prompt_injections: u32 = 4;
+
+pub const WatchdogAction = enum { wait, reinject, give_up };
+
+/// Prompt-acceptance watchdog decision, factored out as a pure function so the
+/// re-inject / give-up policy is unit-testable without a live PTY.
+pub fn promptWatchdogAction(accepted: bool, injections: u32, since_typed_ms: i64) WatchdogAction {
+    if (accepted) return .wait;
+    if (since_typed_ms <= @as(i64, @intCast(prompt_accept_timeout_ms))) return .wait;
+    if (injections >= max_prompt_injections) return .give_up;
+    return .reinject;
+}
+
+test "promptWatchdogAction: accepted always waits" {
+    try std.testing.expectEqual(WatchdogAction.wait, promptWatchdogAction(true, 1, 999_999));
+    try std.testing.expectEqual(WatchdogAction.wait, promptWatchdogAction(true, max_prompt_injections, 999_999));
+}
+
+test "promptWatchdogAction: within window waits" {
+    try std.testing.expectEqual(WatchdogAction.wait, promptWatchdogAction(false, 1, 0));
+    try std.testing.expectEqual(WatchdogAction.wait, promptWatchdogAction(false, 1, @intCast(prompt_accept_timeout_ms)));
+}
+
+test "promptWatchdogAction: past window with attempts left re-injects" {
+    try std.testing.expectEqual(WatchdogAction.reinject, promptWatchdogAction(false, 1, @as(i64, @intCast(prompt_accept_timeout_ms)) + 1));
+    try std.testing.expectEqual(WatchdogAction.reinject, promptWatchdogAction(false, max_prompt_injections - 1, 10_000));
+}
+
+test "promptWatchdogAction: past window with attempts exhausted gives up" {
+    try std.testing.expectEqual(WatchdogAction.give_up, promptWatchdogAction(false, max_prompt_injections, 10_000));
+}
+
 /// Block until the child PTY has been quiet for at least `ink_quiescence_ms`,
 /// up to a cap of `ink_max_wait_ms`. Replaces the hardcoded "give Ink time
 /// to settle" sleep from the original fix — adapts to whatever boot latency
@@ -232,6 +279,26 @@ pub fn waitForInkQuiescent(opts: Options, trace_start: i128, shared: *SharedStat
         }
         std.Thread.sleep(15 * std.time.ns_per_ms);
     }
+}
+
+/// Type the prompt into claude's input box: wait for Ink to settle, send the
+/// prompt body, pause so Ink's bracketed-paste heuristic doesn't merge the
+/// trailing Enter into the same burst (which drops `\r` into the buffer instead
+/// of submitting), then send Enter.
+fn typePrompt(session: anytype, opts: Options, trace_start: i128, shared: *SharedState) void {
+    waitForInkQuiescent(opts, trace_start, shared);
+    session.send(opts.prompt, false) catch {};
+    std.Thread.sleep(ink_enter_debounce_ms * std.time.ns_per_ms);
+    session.send("", true) catch {};
+}
+
+/// Re-inject the prompt after a dropped first attempt. Sends Ctrl-U first to
+/// clear any residual input, so a first attempt whose body landed but whose
+/// Enter was dropped doesn't concatenate into "/review …/review …".
+fn reinjectPrompt(session: anytype, opts: Options, trace_start: i128, shared: *SharedState) void {
+    session.send("\x15", false) catch {}; // Ctrl-U: clear the input line
+    std.Thread.sleep(ink_enter_debounce_ms * std.time.ns_per_ms);
+    typePrompt(session, opts, trace_start, shared);
 }
 
 /// Emit a debug-gated trace line to stderr with the elapsed time since
@@ -413,6 +480,12 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     var state: enum { waiting_for_ready, awaiting_stop } = .waiting_for_ready;
     var first_emit_logged = false;
     var total_lines_streamed: usize = 0;
+
+    // Prompt-acceptance tracking (see promptWatchdogAction). After the prompt
+    // is typed we confirm claude actually received it; if not, we re-inject.
+    var prompt_typed_ns: i128 = 0;
+    var prompt_injections: u32 = 0;
+    var prompt_accepted = false;
 
     var fifo_buf: std.ArrayList(u8) = .{};
     defer fifo_buf.deinit(allocator);
@@ -598,39 +671,28 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                         .session_start => {
                             trace(opts, trace_start, "SessionStart hook fired (Ink is up)");
                             // SessionStart payloads carry the transcript
-                            // path. Stash it so the main loop can keep
-                            // trying to open the tailer until the file
-                            // actually exists on disk.
-                            if (streaming and transcript_path == null) {
+                            // path. Stash it unconditionally: the streaming
+                            // tailer needs it, and the prompt-acceptance
+                            // watchdog uses the file's appearance on disk as
+                            // proof claude received the prompt.
+                            if (transcript_path == null) {
                                 if (try hook_mod.extractTranscriptPath(allocator, ev.payload)) |p| {
                                     transcript_path = p;
                                     traceFmt(opts, trace_start, "transcript_path from SessionStart: {s}", .{p});
                                 }
                             }
                             if (state == .waiting_for_ready) {
-                                // Wait for Ink to finish its initial render
-                                // before sending keystrokes. Signal: the PTY
-                                // output stream has been quiet for the
-                                // quiescence threshold below. Adaptive —
-                                // fast machines proceed in <100 ms, slow
-                                // ones get up to ink_max_wait_ms before we
-                                // give up and type anyway.
-                                waitForInkQuiescent(opts, trace_start, &shared);
                                 traceFmt(opts, trace_start, "typing prompt ({d} bytes)", .{opts.prompt.len});
-
-                                // Send prompt body, sleep, then Enter as a
-                                // separate event. Ink applies bracketed-paste
-                                // / burst-input heuristics: if `\r` arrives
-                                // in the same burst as the prompt, it lands
-                                // in the input buffer instead of triggering
-                                // submit. The gap makes Ink see two events.
-                                session.send(opts.prompt, false) catch {};
-                                std.Thread.sleep(ink_enter_debounce_ms * std.time.ns_per_ms);
-                                session.send("", true) catch {};
-                                trace(opts, trace_start, "prompt + Enter sent; waiting on claude API");
-
+                                typePrompt(session, opts, trace_start, &shared);
+                                trace(opts, trace_start, "prompt + Enter sent; confirming acceptance");
+                                prompt_typed_ns = std.time.nanoTimestamp();
+                                prompt_injections = 1;
                                 state = .awaiting_stop;
                             }
+                        },
+                        .user_prompt_submit => {
+                            trace(opts, trace_start, "UserPromptSubmit hook fired (prompt accepted)");
+                            prompt_accepted = true;
                         },
                         .stop => {
                             trace(opts, trace_start, "Stop hook fired (assistant turn finished)");
@@ -645,6 +707,34 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                 std.mem.copyForwards(u8, fifo_buf.items, fifo_buf.items[nl + 1 ..]);
                 fifo_buf.shrinkRetainingCapacity(fifo_buf.items.len - (nl + 1));
                 if (stop_payload_owned != null) break;
+            }
+        }
+
+        // Prompt-acceptance watchdog. If claude never acknowledged the prompt
+        // (no UserPromptSubmit hook and no transcript on disk), Ink dropped our
+        // keystrokes — re-inject, then fail fast rather than wait the full
+        // `--timeout` for a Stop that a never-started turn will never send.
+        if (state == .awaiting_stop and stop_payload_owned == null) {
+            if (!prompt_accepted) {
+                if (transcript_path) |p| {
+                    if (std.fs.cwd().access(p, .{})) |_| {
+                        prompt_accepted = true;
+                    } else |_| {}
+                }
+            }
+            const since_typed_ms: i64 = @intCast(@divTrunc(now - prompt_typed_ns, std.time.ns_per_ms));
+            switch (promptWatchdogAction(prompt_accepted, prompt_injections, since_typed_ms)) {
+                .wait => {},
+                .reinject => {
+                    traceFmt(opts, trace_start, "prompt unacknowledged after {d}ms — re-injecting (attempt {d}/{d})", .{ since_typed_ms, prompt_injections + 1, max_prompt_injections });
+                    reinjectPrompt(session, opts, trace_start, &shared);
+                    prompt_injections += 1;
+                    prompt_typed_ns = std.time.nanoTimestamp();
+                },
+                .give_up => {
+                    traceFmt(opts, trace_start, "prompt not accepted after {d} injection(s) — aborting", .{prompt_injections});
+                    return RunError.PromptNotAccepted;
+                },
             }
         }
 

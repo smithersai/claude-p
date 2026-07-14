@@ -98,8 +98,9 @@ pub fn create(allocator: std.mem.Allocator) !HookHarness {
 }
 
 fn buildSettingsJson(allocator: std.mem.Allocator, script_path: []const u8) ![]u8 {
-    // Two hooks — SessionStart (so we know the UI is ready) and Stop (turn
-    // finished). The relay script reads stdin and appends a line to the FIFO.
+    // Three hooks — SessionStart (UI is ready), UserPromptSubmit (claude
+    // actually accepted our typed prompt), and Stop (turn finished). The relay
+    // script reads stdin and appends a line to the FIFO.
     var buf: std.ArrayList(u8) = .{};
     defer buf.deinit(allocator);
     var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
@@ -109,6 +110,7 @@ fn buildSettingsJson(allocator: std.mem.Allocator, script_path: []const u8) ![]u
     try js.objectField("hooks");
     try js.beginObject();
     try writeEvent(&js, "SessionStart", script_path);
+    try writeEvent(&js, "UserPromptSubmit", script_path);
     try writeEvent(&js, "Stop", script_path);
     try js.endObject();
     try js.endObject();
@@ -144,11 +146,13 @@ fn writeEvent(js: *std.json.Stringify, event: []const u8, script_path: []const u
 
 pub const HookEvent = enum {
     session_start,
+    user_prompt_submit,
     stop,
     unknown,
 
     pub fn fromString(s: []const u8) HookEvent {
         if (std.mem.eql(u8, s, "SessionStart")) return .session_start;
+        if (std.mem.eql(u8, s, "UserPromptSubmit")) return .user_prompt_submit;
         if (std.mem.eql(u8, s, "Stop")) return .stop;
         return .unknown;
     }
@@ -218,6 +222,7 @@ test "settings json: well-formed, contains both events" {
 
     const hooks = parsed.value.object.get("hooks").?.object;
     try testing.expect(hooks.get("SessionStart") != null);
+    try testing.expect(hooks.get("UserPromptSubmit") != null);
     try testing.expect(hooks.get("Stop") != null);
 
     // Each event maps to an array of matcher entries.
