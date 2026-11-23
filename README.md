@@ -9,8 +9,15 @@ A drop-in replacement for `claude -p` that drives the interactive
 
 Built using [smithers][smithers] self-improving harness.
 
+**Docs:** [smithersai.github.io/claude-p][docs] · [Getting Started][docs-start] · [Tutorials][docs-tutorials] · [How It Works][docs-arch] · [CLI Reference][docs-cli]
+
 [zmux]: https://github.com/smithersai/zmux
 [smithers]: https://github.com/smithersai/smithers
+[docs]: https://smithersai.github.io/claude-p/
+[docs-start]: https://smithersai.github.io/claude-p/getting-started/
+[docs-tutorials]: https://smithersai.github.io/claude-p/tutorials/first-automation/
+[docs-arch]: https://smithersai.github.io/claude-p/internals/architecture/
+[docs-cli]: https://smithersai.github.io/claude-p/reference/cli/
 
 ---
 
@@ -187,7 +194,7 @@ pub fn main() !void {
 }
 ```
 
-See [`src/root.zig`](./src/root.zig) and the [Zig Library API Reference](./docs/src/content/docs/reference/zig-api.mdx) for `extra_hooks`, `extra_settings_json`, live `stream_writer`, and `claude_p.daemon.run`.
+See [`src/root.zig`](./src/root.zig) and the [Zig Library API Reference](https://smithersai.github.io/claude-p/reference/zig-api/) for `extra_hooks`, `extra_settings_json`, live `stream_writer`, and `claude_p.daemon.run`.
 
 ---
 
@@ -197,7 +204,7 @@ See [`src/root.zig`](./src/root.zig) and the [Zig Library API Reference](./docs/
 git clone https://github.com/smithersai/claude-p
 cd claude-p
 zig build -Doptimize=ReleaseSafe                 # requires Zig 0.15.2
-zig build test                                   # 141 unit tests (no external claude needed)
+zig build test                                   # 227 unit & property tests (no external claude needed)
 CLAUDE_P_E2E=1 zig build test-integration        # 8 real-claude end-to-end tests
 CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="daemon"
 ```
