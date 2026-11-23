@@ -108,7 +108,10 @@ function assetName() {
 function parseSha256Sums(text) {
   const sums = new Map();
   for (const line of text.split(/\r?\n/)) {
-    const m = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    // `(?!\s)` pins the separator to the whole whitespace run. Without it a
+    // line that cannot match re-scans the name once per separator character,
+    // which is quadratic in a hostile SHA256SUMS line.
+    const m = line.trim().match(/^([0-9a-fA-F]{64})\s+(?!\s)\*?(.+)$/);
     if (m) sums.set(m[2].trim(), m[1].toLowerCase());
   }
   return sums;

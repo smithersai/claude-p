@@ -691,10 +691,12 @@ pub fn analyzeDialog(kind: DialogKind, stripped: []const u8) DialogAnalysis {
 
     // Skip an optional option number right after the pointer ("❯ 2. Yes").
     var j: usize = 0;
+    var cursor_numbered = false;
     while (j < rest.len and isSpace(rest[j])) : (j += 1) {}
     if (j < rest.len and rest[j] >= '1' and rest[j] <= '9') {
         if (looseMatch(rest[j + 1 ..], ".")) |dot| {
             rest = rest[j + 1 + dot ..];
+            cursor_numbered = true;
         }
     }
     if (looseStartsWithAny(rest, m.affirmative)) {
@@ -702,6 +704,9 @@ pub fn analyzeDialog(kind: DialogKind, stripped: []const u8) DialogAnalysis {
     } else if (looseStartsWithAny(rest, m.negative)) {
         out.selection = .negative;
     }
+    // A path ending in e.g. "9." can precede an unnumbered "Yes" row.
+    // A recognized, unnumbered cursor row identifies the current menu layout.
+    if (out.selection != .unknown and !cursor_numbered) out.affirmative_digit = null;
     return out;
 }
 
@@ -756,6 +761,11 @@ pub fn decideDialog(
         },
         .move_up, .move_down, .digit => {
             const fresh_kind = classifyDialog(fresh);
+            // A single read can contain both the final option repaint and the
+            // prompt footer. The cursor in that repaint is already stale.
+            if (fresh_kind == .none and lastMainUiMarkerPos(fresh) != null) {
+                return .{ .kind = .none, .action = .settled };
+            }
             const kind = if (fresh_kind != .none) fresh_kind else tracked;
             const analysis = analyzeDialog(kind, fresh);
             if (analysis.selection != .unknown) {
@@ -1450,12 +1460,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
 // ---------------------------------------------------------------------------
 
 /// Strip CSI / OSC / DCS escape sequences into caller-owned buffer `out`.
-/// `out.len` must be >= `bytes.len` (stripping never grows the input).
+/// Return the prefix of the stripped bytes that fits in `out`.
 pub fn stripCsiInto(out: []u8, bytes: []const u8) []u8 {
-    std.debug.assert(out.len >= bytes.len);
     var n: usize = 0;
     var i: usize = 0;
-    while (i < bytes.len) {
+    while (i < bytes.len and n < out.len) {
         const b = bytes[i];
         if (b != 0x1b) {
             out[n] = b;

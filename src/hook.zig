@@ -19,9 +19,16 @@ pub const CreateOptions = struct {
     /// event key. Relay hooks always remain first and authoritative.
     extra_hooks: []const ExtraHook = &.{},
     /// Optional JSON object whose top-level keys (other than `"hooks"`) are
-    /// merged into the generated `--settings` object.
+    /// merged into the generated `--settings` object. Nesting deeper than
+    /// `max_extra_settings_depth` is rejected.
     extra_settings_json: ?[]const u8 = null,
 };
+
+/// Maximum container nesting depth accepted in `extra_settings_json`, counting
+/// the top-level object as depth 1. `std.json.Stringify` tracks at most 256
+/// levels and indexes out of bounds beyond that, so deeper documents are
+/// rejected with `error.InvalidExtraSettings` instead of crashing.
+pub const max_extra_settings_depth: usize = 128;
 
 pub const HookHarness = struct {
     allocator: std.mem.Allocator,
@@ -150,14 +157,18 @@ fn formatRelayCommand(allocator: std.mem.Allocator, script_path: []const u8, eve
     return std.fmt.allocPrint(allocator, "'{s}' {s}", .{ escaped, event });
 }
 
-fn buildSettingsJson(
+pub fn buildSettingsJson(
     allocator: std.mem.Allocator,
     script_path: []const u8,
     opts: CreateOptions,
 ) ![]u8 {
     // Reject empty event names or commands up front before doing any work.
+    // Invalid UTF-8 is rejected too: JSON cannot carry it, and the serializer
+    // would emit the raw bytes and hand `claude` an unparseable `--settings`.
     for (opts.extra_hooks) |eh| {
         if (eh.event.len == 0 or eh.command.len == 0) return error.InvalidExtraSettings;
+        if (!std.unicode.utf8ValidateSlice(eh.event)) return error.InvalidExtraSettings;
+        if (!std.unicode.utf8ValidateSlice(eh.command)) return error.InvalidExtraSettings;
     }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -175,6 +186,7 @@ fn buildSettingsJson(
             else => return error.InvalidExtraSettings,
         };
         if (parsed != .object) return error.InvalidExtraSettings;
+        if (jsonNestingDepth(raw) > max_extra_settings_depth) return error.InvalidExtraSettings;
         break :blk parsed.object;
     } else null;
 
@@ -200,6 +212,32 @@ fn buildSettingsJson(
     };
 
     return try aw.toOwnedSlice();
+}
+
+/// Maximum container nesting depth of a syntactically valid JSON document.
+/// A scalar is depth 0; `{}` and `[]` are depth 1.
+fn jsonNestingDepth(valid_json: []const u8) usize {
+    var depth: usize = 0;
+    var max_depth: usize = 0;
+    var in_string = false;
+    var i: usize = 0;
+    while (i < valid_json.len) : (i += 1) {
+        const c = valid_json[i];
+        if (in_string) {
+            if (c == '\\') i += 1 else if (c == '"') in_string = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '{', '[' => {
+                depth += 1;
+                max_depth = @max(max_depth, depth);
+            },
+            '}', ']' => depth -|= 1,
+            else => {},
+        }
+    }
+    return max_depth;
 }
 
 fn writeSettingsJson(
@@ -443,6 +481,59 @@ test "settings json: rejects malformed extra_settings_json and empty extra_hooks
             .extra_hooks = &.{.{ .event = "Stop", .command = "" }},
         }),
     );
+}
+
+test "settings json: rejects extra_settings_json nested past max_extra_settings_depth" {
+    const a = testing.allocator;
+    const build = struct {
+        fn doc(allocator: std.mem.Allocator, depth: usize) ![]u8 {
+            // {"a":[[...]]} has `depth` containers including the top-level object.
+            const inner = depth - 1;
+            const buf = try allocator.alloc(u8, 5 + 2 * inner + 1 + 1);
+            @memcpy(buf[0..5], "{\"a\":");
+            @memset(buf[5 .. 5 + inner], '[');
+            @memset(buf[5 + inner .. 5 + 2 * inner], ']');
+            buf[5 + 2 * inner] = '}';
+            buf[5 + 2 * inner + 1] = ' ';
+            return buf;
+        }
+    };
+
+    const ok_doc = try build.doc(a, max_extra_settings_depth);
+    defer a.free(ok_doc);
+    const ok = try buildSettingsJson(a, "/tmp/hook.sh", .{ .extra_settings_json = ok_doc });
+    defer a.free(ok);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, ok, .{});
+    parsed.deinit();
+
+    // Depth 257 used to index past std.json.Stringify's 256-level nesting stack.
+    for ([_]usize{ max_extra_settings_depth + 1, 257, 5000 }) |depth| {
+        const deep = try build.doc(a, depth);
+        defer a.free(deep);
+        try testing.expectError(
+            error.InvalidExtraSettings,
+            buildSettingsJson(a, "/tmp/hook.sh", .{ .extra_settings_json = deep }),
+        );
+    }
+
+    // Brackets inside strings do not count toward depth.
+    const brackets_in_string = try buildSettingsJson(a, "/tmp/hook.sh", .{
+        .extra_settings_json = "{\"a\":\"" ++ "[" ** 400 ++ "\\\"{{\"}",
+    });
+    a.free(brackets_in_string);
+}
+
+test "settings json: rejects extra hooks that are not valid UTF-8" {
+    for ([_]ExtraHook{
+        .{ .event = "Stop\xff", .command = "echo hi" },
+        .{ .event = "Stop", .command = "echo \xc3" },
+        .{ .event = "Stop", .command = "\xed\xa0\x80" },
+    }) |eh| {
+        try testing.expectError(
+            error.InvalidExtraSettings,
+            createWithOptions(testing.allocator, .{ .extra_hooks = &.{eh} }),
+        );
+    }
 }
 
 test "settings json: allocation failures leak nothing" {

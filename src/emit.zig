@@ -29,11 +29,7 @@ pub fn emit(
 
 pub fn emitText(writer: *std.Io.Writer, env: ResultEnvelope) !void {
     try writer.writeAll(env.summary.final_text);
-    if (env.summary.final_text.len == 0 or
-        env.summary.final_text[env.summary.final_text.len - 1] != '\n')
-    {
-        try writer.writeAll("\n");
-    }
+    try writer.writeAll("\n");
 }
 
 pub fn emitJson(
@@ -90,7 +86,7 @@ pub fn emitStreamJson(
     // `result` event of the same shape as `emitJson`.
     try writer.writeAll(env.summary.jsonl_replay);
     // Ensure replay ends with a newline before appending the result line.
-    if (env.summary.jsonl_replay.len == 0 or
+    if (env.summary.jsonl_replay.len != 0 and
         env.summary.jsonl_replay[env.summary.jsonl_replay.len - 1] != '\n')
     {
         try writer.writeAll("\n");
@@ -180,14 +176,14 @@ test "emit text: final message + newline" {
     try testing.expectEqualStrings("hi\n", out);
 }
 
-test "emit text: does not double-newline if text already ends with newline" {
+test "emit text: preserves the final message newline before its delimiter" {
     const jsonl =
         \\{"type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"hi\n"}]}}
         \\
     ;
     const out = try parseAndEmit(testing.allocator, .text, jsonl);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings("hi\n", out);
+    try testing.expectEqualStrings("hi\n\n", out);
 }
 
 test "emit json: result object shape" {

@@ -45,6 +45,17 @@ pub const ParseError = error{
     InvalidJson,
 };
 
+// Dynamic JSON stores integers outside i64 as number strings. Accept the
+// full destination range and ignore invalid counters like other mistyped fields.
+fn unsignedField(comptime T: type, obj: std.json.ObjectMap, name: []const u8) ?T {
+    const value = obj.get(name) orelse return null;
+    return switch (value) {
+        .integer => |n| std.math.cast(T, n),
+        .number_string => |digits| std.fmt.parseUnsigned(T, digits, 10) catch null,
+        else => null,
+    };
+}
+
 /// Parse a transcript from raw JSONL bytes.
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary {
     var final_text_buf: std.ArrayList(u8) = .{};
@@ -105,7 +116,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
 
         if (std.mem.eql(u8, ty.string, "assistant")) {
             saw_assistant = true;
-            num_turns += 1;
+            num_turns +|= 1;
 
             // Reset and accumulate text from this assistant turn — we want
             // the *last* assistant message, so each new one overwrites.
@@ -129,22 +140,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
                     }
                     if (msg.object.get("usage")) |u| {
                         if (u == .object) {
-                            if (u.object.get("input_tokens")) |x|
-                                if (x == .integer) {
-                                    usage.input_tokens +%= @intCast(x.integer);
-                                };
-                            if (u.object.get("output_tokens")) |x|
-                                if (x == .integer) {
-                                    usage.output_tokens +%= @intCast(x.integer);
-                                };
-                            if (u.object.get("cache_read_input_tokens")) |x|
-                                if (x == .integer) {
-                                    usage.cache_read_input_tokens +%= @intCast(x.integer);
-                                };
-                            if (u.object.get("cache_creation_input_tokens")) |x|
-                                if (x == .integer) {
-                                    usage.cache_creation_input_tokens +%= @intCast(x.integer);
-                                };
+                            usage.input_tokens +%= unsignedField(u64, u.object, "input_tokens") orelse 0;
+                            usage.output_tokens +%= unsignedField(u64, u.object, "output_tokens") orelse 0;
+                            usage.cache_read_input_tokens +%= unsignedField(u64, u.object, "cache_read_input_tokens") orelse 0;
+                            usage.cache_creation_input_tokens +%= unsignedField(u64, u.object, "cache_creation_input_tokens") orelse 0;
                         }
                     }
                 }
@@ -162,19 +161,13 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
                 if (x == .bool) {
                     is_error = x.bool;
                 };
-            if (obj.get("num_turns")) |x|
-                if (x == .integer) {
-                    num_turns = @intCast(x.integer);
-                };
+            if (unsignedField(u32, obj, "num_turns")) |n| num_turns = n;
             if (obj.get("total_cost_usd")) |x| switch (x) {
                 .float => total_cost_usd = x.float,
                 .integer => total_cost_usd = @floatFromInt(x.integer),
                 else => {},
             };
-            if (obj.get("duration_api_ms")) |x|
-                if (x == .integer) {
-                    duration_api_ms = @intCast(x.integer);
-                };
+            if (unsignedField(u64, obj, "duration_api_ms")) |n| duration_api_ms = n;
         }
     }
 

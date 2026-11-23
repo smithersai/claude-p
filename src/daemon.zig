@@ -106,12 +106,8 @@ pub const State = enum {
 /// otherwise a long idle period leaves a stale timestamp that trips this on
 /// the very first busy loop even though the child is healthy and simply hasn't
 /// had time to respond to the new prompt yet.
-fn idleTimedOut(state: State, last_output_ns: i64, now_ns: i128, timeout_ms: u64) bool {
-    if (timeout_ms == 0) return false;
-    if (state != .busy) return false;
-    if (last_output_ns == 0) return false;
-    const idle_ms: i64 = @intCast(@divTrunc(now_ns - @as(i128, last_output_ns), std.time.ns_per_ms));
-    return idle_ms > @as(i64, @intCast(timeout_ms));
+pub fn idleTimedOut(state: State, last_output_ns: i64, now_ns: i128, timeout_ms: u64) bool {
+    return progressTimedOut(state, last_output_ns, now_ns, timeout_ms);
 }
 
 /// Decide whether a busy turn has stalled: the transcript file has not grown
@@ -124,11 +120,15 @@ fn idleTimedOut(state: State, last_output_ns: i64, now_ns: i128, timeout_ms: u64
 /// The caller MUST reset the baseline to "now" on the idle→busy transition
 /// and again each time the tailer reads new transcript bytes.
 pub fn transcriptStalled(state: State, last_transcript_advance_ns: i64, now_ns: i128, timeout_ms: u64) bool {
-    if (timeout_ms == 0) return false;
-    if (state != .busy) return false;
-    if (last_transcript_advance_ns == 0) return false;
-    const stalled_ms: i64 = @intCast(@divTrunc(now_ns - @as(i128, last_transcript_advance_ns), std.time.ns_per_ms));
-    return stalled_ms > @as(i64, @intCast(timeout_ms));
+    return progressTimedOut(state, last_transcript_advance_ns, now_ns, timeout_ms);
+}
+
+fn progressTimedOut(state: State, last_ns: i64, now_ns: i128, timeout_ms: u64) bool {
+    if (state != .busy or last_ns == 0 or timeout_ms == 0) return false;
+    // Compare against the first expired millisecond. The deadline fits i128
+    // for every i64 baseline and u64 timeout, even at either clock extreme.
+    const deadline = @as(i128, last_ns) + (@as(i128, timeout_ms) + 1) * std.time.ns_per_ms;
+    return now_ns >= deadline;
 }
 
 /// How long to wait for a `Stop` hook after sending ESC for an `interrupt`
@@ -206,10 +206,13 @@ fn traceFmt(opts: Options, start: i128, comptime fmt: []const u8, args: anytype)
 /// `{"type":"user","message":{"role":"user","content":"..."}}`
 /// Also accepts `{"type":"user","content":"..."}` for convenience.
 /// Returned slice is heap-allocated.
-fn parseUserMessageContent(allocator: std.mem.Allocator, line: []const u8) !?[]u8 {
+pub fn parseUserMessageContent(allocator: std.mem.Allocator, line: []const u8) !?[]u8 {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
         .ignore_unknown_fields = true,
-    }) catch return null;
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const obj = parsed.value.object;
@@ -262,13 +265,13 @@ fn isFrameOfType(allocator: std.mem.Allocator, line: []const u8, frame_type: []c
 /// True if `line` is a `{"type":"ping"}` health-probe frame. Cheap classifier
 /// run before `parseUserMessageContent` in the stdin loop so a ping is answered
 /// with a `pong` and never queued as a prompt (see SPEC §2.7).
-fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+pub fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
     return isFrameOfType(allocator, line, "ping");
 }
 
 /// True if `line` is a `{"type":"interrupt"}` frame: the hub asks the daemon
 /// to stop the turn in flight and keep the session (see SPEC §2.7).
-fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+pub fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
     return isFrameOfType(allocator, line, "interrupt");
 }
 

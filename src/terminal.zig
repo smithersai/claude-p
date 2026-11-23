@@ -33,9 +33,13 @@ pub fn respondToDecQueries(
         if (j >= bytes.len) break;
         const final = bytes[j];
         const params = bytes[i + 2 + @as(usize, if (private_gt) 1 else 0) .. j];
+        // An ESC interrupts the unfinished CSI and starts a new sequence.
+        i = if (final == 0x1b) j - 1 else j;
+        const default_param = params.len == 0 or std.mem.eql(u8, params, "0");
 
         switch (final) {
             'c' => {
+                if (!default_param) continue;
                 if (private_gt) {
                     try out.appendSlice(allocator, "\x1b[>0;0;0c");
                 } else {
@@ -43,24 +47,22 @@ pub fn respondToDecQueries(
                 }
             },
             'n' => {
-                if (std.mem.eql(u8, params, "6")) {
+                if (!private_gt and std.mem.eql(u8, params, "6")) {
                     try out.appendSlice(allocator, "\x1b[1;1R");
                 }
             },
             'q' => {
-                if (private_gt) {
+                if (private_gt and default_param) {
                     try out.appendSlice(allocator, "\x1bP>|claude-p\x1b\\");
                 }
             },
             't' => {
-                if (std.mem.eql(u8, params, "18")) {
+                if (!private_gt and std.mem.eql(u8, params, "18")) {
                     try out.appendSlice(allocator, "\x1b[8;40;120t");
                 }
             },
             else => {},
         }
-
-        i = j;
     }
 }
 

@@ -27,6 +27,7 @@ jobs:
           node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
           sh -n scripts/build-in-linux.sh
           node --test .smithers/tests/install-checksum.test.mjs
+          node --test tests/prop/js_supplychain_prop.mjs
 
       - name: Factory projections are valid JSON
         run: |

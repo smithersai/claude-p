@@ -43,6 +43,7 @@ const factorySources = S.Filegroup({
 
 const zigRunner = S.file("run-zig.sh")
 const jsTestFile = S.file("tests/install-checksum.test.mjs")
+const jsPropTestFile = S.file("//tests/prop/js_supplychain_prop.mjs")
 
 const zigEnv = {
   ZIG_GLOBAL_CACHE_DIR: fileURLToPath(new URL("./cache/tools/zig/global", import.meta.url)),
@@ -72,11 +73,11 @@ const testJs = S.Shell.Test({
   args: [
     "-eu",
     "-c",
-    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && node --test .smithers/tests/install-checksum.test.mjs"
+    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs"
   ],
   sandbox: "none",
   timeout: "2m",
-  data: [jsSources, jsTestFile]
+  data: [jsSources, jsTestFile, jsPropTestFile]
 })
 
 const build = S.Shell.Build({

@@ -65,6 +65,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     // ------------------------------------------------------------------
+    // Property-based & fuzz tests (corpus replay in `zig build test-prop`,
+    // coverage-guided fuzzing via `zig build test-prop --fuzz`).
+    // ------------------------------------------------------------------
+    const prop_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/prop_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "claude_p", .module = claude_p },
+            },
+        }),
+        .filters = test_filters,
+    });
+    if (target.result.os.tag == .linux) prop_tests.linkSystemLibrary("util");
+    if (target.result.os.tag == .macos) prop_tests.linkSystemLibrary("proc");
+    const run_prop_tests = b.addRunArtifact(prop_tests);
+    const prop_step = b.step("test-prop", "Run property-based and fuzz tests (pass --fuzz for live coverage-guided fuzzing)");
+    prop_step.dependOn(&run_prop_tests.step);
+    test_step.dependOn(&run_prop_tests.step);
+
+    // ------------------------------------------------------------------
     // Real-claude integration tests (no mocks). Gated on CLAUDE_P_E2E=1.
     // ------------------------------------------------------------------
     const integ_tests = b.addTest(.{

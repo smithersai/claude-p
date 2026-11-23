@@ -187,7 +187,7 @@ fn runErrorMessage(err: anyerror) ?[]const u8 {
         error.TranscriptStalled => "transcript stopped growing while busy for --transcript-idle-timeout",
         error.PromptNotAccepted => "claude never accepted the typed prompt; check for a blocking dialog with --debug",
         error.PromptTruncated => "claude received a truncated prompt; pass long prompts via --input-file or stdin and retry",
-        error.InvalidExtraSettings => "--setting-json must be a JSON object and each --extra-hook needs a non-empty event and command",
+        error.InvalidExtraSettings => "--setting-json must be a JSON object nested at most 128 levels and each --extra-hook needs a non-empty UTF-8 event and command",
         else => null,
     };
 }

@@ -97,7 +97,7 @@ pub const Options = struct {
 ///
 /// `--bare` and `--safe-mode` are listed for completeness, but `parse`
 /// rejects them before this table is consulted.
-const known_boolean_long_flags = [_][]const u8{
+pub const known_boolean_long_flags = [_][]const u8{
     "--allow-dangerously-skip-permissions",
     "--ax-screen-reader",
     "--background",
@@ -129,10 +129,16 @@ fn isKnownBoolean(flag: []const u8) bool {
     return false;
 }
 
-/// Flags that make Claude Code 2.1.330 skip `--settings` hooks. claude-p
-/// depends on those hooks for SessionStart/Stop, so these are rejected.
-fn suppressesSettingsHooks(flag: []const u8) bool {
-    inline for (.{ "--bare", "--safe-mode" }) |name| {
+/// Flags `parse` refuses, in the bare form and in every `<flag>=<value>`
+/// form (commander accepts both spellings, so both must be refused):
+///   * `-p` / `--print`: claude-p emulates print mode; forwarding it would
+///     fight the PTY driver.
+///   * `--settings`: claude-p injects its own `--settings` carrying the
+///     SessionStart/Stop hooks; a user copy would clobber them.
+///   * `--bare` / `--safe-mode`: Claude Code 2.1.330 skips `--settings`
+///     hooks under them, so the SessionStart/Stop relay would never fire.
+fn isRejectedFlag(flag: []const u8) bool {
+    inline for (.{ "-p", "--print", "--settings", "--bare", "--safe-mode" }) |name| {
         if (std.mem.eql(u8, flag, name)) return true;
         if (std.mem.startsWith(u8, flag, name ++ "=")) return true;
     }
@@ -207,7 +213,8 @@ const help_text =
     \\Unrecognized flags are forwarded verbatim to `claude`. The wrapper rejects
     \\`-p`/`--print` (we emulate it), user-supplied `--settings` (we inject our
     \\own to register the Stop hook; use --extra-hook or --setting-json), and
-    \\`--bare`/`--safe-mode` (Claude Code skips `--settings` hooks under them).
+    \\`--bare`/`--safe-mode` (Claude Code skips `--settings` hooks under them),
+    \\including their `<flag>=<value>` forms.
     \\
 ;
 
@@ -355,18 +362,9 @@ pub fn parse(allocator: std.mem.Allocator, argv_in: []const []const u8) ParseErr
             i = try consumeVariadicInto(allocator, argv, i, &opts.add_dirs);
         } else if (std.mem.eql(u8, a, "--mcp-config")) {
             i = try consumeVariadicInto(allocator, argv, i, &opts.mcp_configs);
-        } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--print")) {
-            // claude's print mode is what we *emulate*. Passing it through
-            // would either no-op or fight with our hooks. Reject loudly.
-            return ParseError.UnsupportedFlag;
-        } else if (std.mem.eql(u8, a, "--settings")) {
-            // We inject our own --settings with the SessionStart/Stop hooks.
-            // Accepting a user --settings would clobber that and break the
-            // completion signal.
-            return ParseError.UnsupportedFlag;
-        } else if (suppressesSettingsHooks(a)) {
-            // Claude Code 2.1.330 skips `--settings` hooks under these
-            // flags, so our SessionStart/Stop relay would never fire.
+        } else if (isRejectedFlag(a)) {
+            // See `isRejectedFlag`. Reject loudly rather than forward a flag
+            // that disables or fights the hook-based completion signal.
             return ParseError.UnsupportedFlag;
         } else if (std.mem.startsWith(u8, a, "--")) {
             // Unknown long option — forward verbatim. For known boolean
@@ -620,6 +618,30 @@ test "parse: rejects user --settings (conflicts with our hook injection)" {
     try testing.expectError(ParseError.UnsupportedFlag, parse(testing.allocator, &.{ "--settings", "{}" }));
 }
 
+test "parse: rejects the =value spellings of -p, --print, and --settings" {
+    // Regression: `--settings={}` fell through to the unknown-long-flag
+    // branch and was forwarded to claude, clobbering the injected hooks.
+    const bad = [_][]const []const u8{
+        &.{"--settings={}"},
+        &.{ "--settings=/tmp/s.json", "hi" },
+        &.{ "hi", "--print=true" },
+        &.{"--print="},
+        &.{ "-p=1", "hi" },
+        &.{ "daemon", "--settings={}" },
+        &.{ "daemon", "--print=1" },
+    };
+    for (bad) |argv| {
+        try testing.expectError(ParseError.UnsupportedFlag, parse(testing.allocator, argv));
+    }
+    // After `--` they are a prompt, and lookalikes still forward.
+    var a = try parse(testing.allocator, &.{ "--", "--settings={}" });
+    defer a.deinit(testing.allocator);
+    try testing.expectEqualStrings("--settings={}", a.prompt.?);
+    var b = try parse(testing.allocator, &.{ "--settingsx=1", "--printer" });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), b.passthrough.items.len);
+}
+
 test "parse: stream-json without --verbose is rejected (matches claude -p)" {
     // claude itself errors: "When using --print, --output-format=stream-json
     // requires --verbose". We emulate --print so the same rule applies.
@@ -722,7 +744,7 @@ test "parse: --transcript-idle-timeout rejects bad and missing values" {
 
 test "parse: --extra-hook is repeatable and splits on the first =" {
     var opts = try parse(testing.allocator, &.{
-        "--extra-hook",                         "PreToolUse=echo pre",
+        "--extra-hook",                          "PreToolUse=echo pre",
         "--extra-hook=PostToolUse=env A=1 true", "hi",
     });
     defer opts.deinit(testing.allocator);
