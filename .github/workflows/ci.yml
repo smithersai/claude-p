@@ -22,8 +22,15 @@ jobs:
       - name: Versions agree (package.json, build.zig.zon, src/root.zig)
         run: node scripts/publish.mjs --check-versions
 
-      - name: Release scripts parse
-        run: node --check scripts/install.js && node --check scripts/publish.mjs
+      - name: Release scripts parse & SHA256 installer tests
+        run: |
+          node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
+          sh -n scripts/build-in-linux.sh
+          node --test .smithers/tests/install-checksum.test.mjs
+
+      - name: Factory projections are valid JSON
+        run: |
+          node -e 'JSON.parse(require("fs").readFileSync(".smithers/factory.json","utf8")); JSON.parse(require("fs").readFileSync(".smithers/home.json","utf8")); console.log("factory projections valid")'
 
   test:
     runs-on: ubuntu-latest

@@ -1,0 +1,211 @@
+{
+  "summary": "claude-p: local-first incremental Zig/JS CI, Claude Code CLI compatibility probes, PTY reliability review, and maintainer triage.",
+  "flows": [
+    {
+      "id": "checks/review",
+      "description": "Review a claude-p change for PTY/Ink protocol safety, Zig memory ownership, claude -p wire parity, and packaging supply-chain integrity.",
+      "summary": "Review changes for PTY/Ink safety, Zig memory ownership, claude -p wire parity, and supply-chain integrity.",
+      "featured": true,
+      "kind": "mdx",
+      "path": ".smithers/flows/checks/review/flow.mdx",
+      "capabilities": [
+        "fs:read:**"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "inputSchema": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "args"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "flows": [
+        "coding/ReviewCheck"
+      ]
+    },
+    {
+      "id": "issue/repro",
+      "description": "Reproduce a claude-p PTY, dialog, resume, or daemon defect with minimal non-mock evidence before planning a fix.",
+      "summary": "Reproduce a claude-p PTY, dialog, resume, or daemon defect with non-mock evidence before planning a fix.",
+      "featured": true,
+      "kind": "mdx",
+      "path": ".smithers/flows/issue/repro/flow.mdx",
+      "capabilities": [
+        "fs:read:**",
+        "proc:spawn:rg *",
+        "proc:spawn:jj --no-pager *",
+        "proc:spawn:sh .smithers/run-zig.sh *",
+        "proc:spawn:node *"
+      ],
+      "model": "sol",
+      "modelInvocable": true,
+      "inputSchema": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "args"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "flows": [],
+      "budget": {
+        "tokens": 64000,
+        "milliseconds": 1800000
+      }
+    },
+    {
+      "id": "issue/poc",
+      "description": "Implement a bounded claude-p issue proof of concept with focused unit and real-Claude integration regressions.",
+      "summary": "Implement a bounded fix with focused unit and real-Claude integration regressions.",
+      "featured": true,
+      "kind": "mdx",
+      "path": ".smithers/flows/issue/poc/flow.mdx",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:**",
+        "proc:spawn:rg *",
+        "proc:spawn:jj --no-pager *",
+        "proc:spawn:sh .smithers/run-zig.sh *",
+        "proc:spawn:node *"
+      ],
+      "model": "sol",
+      "modelInvocable": true,
+      "inputSchema": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "args"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "flows": [],
+      "budget": {
+        "tokens": 100000,
+        "milliseconds": 3600000
+      }
+    },
+    {
+      "id": "pr-triage",
+      "description": "Triage a claude-p pull request from supplied metadata and diff without executing untrusted PR code.",
+      "summary": "Assess pull request readiness from its diff and CI evidence without executing untrusted PR code.",
+      "featured": true,
+      "kind": "mdx",
+      "path": ".smithers/flows/pr-triage/flow.mdx",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:.smithers/reports/pr-triage.json",
+        "proc:spawn:rg *"
+      ],
+      "model": "sol",
+      "modelInvocable": true,
+      "inputSchema": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "args"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "flows": [],
+      "budget": {
+        "tokens": 64000,
+        "milliseconds": 600000
+      }
+    },
+    {
+      "id": "claude-compat-probe",
+      "description": "Probe the installed Claude Code CLI release for flag drift, hook suppression, Ink terminal probes, and startup dialog regressions.",
+      "summary": "Probe a Claude Code CLI release for flag drift, hook suppression, Ink probes, and startup dialog regressions.",
+      "featured": true,
+      "kind": "mdx",
+      "path": ".smithers/flows/claude-compat-probe/flow.mdx",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:.smithers/reports/claude-compat-probe.json",
+        "proc:spawn:claude *",
+        "proc:spawn:sh .smithers/run-zig.sh *",
+        "proc:spawn:rg *"
+      ],
+      "model": "sol",
+      "modelInvocable": true,
+      "inputSchema": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "args"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "flows": [],
+      "budget": {
+        "tokens": 64000,
+        "milliseconds": 1200000
+      }
+    }
+  ],
+  "on": [
+    {
+      "event": "schedule:0 15 * * 1",
+      "flow": "claude-compat-probe",
+      "description": "Weekly Monday probe against the latest Claude Code CLI release"
+    }
+  ],
+  "github": {
+    "mirror": "pull",
+    "issues": "read",
+    "changes": "send-upstream",
+    "protectedPaths": [
+      "src/driver.zig",
+      "src/hook.zig",
+      "src/daemon.zig",
+      "build.zig.zon",
+      "scripts/install.js",
+      "scripts/publish.mjs"
+    ],
+    "maintainers": [
+      "roninjin10"
+    ]
+  }
+}

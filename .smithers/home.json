@@ -1,0 +1,39 @@
+{
+  "blocks": [
+    {
+      "type": "text",
+      "title": "claude-p factory",
+      "text": "Drop-in replacement for `claude -p` driving interactive Claude Code inside an in-process zmux PTY. Local-first incremental Zig 0.15.2 and JS CI with Cloudflare cache sync, zero-mock real-Claude E2E gates, and weekly Claude Code compatibility probes."
+    },
+    {
+      "type": "prompt",
+      "title": "Ask about claude-p",
+      "placeholder": "Describe a Claude Code compatibility issue, PTY hang, or change…"
+    },
+    {
+      "type": "flows",
+      "title": "Review, probe, and reproduce"
+    },
+    {
+      "type": "links",
+      "links": [
+        {
+          "label": "Repository",
+          "url": "https://github.com/smithersai/claude-p"
+        },
+        {
+          "label": "CI",
+          "url": "https://github.com/smithersai/claude-p/actions/workflows/ci.yml"
+        },
+        {
+          "label": "npm Package",
+          "url": "https://www.npmjs.com/package/claude-p"
+        },
+        {
+          "label": "Spec",
+          "url": "https://github.com/smithersai/claude-p/blob/main/SPEC.md"
+        }
+      ]
+    }
+  ]
+}

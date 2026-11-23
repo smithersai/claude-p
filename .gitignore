@@ -9,3 +9,5 @@ docs/.astro/
 .DS_Store
 
 zig-pkg/
+.smithers/cache/
+.smithers/reports/

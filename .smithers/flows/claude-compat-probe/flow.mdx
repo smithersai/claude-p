@@ -1,0 +1,26 @@
+---
+description: Probe the installed Claude Code CLI release for flag drift, hook suppression, Ink terminal probes, and startup dialog regressions.
+capabilities: ["fs:read:**", "fs:write:.smithers/reports/claude-compat-probe.json", "proc:spawn:claude *", "proc:spawn:sh .smithers/run-zig.sh *", "proc:spawn:rg *"]
+model: sol
+budget:
+  tokens: 64000
+  milliseconds: 1200000
+---
+
+Audit compatibility between `claude-p` and the currently installed `claude` CLI:
+
+1. Run `claude --version` and `claude --help` (zero API cost).
+2. Compare every boolean long flag in `claude --help` against
+   `known_boolean_long_flags` in `src/args.zig` — report any new boolean flags
+   that could swallow a positional prompt under greedy passthrough.
+3. Check `--permission-mode` allowed choices and any new flags that disable or
+   alter hooks (like `--bare` and `--safe-mode`), and verify `src/args.zig`
+   handles or rejects them appropriately.
+4. If `CLAUDE_P_E2E=1` is enabled in the environment, run
+   `env -u ANTHROPIC_API_KEY CLAUDE_P_E2E=1 sh .smithers/run-zig.sh build test-integration --summary all`
+   and record pass/fail counts and elapsed time; otherwise mark live E2E as
+   `skipped` (never fabricate pass results).
+
+Write a structured summary to `.smithers/reports/claude-compat-probe.json`:
+{"claude_version":"...","missing_boolean_flags":[],"hook_risk_flags":[],"permission_modes":[],"e2e_status":"passed|failed|skipped","regressions":[],"summary":"..."}
+Never expose credentials or OAuth tokens in the report.
