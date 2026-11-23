@@ -19,6 +19,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     claude_p.addImport("zmux", zmux_mod);
+    // zmux's PTY code needs these; attach them to the exported module so
+    // external Zig consumers link them without rediscovering the list.
+    if (target.result.os.tag == .linux) claude_p.linkSystemLibrary("util", .{});
+    if (target.result.os.tag == .macos) claude_p.linkSystemLibrary("proc", .{});
 
     const exe = b.addExecutable(.{
         .name = "claude-p",
@@ -33,8 +37,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    if (target.result.os.tag == .linux) exe.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) exe.linkSystemLibrary("proc");
 
     b.installArtifact(exe);
 
@@ -51,13 +53,9 @@ pub fn build(b: *std.Build) void {
     // tests
     // ------------------------------------------------------------------
     const mod_tests = b.addTest(.{ .root_module = claude_p, .filters = test_filters });
-    if (target.result.os.tag == .linux) mod_tests.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) mod_tests.linkSystemLibrary("proc");
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module, .filters = test_filters });
-    if (target.result.os.tag == .linux) exe_tests.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) exe_tests.linkSystemLibrary("proc");
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests");
@@ -80,8 +78,6 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = test_filters,
     });
-    if (target.result.os.tag == .linux) prop_tests.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) prop_tests.linkSystemLibrary("proc");
     const run_prop_tests = b.addRunArtifact(prop_tests);
     const prop_step = b.step("test-prop", "Run property-based and fuzz tests (pass --fuzz for live coverage-guided fuzzing)");
     prop_step.dependOn(&run_prop_tests.step);
@@ -102,8 +98,6 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = test_filters,
     });
-    if (target.result.os.tag == .linux) integ_tests.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) integ_tests.linkSystemLibrary("proc");
     const run_integ_tests = b.addRunArtifact(integ_tests);
     run_integ_tests.has_side_effects = true;
     // The nested-env and daemon tests spawn the installed CLI binary.

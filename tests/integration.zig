@@ -9,8 +9,11 @@
 const std = @import("std");
 const claude_p = @import("claude_p");
 
+/// True only for `CLAUDE_P_E2E=1`; `0`, empty, or any other value skips.
 fn e2eEnabled() bool {
-    return std.process.hasEnvVar(std.heap.page_allocator, "CLAUDE_P_E2E") catch false;
+    const v = std.process.getEnvVarOwned(std.heap.page_allocator, "CLAUDE_P_E2E") catch return false;
+    defer std.heap.page_allocator.free(v);
+    return std.mem.eql(u8, v, "1");
 }
 
 test "real claude: text output for trivial prompt" {
@@ -65,9 +68,8 @@ test "real claude: exit code 0 on success" {
 test "real claude: stream-json arrives as JSONL ending in a result line" {
     if (!e2eEnabled()) return error.SkipZigTest;
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(std.testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(std.testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
     var result = try claude_p.run(std.testing.allocator, .{
         .prompt = "Reply with the single word OK.",
@@ -79,15 +81,15 @@ test "real claude: stream-json arrives as JSONL ending in a result line" {
     });
     defer result.deinit(std.testing.allocator);
 
-    buf = aw.toArrayList();
+    const streamed = aw.written();
 
     // We expect at least one line emitted live (the streaming property).
     try std.testing.expect(result.streamed);
-    try std.testing.expect(buf.items.len > 0);
+    try std.testing.expect(streamed.len > 0);
 
     // Validate every non-empty line is a parseable JSON object and the LAST
     // non-empty line is the `result` envelope.
-    var line_iter = std.mem.splitScalar(u8, buf.items, '\n');
+    var line_iter = std.mem.splitScalar(u8, streamed, '\n');
     var last_object_type: std.ArrayList(u8) = .{};
     defer last_object_type.deinit(std.testing.allocator);
     var line_count: u32 = 0;

@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: How claude-p drives interactive Claude Code through zmux.NativeSession, a stateless DEC responder, a per-run hook FIFO, and a pread transcript tailer.
+description: How claude-p drives interactive Claude Code through zmux.NativeSession, a streaming DEC responder, a per-run hook FIFO, and a pread transcript tailer.
 sidebar:
   order: 1
 ---
@@ -22,14 +22,14 @@ Ink (Claude Code's terminal UI) exits immediately if stdin is not a TTY. `claude
 `zmux`'s reader thread invokes `driver.onZmuxEvent` on every chunk of PTY output. Calling `session.writeInput` from inside that callback would re-enter zmux's internal locks.
 
 Instead, the reader thread stays strictly side-effect-free on the session:
-- Scans `po.data` with `terminal.respondToDecQueries` and appends reply bytes to `shared.pending_to_pty` under `shared.write_mutex`.
+- Feeds `po.data` to the stateful `terminal.DecDecoder` (which carries split queries across chunks) and appends reply bytes to `shared.pending_to_pty` under `shared.write_mutex`.
 - Appends raw bytes to the 8192-byte rolling buffer `shared.recent` and updates `shared.bytes_seen` and `shared.last_output_ns` under `shared.recent_mutex`.
 
 The main loop drains `pending_to_pty` via `flushPendingToPty()` (using a 512-byte stack buffer, zero heap allocation) on every loop tick and inside every quiescence wait.
 
 ### 3. Out-of-band lifecycle via inline `--settings` + FIFO
 
-Rather than guessing when a turn starts or ends from ANSI screen diffs, `src/hook.zig` generates an inline `--settings` JSON object registering `SessionStart`, `UserPromptSubmit`, and `Stop`. Each hook invokes `$TMPDIR/claude-p-<pid>-<rand>/hook.sh`, which writes `<event>\t<json>\n` to a named pipe (`events.fifo`) that the parent opened `O_RDONLY | O_NONBLOCK` *before* spawning `claude`.
+Rather than guessing when a turn starts or ends from ANSI screen diffs, `src/hook.zig` generates an inline `--settings` JSON object registering five relay hooks: `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, and `PermissionRequest`. Each hook invokes `$TMPDIR/claude-p-<pid>-<rand>/hook.sh`, which embeds the FIFO path and a per-run nonce and writes `<nonce>\t<event>\t<json>\n` to a named pipe (`events.fifo`) that the parent opened `O_RDONLY | O_NONBLOCK` *before* spawning `claude`.
 
 ### 4. Output comes from the session JSONL, never the PTY
 
@@ -41,10 +41,10 @@ The PTY exists only to keep Ink alive, dismiss startup modals, and deliver keyst
 | --- | --- |
 | `main.zig` | CLI entry point, one-shot vs `daemon` dispatch, exit-code mapping. |
 | `args.zig` | `claude -p` flag parser, variadic flags, boolean passthrough list, validation. |
-| `terminal.zig` | Stateless DEC/XTerm query responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t`). |
+| `terminal.zig` | Streaming `DecDecoder` DEC/XTerm query responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t`). |
 | `hook.zig` | Temp dir, `mkfifo`, `hook.sh`, inline `--settings` + `extra_hooks` / `extra_settings_json`. |
 | `driver.zig` | One-shot lifecycle, env filter, startup dialog FSM, `PasteChunker`, watchdog. |
-| `daemon.zig` | Multi-turn NDJSON daemon (`user`, `ping`/`pong`, `system/init`, `result`, idle watchdog). |
+| `daemon.zig` | Multi-turn NDJSON daemon (`user`, `ping`/`pong`, `interrupt`, `system/init`, `result`, error frames, idle and transcript watchdogs). |
 | `transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`. |
 | `stream.zig` | Non-blocking `pread`-based line-buffered transcript `Tailer`. |
 | `emit.zig` | `text`, `json`, and `stream-json` output formatters. |

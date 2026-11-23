@@ -15,6 +15,7 @@ pub const driver = @import("driver.zig");
 pub const stream = @import("stream.zig");
 pub const daemon = @import("daemon.zig");
 
+pub const RunError = driver.RunError;
 pub const Options = driver.Options;
 pub const Result = driver.Result;
 pub const Usage = transcript.Usage;
@@ -22,7 +23,7 @@ pub const OutputFormat = args.OutputFormat;
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 3 };
 
-pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
+pub fn run(allocator: std.mem.Allocator, opts: Options) RunError!Result {
     return driver.run(allocator, opts);
 }
 

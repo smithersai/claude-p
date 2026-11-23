@@ -32,8 +32,8 @@ const {
 
     <!-- Retry note -->
     <text x="556" y="178" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">On Stop:</text>
-    <text x="556" y="196" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">parseFileFromOffset() retries 20×50 ms</text>
-    <text x="556" y="212" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">(up to 30× on Stop-text mismatch)</text>
+    <text x="556" y="196" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">pump + parse retries 20×20 ms</text>
+    <text x="556" y="212" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">(early exit on Stop-text match)</text>
   </svg>
   <figcaption>{caption}</figcaption>
 </figure>

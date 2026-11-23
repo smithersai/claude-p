@@ -1,14 +1,24 @@
 name: Release
 
-# Triggers on tag push (e.g. `git push origin v0.1.3`). Cross-compiles the
-# Zig binary for every supported target on a single Linux runner (zig
-# cross-compiles natively), uploads each plus SHA256SUMS as GitHub release
-# assets, then publishes the npm package whose postinstall downloads and
-# verifies them.
+# Triggers on tag push (e.g. `git push origin v0.1.3`). Three jobs:
 #
-# Re-running is safe: publish.mjs skips tag creation on tag-triggered runs,
-# re-uploads assets to an existing release with --clobber, and skips
-# `npm publish` when the version is already on the registry.
+#   build         contents: read, no secrets. Checks the tagged commit is an
+#                 ancestor of origin/main and the tag is exactly
+#                 v<package.json version>, runs unit tests, cross-compiles all
+#                 4 targets, writes SHA256SUMS and checksums.json, and uploads
+#                 them as a workflow artifact.
+#   verify-macos  contents: read. Asserts an arm64 macos-15 runner, checks
+#                 claude-p-darwin-arm64.gz against SHA256SUMS, and requires
+#                 --version to print exactly the tag version.
+#   publish       environment: release, contents: write + id-token: write.
+#                 Creates the GitHub release (never overwrites published
+#                 assets, verifies existing assets by digest) and publishes
+#                 the npm package with --provenance and a bundled
+#                 checksums.json.
+#
+# Re-running is safe: publish.mjs skips tag creation in Actions, uploads only
+# assets an existing release lacks (refusing if its SHA256SUMS disagrees), and
+# skips `npm publish` when the version is already on the registry.
 
 on:
   push:
@@ -16,53 +26,120 @@ on:
       - "v*"
 
 permissions:
-  contents: write   # for `gh release create`
-  id-token: write   # for npm provenance / trusted publishing (OIDC)
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
+      - name: Verify the tagged commit is on main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME ($GITHUB_SHA) is not an ancestor of origin/main"
+            exit 1
+          fi
+
       - name: Install zig 0.15.2
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.15.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          registry-url: "https://registry.npmjs.org"
 
-      - name: Verify tag matches package.json, build.zig.zon, src/root.zig
-        run: node scripts/publish.mjs --check-versions --expect-version="${GITHUB_REF_NAME#v}"
-
-      - name: Check npm auth
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "$NPM_TOKEN" ]; then
-            echo "NPM_TOKEN present: token publish with --provenance"
-          else
-            echo "::warning::NPM_TOKEN secret not set; relying on npm trusted publishing (OIDC). Configure a trusted publisher for this repo/workflow on npmjs.com, or the publish step fails."
-          fi
-
-      - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
-        run: npm install -g npm@^11.5.1 && npm --version
+      - name: Verify tag is exactly v<version> (package.json, build.zig.zon, src/root.zig)
+        run: node scripts/publish.mjs --check-versions --expect-tag="$GITHUB_REF_NAME"
 
       - name: zig build test
         run: zig build test
 
-      - name: Release (build prebuilts, SHA256SUMS, GH release, npm publish)
+      - name: Build 4 targets, SHA256SUMS, checksums.json
+        run: node scripts/publish.mjs --local-only --skip-git --skip-tests
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-macos:
+    needs: build
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Verify darwin-arm64 digest, runner arch, and exact --version
+        working-directory: release-assets
+        run: |
+          arch="$(uname -m)"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::expected an arm64 runner, got $arch"
+            exit 1
+          fi
+          grep '  claude-p-darwin-arm64.gz$' SHA256SUMS | shasum -a 256 -c -
+          gunzip -c claude-p-darwin-arm64.gz > claude-p
+          chmod 0755 claude-p
+          expected="claude-p ${GITHUB_REF_NAME#v}"
+          actual="$(./claude-p --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::--version printed '$actual', expected '$expected'"
+            exit 1
+          fi
+          echo "$actual"
+
+  publish:
+    needs: [build, verify-macos]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write   # gh release create / upload
+      id-token: write   # npm provenance / trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Pin npm (trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@11.5.1 && npm --version
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Re-check tag against the checkout
+        run: node scripts/publish.mjs --check-versions --expect-tag="$GITHUB_REF_NAME"
+
+      - name: GitHub release (verifies assets against SHA256SUMS; never overwrites)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/publish.mjs --from-assets --skip-git --only=github
+
+      - name: npm publish --provenance with bundled checksums.json
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node scripts/publish.mjs --skip-git --skip-tests
+        run: node scripts/publish.mjs --from-assets --skip-git --only=npm

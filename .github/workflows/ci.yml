@@ -6,13 +6,18 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -29,17 +34,24 @@ jobs:
           node --test .smithers/tests/install-checksum.test.mjs
           node --test tests/prop/js_supplychain_prop.mjs
 
-      - name: Factory projections are valid JSON
-        run: |
-          node -e 'JSON.parse(require("fs").readFileSync(".smithers/factory.json","utf8")); JSON.parse(require("fs").readFileSync(".smithers/home.json","utf8")); console.log("factory projections valid")'
+      - name: Factory projections are not stale (.smithers/factory.json, home.json)
+        # Re-derives projected fields from flow.mdx frontmatter and FACTORY.ts.
+        # On failure run: smthrs target //.smithers:factory-write --write
+        run: node --test .smithers/tests/factory-projections.test.mjs
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install zig 0.15.2
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.15.2
 
@@ -62,10 +74,12 @@ jobs:
           - x86_64-linux-musl
           - aarch64-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install zig 0.15.2
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.15.2
 

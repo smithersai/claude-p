@@ -1,6 +1,6 @@
 # claude-p
 
-> A drop-in replacement for `claude -p` that drives the interactive `claude` UI inside an in-process zmux PTY session. Version 0.1.3, Zig 0.15.2, macOS and Linux (arm64/x64).
+> Emulates `claude -p` (not a drop-in or wire-compatible replacement) by driving the interactive `claude` UI inside an in-process zmux PTY session. Version 0.1.3, Zig 0.15.2, macOS and Linux (arm64/x64).
 
 ## Quick facts
 
@@ -8,7 +8,7 @@
 - Output formats: `text` (default), `json`, `stream-json` (requires `--verbose` in one-shot mode).
 - Daemon CLI: `claude-p daemon [OPTIONS]` speaks NDJSON on stdin (`user`, `ping`, `interrupt`) and stdout (`system/init`, live transcript lines, per-turn `result`, `pong`, structured `interrupted` / watchdog error `result` frames).
 - Rejected CLI flags: `-p`, `--print`, `--settings` (use `--extra-hook` or `--setting-json`), `--bare`, `--safe-mode`.
-- Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error or daemon `session_start_timeout`, `124` one-shot timeout or daemon `idle_timeout`/`transcript_stalled`, `128+sig` via npm shim.
+- Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error, `124` every timeout (one-shot timeouts and daemon `session_start_timeout`/`idle_timeout`/`transcript_stalled`), `128+sig` via npm shim.
 - Never mutates `~/.claude/`; uses per-run `$TMPDIR/claude-p-<pid>-<rand>/` FIFO + relay script.
 
 ## Start here

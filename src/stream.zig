@@ -25,6 +25,8 @@ pub fn isForwardable(allocator: std.mem.Allocator, line: []const u8) !bool {
     return true;
 }
 
+pub const default_max_partial_bytes: usize = 16 * 1024 * 1024;
+
 pub const Tailer = struct {
     allocator: std.mem.Allocator,
     file: std.fs.File,
@@ -33,6 +35,8 @@ pub const Tailer = struct {
     partial: std.ArrayList(u8) = .{},
 
     scanned: usize = 0, // Prefix of the partial line already searched for LF.
+    max_partial_bytes: usize = default_max_partial_bytes,
+    discarding_oversized: bool = false,
 
     /// Open a file path for tailing. Caller owns the returned Tailer and must
     /// call `deinit`.
@@ -44,6 +48,7 @@ pub const Tailer = struct {
     pub fn reopenAt(self: *Tailer, path: []const u8, offset: u64) !void {
         var next = try open(self.allocator, path);
         next.pos = offset;
+        next.max_partial_bytes = self.max_partial_bytes;
         self.deinit();
         self.* = next;
     }
@@ -76,15 +81,55 @@ pub const Tailer = struct {
     }
 
     /// Forward complete JSON objects, omitting upstream result envelopes.
+    /// Lines longer than `max_partial_bytes` without a newline are discarded
+    /// through their terminating newline so unbounded transcript lines cannot
+    /// exhaust memory.
     pub fn pump(self: *Tailer, writer: *std.Io.Writer) !usize {
         var buf: [4096]u8 = undefined;
         var emitted = try self.forwardComplete(writer);
         while (true) {
             const n = try std.posix.pread(self.file.handle, &buf, self.pos);
             if (n == 0) break;
-            try self.partial.appendSlice(self.allocator, buf[0..n]);
-            self.pos += n;
-            emitted += try self.forwardComplete(writer);
+            var slice: []const u8 = buf[0..n];
+            while (slice.len > 0) {
+                if (self.discarding_oversized) {
+                    if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
+                        self.discarding_oversized = false;
+                        self.pos += nl + 1;
+                        slice = slice[nl + 1 ..];
+                    } else {
+                        self.pos += slice.len;
+                        break;
+                    }
+                    continue;
+                }
+                if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
+                    const line_tail = slice[0 .. nl + 1];
+                    if (self.partial.items.len + line_tail.len > self.max_partial_bytes) {
+                        self.partial.clearRetainingCapacity();
+                        self.scanned = 0;
+                        self.pos += line_tail.len;
+                        slice = slice[nl + 1 ..];
+                        continue;
+                    }
+                    try self.partial.appendSlice(self.allocator, line_tail);
+                    self.pos += line_tail.len;
+                    emitted += try self.forwardComplete(writer);
+                    slice = slice[nl + 1 ..];
+                } else {
+                    if (self.partial.items.len + slice.len > self.max_partial_bytes) {
+                        self.partial.clearRetainingCapacity();
+                        self.scanned = 0;
+                        self.discarding_oversized = true;
+                        self.pos += slice.len;
+                        break;
+                    }
+                    try self.partial.appendSlice(self.allocator, slice);
+                    self.pos += slice.len;
+                    self.scanned = self.partial.items.len;
+                    break;
+                }
+            }
             if (n < buf.len) break;
         }
         if (emitted > 0) try writer.flush();
@@ -93,6 +138,11 @@ pub const Tailer = struct {
 
     /// At EOF, forward a valid unterminated object with its JSONL delimiter.
     pub fn flushPartial(self: *Tailer, writer: *std.Io.Writer) !void {
+        if (self.discarding_oversized) {
+            self.discarding_oversized = false;
+            try writer.flush();
+            return;
+        }
         if (self.partial.items.len > 0) {
             if (!std.mem.endsWith(u8, self.partial.items, "\n")) try self.partial.append(self.allocator, '\n');
             _ = try self.forwardComplete(writer);
@@ -233,4 +283,30 @@ test "Tailer: flushPartial terminates a valid trailing object" {
     try t.flushPartial(&aw.writer);
     buf = aw.toArrayList();
     try testing.expectEqualStrings("{\"done\":true}\n{\"final\":true}\n", buf.items);
+}
+
+test "Tailer: drops oversized partial line and resumes after newline" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
+    defer f.close();
+    try f.writeAll("{\"ok\":1}\n{\"big\":\"0123456789abcdefghijklmnopqrstuvwxyz0123456789\"}\n{\"ok\":2}\n");
+
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
+    defer testing.allocator.free(path);
+
+    var t = try Tailer.open(testing.allocator, path);
+    defer t.deinit();
+    t.max_partial_bytes = 32;
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    const n = try t.pump(&aw.writer);
+    buf = aw.toArrayList();
+
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqualStrings("{\"ok\":1}\n{\"ok\":2}\n", buf.items);
+    try testing.expect(!t.discarding_oversized);
 }

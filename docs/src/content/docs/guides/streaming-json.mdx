@@ -1,6 +1,6 @@
 ---
 title: Stream Live JSON Output
-description: Tail session transcript events in real time with --output-format stream-json --verbose and parse them cleanly with jq or Node.js.
+description: Tail session transcript events in real time with --output-format stream-json --verbose, and how the stream differs from native claude -p.
 sidebar:
   order: 1
 ---
@@ -9,7 +9,7 @@ Use `--output-format stream-json --verbose` when a run invokes tools or spans se
 
 ## Basic usage
 
-Both flags are required in one-shot mode. Omitting `--verbose` exits with code `2` (`StreamJsonRequiresVerbose`), matching native `claude -p`.
+Both flags are required in one-shot mode. Omitting `--verbose` exits with code `2` (`StreamJsonRequiresVerbose`), the same rule native `claude -p` enforces.
 
 ```bash
 npx claude-p \
@@ -20,6 +20,24 @@ npx claude-p \
 ```
 
 Each line on stdout is one complete JSON object terminated by `\n`. `src/stream.zig` uses `pread(2)` and buffers partial reads until `\n` arrives, so downstream parsers never see torn JSON.
+
+## What the stream contains
+
+`claude-p` stream-json is **not** byte-for-byte `claude -p --output-format stream-json`. The contract is:
+
+1. Every JSON object line Claude Code appends to its session transcript during the run, in order, except transcript lines with `"type":"result"`. Non-JSON lines are dropped.
+2. One final `claude -p`-shaped `result` envelope (the [JSON `result` schema](/claude-p/reference/cli/#json-result-schema)).
+
+The transcript lines use Claude Code's on-disk transcript schema, not the `claude -p` event schema. Differences a parser will hit:
+
+| | `claude -p` stream-json | `claude-p` stream-json |
+| --- | --- | --- |
+| Session id field on event lines | `session_id` | `sessionId` (transcript schema) |
+| `system`/`init` first line | Yes | No (one-shot mode) |
+| Line types | `claude -p` event types | Whatever the transcript holds, which can include types `claude -p` never prints |
+| Final line | `result` | `claude-p` `result` envelope with `session_id` |
+
+Read `session_id` from the final `result` line. Treat event lines as transcript records and ignore types you do not recognize.
 
 ## Filter events with `jq`
 
@@ -45,8 +63,8 @@ Use `--unbuffered` so `jq` flushes each line as it arrives rather than buffering
 
 `claude-p` tails Claude's session transcript JSONL file on disk. Lines arrive the moment `claude` flushes a user event, tool call, tool result, or assistant turn—not token-by-token mid-message. Per-token streaming requires native `claude -p --include-partial-messages`.
 
-After `Stop` fires, `driver.run()` drains the tailer for `20 × 20 ms` (400 ms) to catch late flushes before emitting the trailing `result` envelope.
+After `Stop` is confirmed (at once on a `stop_hook_summary` record with `preventedContinuation: false`, otherwise after a `150 ms` window, or `2000 ms` with `--extra-hook Stop=...`), `driver.run()` runs one pump-and-parse loop of up to `20 × 20 ms`: each attempt streams newly flushed lines, then parses the turn, and the loop exits early once the parsed text matches Stop's `last_assistant_message`. The trailing `result` envelope follows. The daemon uses the same loop with up to `30 × 25 ms`.
 
 ## Streaming in daemon mode
 
-In `claude-p daemon`, stdout is always `stream-json`—you do not pass `--output-format stream-json` or `--verbose`. See the [Daemon Protocol Reference](/claude-p/reference/daemon-protocol/).
+In `claude-p daemon`, stdout always uses the same transcript-lines-plus-`result` contract; you do not pass `--output-format stream-json` or `--verbose`. The daemon adds a `system`/`init` line, `pong` frames, and error `result` frames. See the [Daemon Protocol Reference](/claude-p/reference/daemon-protocol/).

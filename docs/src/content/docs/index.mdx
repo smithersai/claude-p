@@ -1,9 +1,9 @@
 ---
 title: claude-p
-description: A drop-in replacement for claude -p that drives the interactive claude UI inside an in-process zmux PTY session.
+description: A claude -p emulator that drives the interactive claude UI inside an in-process zmux PTY session.
 template: splash
 hero:
-  tagline: A drop-in replacement for <code>claude -p</code> that drives the interactive <code>claude</code> UI inside an in-process zmux PTY session.
+  tagline: A <code>claude -p</code> emulator that drives the interactive <code>claude</code> UI inside an in-process zmux PTY session.
   actions:
     - text: Get Started
       link: /claude-p/getting-started/
@@ -83,8 +83,8 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig m
     <code>$TMPDIR/claude-p-&lt;pid&gt;-&lt;rand&gt;/</code> directory and is deleted on exit.
   </Card>
   <Card title="Hooks, not screen scraping" icon="terminal">
-    <code>SessionStart</code>, <code>UserPromptSubmit</code>, and <code>Stop</code> drive the state
-    machine. Output comes straight from Claude's session JSONL transcript.
+    <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>Stop</code>, and
+    <code>StopFailure</code> drive the state machine. Output comes straight from Claude's session JSONL transcript.
   </Card>
   <Card title="Real PTY, paced bracketed paste" icon="rocket">
     <code>zmux.NativeSession</code> runs a real <code>forkpty</code> session. Prompts stream in
@@ -92,6 +92,7 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig m
   </Card>
   <Card title="Verified prebuilt binaries" icon="seti:lock">
     <code>scripts/install.js</code> downloads platform binaries from GitHub Releases and checks
-    their SHA-256 digest against <code>SHA256SUMS</code> before writing to disk.
+    their SHA-256 digest against the <code>checksums.json</code> bundled in the npm tarball
+    before writing to disk. A mismatch fails the install.
   </Card>
 </CardGrid>

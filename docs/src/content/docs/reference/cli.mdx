@@ -14,24 +14,27 @@ claude-p daemon [OPTIONS]
 
 ## Prompt resolution (one-shot mode)
 
-When the first argument is not `daemon`, `claude-p` resolves the prompt in this order:
+When the first argument is not `daemon`, `claude-p` takes the prompt from one source:
 
-1. Positional `PROMPT` argument (at most one positional token).
-2. `--input-file <path>` (up to 16 MiB; trailing `\r\n` trimmed).
-3. `stdin` (up to 16 MiB; trailing `\r\n` trimmed).
+| Inputs | Prompt sent |
+| --- | --- |
+| `PROMPT`, stdin is a TTY | `PROMPT`. |
+| `PROMPT`, stdin piped | `<stdin>\n\n<PROMPT>`, as `claude -p` composes it. Trailing `\r\n` is trimmed from stdin; empty stdin leaves `PROMPT` alone. If stdin produces no data or EOF within 3 s, `claude-p` warns on stderr and sends `PROMPT` alone. Redirect `< /dev/null` to skip the wait. |
+| `--input-file <path>` | File contents (up to 16 MiB; trailing `\r\n` trimmed). |
+| No `PROMPT`, stdin piped | Stdin (up to 16 MiB; trailing `\r\n` trimmed). |
 
-An empty prompt writes an error to stderr and exits `2`.
+`PROMPT` together with `--input-file`, a second positional token, no prompt with stdin on a TTY, or an empty prompt each write an error to stderr and exit `2`. Daemon mode rejects `PROMPT`, `--input-file`, and `--output-format text` or `json` (its output is always stream-json).
+
+Every option that takes one value also accepts `--option=<value>`.
 
 ## Options
 
 | Flag | Value | Default | Notes |
 | --- | --- | --- | --- |
-| `--output-format` | `text \| json \| stream-json` | `text` | Accepts `--output-format=<fmt>`. `stream-json` requires `--verbose` in one-shot mode. |
+| `--output-format` | `text \| json \| stream-json` | `text` | Accepts `--output-format=<fmt>`. `stream-json` requires `--verbose` in one-shot mode. Daemon mode accepts only `stream-json`. |
 | `--model` | `<name>` | — | Accepts `--model=<name>`. Forwarded to `claude --model`. |
-| `--fallback-model` | `<name>` | — | Forwarded to `claude --fallback-model`. |
-| `--max-turns` | `<u32>` | — | Forwarded to `claude --max-turns`. |
-| `--allowedTools`, `--allowed-tools` | `<list>` | — | Forwarded to `claude --allowedTools`. |
-| `--disallowedTools`, `--disallowed-tools` | `<list>` | — | Forwarded to `claude --disallowedTools`. |
+| `--allowedTools`, `--allowed-tools` | `<rule>...` | — | Repeatable, variadic. Consumes following non-flag tokens until the next flag or `--`; `--allowedTools=<rule>` takes one. Repeats accumulate, and every rule is forwarded in order as its own `--allowedTools <rule>` pair. Put `PROMPT` first or after `--`. |
+| `--disallowedTools`, `--disallowed-tools` | `<rule>...` | — | Same rules as `--allowedTools`. Forwarded as `--disallowedTools <rule>` pairs. |
 | `--permission-mode` | `<mode>` | — | `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `default`, `dontAsk`, `plan`. |
 | `--dangerously-skip-permissions` | flag | `false` | Forwarded to `claude`; bypass-permissions modal is auto-accepted. |
 | `--system-prompt` | `<text>` | — | Accepts `--system-prompt=<text>`. Forwarded to `claude --system-prompt`. |
@@ -41,34 +44,44 @@ An empty prompt writes an error to stderr and exits `2`.
 | `--setting-sources` | `<list>` | — | Comma-separated (`user,project,local`). Forwarded to `claude --setting-sources`. |
 | `--extra-hook` | `<Event>=<cmd>` | — | Repeatable; accepts `=` form. Splits on first `=`. Appended after relay hooks. |
 | `--setting-json` | `<json>` | — | Accepts `=` form. Merges top-level keys from a JSON object into `--settings` (excluding `hooks`). |
-| `--resume` | `<id>` | — | Resumes session `<id>` with transcript offset isolation. |
+| `--resume`, `-r` | `<id>` | — | Resumes session `<id>` with transcript offset isolation. |
 | `--continue`, `-c` | flag | `false` | Continues most recent session with transcript offset isolation. |
 | `--session-id` | `<uuid>` | — | Forces session UUID `<uuid>`. |
+| `-n`, `--name` | `<name>` | — | Takes one value. Session display name, forwarded to `claude`. |
 | `--cwd` | `<path>` | current dir | Working directory for the child `claude` process. |
 | `--input-file` | `<path>` | — | Reads prompt from file (one-shot mode only). |
 | `--verbose` | flag | `false` | Forwarded to `claude`; required with `--output-format stream-json`. |
-| `--timeout` | `<seconds>` | `300` | One-shot wall-time cap; daemon initial `SessionStart` deadline. |
+| `--timeout` | `<seconds>` | `300` | One-shot wall-time cap; daemon initial `SessionStart` deadline. `0` disables. |
 | `--idle-timeout` | `<seconds>` | `180` | Daemon only: busy-turn PTY silence watchdog (`0` disables). |
-| `--transcript-idle-timeout` | `<seconds>` | `600` | Daemon only: spinner-immune busy-turn transcript growth watchdog (`0` disables). Accepts `=` form. |
-| `--debug` | flag | `false` | Prints millisecond-stamped diagnostics to stderr. |
+| `--transcript-idle-timeout` | `<seconds>` | `600` | Both modes (`0` disables). One-shot: while awaiting `Stop`, fails with `TranscriptStalled` (exit `124`) when neither the transcript nor the PTY grows for that long. Daemon: spinner-immune busy-turn transcript growth watchdog (`transcript_stalled`, exit `124`). Accepts `=` form. |
+| `--debug` | flag | `false` | Prints millisecond-stamped diagnostics to stderr. In daemon mode it also turns on the `[pty-trace]` line every 60 s. |
 | `--` | separator | — | Ends option parsing; the next token becomes `PROMPT`. |
 | `-h`, `--help` | flag | — | Prints help text and exits `0`. |
 | `-v`, `--version` | flag | — | Prints `claude-p 0.1.3` and exits `0`. |
 
 ## Rejected flags
 
-| Flag | Error | Reason |
-| --- | --- | --- |
-| `-p`, `--print` | `UnsupportedFlag` (exit `2`) | `claude-p` emulates print mode by driving interactive mode. |
-| `--settings` | `UnsupportedFlag` (exit `2`) | Reserved for `claude-p`'s inline hook registration. Use `--extra-hook` or `--setting-json` instead. |
-| `--bare`, `--safe-mode` | `UnsupportedFlag` (exit `2`) | Claude Code 2.1 skips `--settings` hooks under these flags (both bare and `=` forms are rejected). |
+Each flag below is rejected in its bare form and in every `<flag>=<value>` form with `UnsupportedFlag` and exit `2`:
+
+| Flag | Reason |
+| --- | --- |
+| `-p`, `--print` | `claude-p` emulates print mode by driving interactive mode. |
+| `--settings` | Reserved for `claude-p`'s inline hook registration. Use `--extra-hook` or `--setting-json` instead. |
+| `--bare`, `--safe-mode` | Claude Code skips `--settings` hooks under these flags, so the relay hooks would never fire. |
+| `--no-session-persistence` | Stops `claude` writing the transcript JSONL that `claude-p` reads the result from. |
+| `--input-format`, `--json-schema`, `--max-budget-usd` | Print-mode-only in `claude`; the interactive session would silently ignore them. |
+| `--max-turns`, `--fallback-model` | Print-mode-only; `claude-p` does not enforce a turn cap or model fallback. |
+| `--include-partial-messages`, `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking` | Print-mode-only stream flags; `claude-p` emits none of those events. |
+
+`--output-format text` and `--output-format json` are also rejected with `UnsupportedFlag` in daemon mode. Library callers that set `max_turns`, `fallback_model`, or a rejected flag in `extra_args` get `RunError.InvalidOptions` from `driver.validateOptions` (exit `2` through the CLI).
 
 ## Passthrough flags
 
-Unrecognized `--long` and `-short` flags are forwarded verbatim to `claude`.
+Unrecognized `--long` and `-short` flags are forwarded verbatim to `claude`. `claude-p` does not interpret them.
 
-- Unknown `--long` flags consume the following non-flag token as their value **unless** the flag is in `known_boolean_long_flags`:
-  `--allow-dangerously-skip-permissions`, `--ax-screen-reader`, `--background`, `--bg`, `--brief`, `--chrome`, `--no-chrome`, `--dangerously-skip-permissions`, `--desktop`, `--disable-slash-commands`, `--exclude-dynamic-system-prompt-sections`, `--fork-session`, `--forward-subagent-text`, `--ide`, `--include-hook-events`, `--include-partial-messages`, `--mcp-debug`, `--no-session-persistence`, `--replay-user-messages`, `--restricted`, `--strict-mcp-config`, `--tmux`.
+- A `--flag=value` token carries its own value and never consumes the next token.
+- Other unknown `--long` flags consume the following non-flag token as their value **unless** the flag is in `known_boolean_long_flags`:
+  `--allow-dangerously-skip-permissions`, `--ax-screen-reader`, `--background`, `--bg`, `--brief`, `--chrome`, `--no-chrome`, `--dangerously-skip-permissions`, `--desktop`, `--disable-slash-commands`, `--exclude-dynamic-system-prompt-sections`, `--fork-session`, `--ide`, `--include-hook-events`, `--mcp-debug`, `--restricted`, `--strict-mcp-config`, `--tmux`.
 - Unknown short flags (`-x`) are forwarded as single tokens without consuming the next argument.
 
 ## JSON `result` schema
@@ -96,24 +109,30 @@ Emitted once by `--output-format json`, as the trailing line of `--output-format
 }
 ```
 
-`subtype` is `"error"` when `is_error` is `true`, otherwise `"success"`. Daemon timeout and interrupt frames add an `"error"` reason field; see the [Daemon Protocol Reference](/claude-p/reference/daemon-protocol/).
+`subtype` is `"success"` when `is_error` is `false`. When `is_error` is `true`, `subtype` is the transcript's own `result` subtype if it wrote one, otherwise `"error_during_execution"`. An assistant entry with `isApiErrorMessage: true` (or the `<synthetic>` model), or a `StopFailure` hook, sets `is_error: true`. Usage and `num_turns` count each `message.id` once, keeping the last usage seen for that id: Claude Code can write several transcript lines for one message. Records repeated by `uuid` are skipped, so assistant text is never duplicated.
+
+Daemon turn failures, watchdog failures, startup failures, and interrupts use the same envelope with `"subtype":"error"`, `"error_during_execution"`, or `"interrupted"` plus an `"error"` reason field. Daemon protocol rejections of a single input line use a separate `{"type":"error","error":"<reason>"}` frame; see the [Daemon Protocol Reference](/claude-p/reference/daemon-protocol/).
 
 ## Environment variables
 
 | Variable | Scope | Effect |
 | --- | --- | --- |
 | `TMPDIR` | Runtime | Parent directory for per-run `claude-p-<pid>-<rand>/` temp dirs (default `/tmp`). |
-| `CLAUDE_P_PTY_TRACE` | Daemon | Stderr `[pty-trace]` interval in seconds (default `60`; `0`/`off`/`false`/`no` disables). |
+| `CLAUDE_P_DEBUG_SCREEN` | Runtime | Set to `1` to add the recent-screen excerpt to failure messages without `--debug`. Off by default because the screen can show prompt or tool text. |
+| `CLAUDE_P_PTY_TRACE` | Daemon | Stderr `[pty-trace]` interval in seconds. Off by default; `--debug` turns it on at `60`. A positive integer sets the interval even without `--debug`; `0`/`off`/`false`/`no` disables it. |
 | `CLAUDE_P_SKIP_DOWNLOAD` | `npm install` | Set to `1` to skip downloading the prebuilt binary. |
-| `CLAUDE_P_REQUIRE_CHECKSUM` | `npm install` | Set to `1` to fail install if a release lacks `SHA256SUMS`. |
+| `CLAUDE_P_STRICT_INSTALL` | `npm install` | Set to `1` to make connectivity download failures exit `1` instead of warning and exiting `0`. |
+| `CLAUDE_P_REQUIRE_CHECKSUM` | `npm install` | Set to `1` to require `SHA256SUMS` for pre-`0.1.3` versions in a source checkout. |
 | `CLAUDE_P_E2E` | `zig build test-integration` | Set to `1` to run real-`claude` end-to-end tests. |
 
 ## Exit codes
 
+The native binary sets every code below itself; `bin/claude-p.js` passes the code through.
+
 | Code | Meaning |
 | --- | --- |
-| `0` | Success (`is_error: false`), `--help`/`--version`, or clean daemon EOF/child exit. |
-| `1` | Assistant returned `is_error: true`. |
-| `2` | Bad CLI arguments, empty prompt, missing binary, `PromptNotAccepted`, `PromptTruncated`, `InvalidExtraSettings`, `SpawnFailed`, `TranscriptUnavailable`, or daemon `session_start_timeout`. |
-| `124` | One-shot `SessionStartTimeout` or `StopTimeout`, or daemon `idle_timeout` / `transcript_stalled`. |
-| `128 + sig` | Terminated by forwarded signal via `bin/claude-p.js` (e.g., `130` on `SIGINT`, `143` on `SIGTERM`). |
+| `0` | Success (`is_error: false`), `--help`/`--version`, or clean daemon EOF. |
+| `1` | Assistant returned `is_error: true` (including `StopFailure`). |
+| `2` | Usage error (bad or rejected flag, missing value, empty prompt, `PROMPT` with `--input-file`) or a run error: `PermissionPromptBlocked`, `InvalidOptions`, `PromptNotAccepted`, `PromptTruncated`, `TranscriptUnavailable`, `SpawnFailed`, `InvalidExtraSettings`, `InvalidCwd`, `UnexpectedStartupDialog`, or `Interrupted` without a caught signal. Daemon `claude_not_found`, `spawn_failed`, `child_exited`, `unexpected_startup_dialog`, and `prompt_truncated` also exit `2`. |
+| `124` | Timeout: `SessionStartTimeout`, `StopTimeout`, or `TranscriptStalled` (one-shot), or daemon `session_start_timeout`, `idle_timeout`, or `transcript_stalled`. |
+| `128 + sig` | `SIGINT`, `SIGTERM`, or `SIGHUP` received. The native binary unwinds, removes its PTY and temp dir, and exits `128 + sig` (`130` on `SIGINT`, `143` on `SIGTERM`). A duplicate signal within 2 s of the first is ignored, so a process-group `SIGINT` that arrives from both the kernel and `bin/claude-p.js` still cleans up. A later signal kills it with the default disposition. |

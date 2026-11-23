@@ -22,7 +22,7 @@ In your Zig project directory, fetch the package:
 zig fetch --save=claude_p git+https://github.com/smithersai/claude-p
 ```
 
-Then wire the `claude_p` module and platform system library (`proc` on macOS, `util` on Linux, plus `libc`) in `build.zig`:
+Then import the `claude_p` module and add a `run` step in `build.zig`:
 
 ```zig
 const std = @import("std");
@@ -48,18 +48,22 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    if (target.result.os.tag == .linux) exe.linkSystemLibrary("util");
-    if (target.result.os.tag == .macos) exe.linkSystemLibrary("proc");
-
     b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run my-agent");
+    run_step.dependOn(&run_cmd.step);
 }
 ```
 
-<Callout title="Why link proc / util?" kind="concept">
-  <code>claude_p</code> embeds <code>zmux.NativeSession</code>, which calls POSIX PTY syscalls
-  (<code>openpty</code>/<code>forkpty</code> in <code>libutil</code> on Linux) and process
-  inspection APIs (<code>libproc</code> on macOS). Linking those libraries avoids undefined symbol
-  errors at link time.
+<Callout title="No system libraries to link" kind="concept">
+  <code>claude_p</code> embeds <code>zmux.NativeSession</code>, which needs <code>libc</code>,
+  <code>libutil</code> on Linux (<code>openpty</code>/<code>forkpty</code>), and
+  <code>libproc</code> on macOS. The exported <code>claude_p</code> module already declares those
+  in claude-p's <code>build.zig</code>, so your executable links them through the import. Do not
+  add your own <code>linkSystemLibrary</code> calls.
 </Callout>
 
 ---
@@ -95,10 +99,12 @@ pub fn main() !void {
 }
 ```
 
-Build and run:
+Build and run through the `run` step, or run the installed binary directly:
 
 ```bash
 zig build run
+# or
+zig build && ./zig-out/bin/my-agent
 ```
 
 Notice the ownership contract: `claude_p.run` takes an explicit `std.mem.Allocator` and returns a `Result` whose `Summary` owns `final_text`, `session_id`, and `jsonl_replay`. Always pair it with `defer result.deinit(alloc);`.
@@ -149,7 +155,8 @@ pub fn main() !void {
 <Callout title="Watch the bytes: how extra_hooks stays safe" kind="bytes">
   In <code>src/hook.zig</code>, <code>createWithOptions()</code> validates
   <code>extra_hooks</code> and <code>extra_settings_json</code> <em>before</em> creating the temp
-  directory or FIFO. Invalid JSON, non-object JSON, or empty hook strings fail immediately with
+  directory or FIFO. Invalid JSON, non-object JSON, JSON nested deeper than 128 levels,
+  <code>"disableAllHooks": true</code>, or empty hook strings fail immediately with
   <code>error.InvalidExtraSettings</code> and leave zero temp files behind. And
   <code>claude-p</code>'s own relay hooks are always inserted first so your hooks can never break
   <code>SessionStart</code> or <code>Stop</code> detection.
@@ -171,8 +178,10 @@ pub fn main() !void {
   <Fragment slot="answer">
     <strong><code>claude_p</code> silently ignores the <code>"hooks"</code> key and keeps its own relay hooks intact.</strong>
     <code>cleanupPeriodDays: 7</code> is merged into the generated <code>--settings</code> object.
-    Only malformed JSON, a non-object root (like <code>"[]"</code> or <code>"42"</code>), or an
-    empty <code>ExtraHook.event</code>/<code>command</code> returns <code>error.InvalidExtraSettings</code>.
+    <code>error.InvalidExtraSettings</code> is returned only for malformed JSON, a non-object root
+    (like <code>"[]"</code> or <code>"42"</code>), nesting deeper than 128 levels,
+    <code>"disableAllHooks": true</code> (it would silence the relay hooks), or an empty or
+    non-UTF-8 <code>ExtraHook.event</code>/<code>command</code>.
   </Fragment>
 </Exercise>
 

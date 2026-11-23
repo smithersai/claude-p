@@ -39,7 +39,11 @@ pub const Options = struct {
     /// generated `--settings` JSON.
     extra_settings_json: ?[]const u8 = null,
     verbose: bool = false,
+    /// Wall-clock budget for the whole run. `0` disables the timeout.
     timeout_ms: u64 = 300_000,
+    /// While awaiting Stop, timeout when both transcript and PTY are idle.
+    /// Null or zero disables the progress watchdog.
+    transcript_idle_timeout_ms: ?u64 = null,
     /// Override `claude` binary path (testing).
     claude_path: ?[]const u8 = null,
     cols: u16 = 120,
@@ -51,6 +55,7 @@ pub const Options = struct {
     /// final `result` envelope and flushes. Result.streamed is set to true
     /// so callers can avoid re-emitting via Result.write.
     stream_writer: ?*std.Io.Writer = null,
+    retain_replay: bool = true,
 };
 
 pub const Result = struct {
@@ -84,8 +89,12 @@ pub const Result = struct {
 };
 
 pub const RunError = error{
+    WriteFailed,
+    PermissionPromptBlocked,
+    InvalidOptions,
     SessionStartTimeout,
     StopTimeout,
+    TranscriptStalled,
     /// claude never acknowledged the typed prompt after all re-injections.
     PromptNotAccepted,
     /// claude received a truncated copy of our typed prompt.
@@ -95,7 +104,181 @@ pub const RunError = error{
     NoPromptSupplied,
     /// `extra_settings_json` is invalid/non-object, or an extra hook is empty.
     InvalidExtraSettings,
+    /// `requestInterrupt` was called (SIGINT / SIGTERM / SIGHUP). `run`
+    /// unwinds through its `defer`s, so the PTY and temp dir are gone.
+    Interrupted,
+    /// `opts.cwd` does not name a directory this process can open.
+    InvalidCwd,
+    /// claude showed a bypass-permissions or development-channels dialog that
+    /// the caller's flags did not ask for. The driver never confirms it.
+    UnexpectedStartupDialog,
 } || std.mem.Allocator.Error;
+
+// ---------------------------------------------------------------------------
+// Signal cancellation & monotonic clock
+// ---------------------------------------------------------------------------
+
+/// Set by `requestInterrupt`; polled by `run` and by every settle wait.
+pub var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+// Remember signals for overlapping runs even after one run consumes the flag.
+var interrupt_generation = std.atomic.Value(u32).init(0);
+threadlocal var active_generation: ?u32 = null;
+
+pub const InterruptScope = struct {
+    previous: ?u32,
+
+    pub fn enter() InterruptScope {
+        const previous = active_generation;
+        active_generation = interrupt_generation.load(.seq_cst);
+        return .{ .previous = previous };
+    }
+
+    pub fn exit(self: InterruptScope) void {
+        active_generation = self.previous;
+    }
+};
+
+/// Ask every in-flight run to stop using only lock-free signal-safe atomics.
+pub fn requestInterrupt() void {
+    _ = interrupt_generation.fetchAdd(1, .seq_cst);
+    interrupted.store(true, .seq_cst);
+}
+
+pub fn clearInterrupt() void {
+    interrupted.store(false, .seq_cst);
+}
+
+pub fn isInterrupted() bool {
+    return interrupted.load(.seq_cst) or (active_generation != null and active_generation.? != interrupt_generation.load(.seq_cst));
+}
+
+var clock_once = std.once(initClock);
+var clock_wall_base_ns: i128 = 0;
+var clock_mono_base_ns: i128 = 0;
+
+fn rawMonotonicNs() ?i128 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return null;
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+fn initClock() void {
+    clock_wall_base_ns = std.time.nanoTimestamp();
+    clock_mono_base_ns = rawMonotonicNs() orelse 0;
+}
+
+/// Nanoseconds on a clock that never steps: the wall-clock time sampled once
+/// at first use, advanced by `CLOCK_MONOTONIC`. NTP or manual clock changes
+/// cannot move it, so deadlines, watchdogs, and durations built on it never
+/// misfire or go negative. The epoch anchor keeps values near
+/// `std.time.nanoTimestamp()` so they fit `i64` and stay comparable with
+/// callers that have not switched clocks yet.
+pub fn monotonicNs() i128 {
+    clock_once.call();
+    const mono = rawMonotonicNs() orelse return std.time.nanoTimestamp();
+    return clock_wall_base_ns + (mono - clock_mono_base_ns);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-spawn validation: working directory & claude binary
+// ---------------------------------------------------------------------------
+
+/// Check that `cwd`, when set, names a directory this process can open.
+/// zmux would otherwise fork and fail the `chdir` inside the child.
+pub fn validateCwd(cwd: ?[]const u8) RunError!void {
+    const path = cwd orelse return;
+    const resolved = try resolveCwd(std.heap.page_allocator, path);
+    std.heap.page_allocator.free(resolved);
+}
+
+fn resolveCwd(allocator: std.mem.Allocator, path: []const u8) RunError![]u8 {
+    if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidCwd;
+    const resolved = std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCwd,
+    };
+    errdefer allocator.free(resolved);
+    var dir = std.fs.cwd().openDir(resolved, .{}) catch return error.InvalidCwd;
+    dir.close();
+    std.posix.access(resolved, std.posix.X_OK) catch return error.InvalidCwd;
+    return resolved;
+}
+
+pub const ResolveError = error{
+    /// No executable regular file at the override path or on `PATH`.
+    ClaudeNotFound,
+} || std.mem.Allocator.Error;
+
+fn isExecutableFile(path: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    const st = std.fs.cwd().statFile(path) catch return false;
+    if (st.kind != .file) return false;
+    std.posix.access(path, std.posix.X_OK) catch return false;
+    return true;
+}
+
+/// Resolve the `claude` executable before spawning. An `override` containing
+/// `/` is checked as a path; a bare name (default `claude`) is searched on
+/// `path_env` the way a shell would. Returns the owned, resolved path.
+pub fn resolveClaudeBinaryIn(
+    allocator: std.mem.Allocator,
+    override: ?[]const u8,
+    path_env: ?[]const u8,
+) ResolveError![]u8 {
+    const name = override orelse "claude";
+    if (name.len == 0) return ResolveError.ClaudeNotFound;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        if (!isExecutableFile(name)) return ResolveError.ClaudeNotFound;
+        return absolutePath(allocator, name);
+    }
+    var it = std.mem.splitScalar(u8, path_env orelse "/usr/local/bin:/usr/bin:/bin", ':');
+    while (it.next()) |dir| {
+        const candidate = try std.fs.path.join(allocator, &.{ if (dir.len == 0) "." else dir, name });
+        defer allocator.free(candidate);
+        if (isExecutableFile(candidate)) return absolutePath(allocator, candidate) catch |err| switch (err) {
+            error.ClaudeNotFound => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
+    return ResolveError.ClaudeNotFound;
+}
+
+fn absolutePath(allocator: std.mem.Allocator, path: []const u8) ResolveError![]u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ClaudeNotFound,
+    };
+}
+
+/// `resolveClaudeBinaryIn` against this process's `PATH`.
+pub fn resolveClaudeBinary(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
+    const path_env: ?[]u8 = std.process.getEnvVarOwned(allocator, "PATH") catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+    defer if (path_env) |p| allocator.free(p);
+    return resolveClaudeBinaryIn(allocator, override, path_env);
+}
+
+/// The command line handed to zmux's `/bin/sh -l -c`: `exec` plus the quoted
+/// argv, so the shell replaces itself with `claude` and no extra shell PID
+/// sits between the PTY and the child.
+pub fn buildShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    return buildShellCommandInDir(allocator, argv, null);
+}
+
+pub fn buildShellCommandInDir(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) ![]u8 {
+    const quoted = try shellQuoteArgv(allocator, argv);
+    defer allocator.free(quoted);
+    if (cwd) |dir| {
+        const path = try resolveCwd(allocator, dir);
+        defer allocator.free(path);
+        const escaped = try shellQuoteArgv(allocator, &.{path});
+        defer allocator.free(escaped);
+        return std.mem.concat(allocator, u8, &.{ "cd -- ", escaped, " || exit 126; exec ", quoted });
+    }
+    return std.mem.concat(allocator, u8, &.{ "exec ", quoted });
+}
 
 /// Owned argv container returned by `buildArgv`. Entries borrow from the
 /// caller's `binary`, `settings_json`, and `opts`, except the formatted
@@ -284,26 +467,104 @@ fn isSpace(b: u8) bool {
     return b == ' ' or b == '\n' or b == '\r' or b == '\t';
 }
 
-fn countNonSpace(s: []const u8) usize {
+/// Byte source for `promptPayloadLen`: `text` as written, or as `PasteChunker`
+/// sends it (every `~` that would complete `ESC[201~` dropped).
+const PromptBytes = struct {
+    text: []const u8,
+    neutralize: bool,
+    pos: usize = 0,
+    end_match: usize = 0,
+
+    fn next(self: *PromptBytes) ?u8 {
+        while (self.pos < self.text.len) {
+            const b = self.text[self.pos];
+            self.pos += 1;
+            if (!self.neutralize) return b;
+            if (self.end_match == paste_end.len - 1 and b == paste_end[paste_end.len - 1]) continue;
+            if (b == paste_end[self.end_match]) {
+                self.end_match += 1;
+            } else {
+                self.end_match = if (b == paste_end[0]) 1 else 0;
+            }
+            return b;
+        }
+        return null;
+    }
+};
+
+/// Count the bytes of `text` that a terminal input parser must deliver as
+/// text: everything except escape sequences (CSI / OSC / DCS / two-byte
+/// escapes, same grammar as `stripCsiInto`), control bytes (`< 0x20`, `0x7f`),
+/// and spaces. With `neutralize`, count the stream `PasteChunker` sends.
+pub fn promptPayloadLen(text: []const u8, neutralize: bool) usize {
+    var src: PromptBytes = .{ .text = text, .neutralize = neutralize };
     var n: usize = 0;
-    for (s) |b| {
-        if (!isSpace(b)) n += 1;
+    while (src.next()) |b| {
+        if (b != 0x1b) {
+            if (b > 0x20 and b != 0x7f) n += 1;
+            continue;
+        }
+        const kind = src.next() orelse break;
+        switch (kind) {
+            '[' => {
+                var c = src.next();
+                while (c != null and c.? >= 0x30 and c.? <= 0x3f) c = src.next();
+                while (c != null and c.? >= 0x20 and c.? <= 0x2f) c = src.next();
+                // `c` is the final byte (or end of input); it is consumed.
+            },
+            ']', 'P', 'X', '^', '_' => {
+                // String body runs to ST (`ESC \`); OSC also ends at BEL.
+                var c = src.next();
+                while (c) |byte| {
+                    if (kind == ']' and byte == 0x07) break;
+                    if (byte == 0x1b) {
+                        c = src.next();
+                        if (c != null and c.? == '\\') break;
+                        continue;
+                    }
+                    c = src.next();
+                }
+            },
+            else => {},
+        }
     }
     return n;
 }
 
-/// Detect whether Claude received a truncated copy of our typed prompt (e.g.
-/// from a PTY buffer overflow). Normalizes whitespace/CRLF and treats Claude's
-/// unexpanded paste placeholders (`[Pasted text #...]` / `<pasted_content...`)
-/// as NOT truncated so legitimate long bracketed pastes never false-positive.
-pub fn isPromptTruncated(expected: []const u8, received: []const u8) bool {
-    const exp_non_ws = countNonSpace(expected);
-    if (expected.len <= prompt_truncation_min_len or exp_non_ws <= prompt_truncation_min_len) {
-        return false;
+fn afterDigits(s: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    return if (i > 0) s[i..] else null;
+}
+
+fn isPastePlaceholder(text: []const u8) bool {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.startsWith(u8, s, "[Image #")) {
+        return std.mem.eql(u8, afterDigits(s["[Image #".len..]) orelse return false, "]");
     }
-    if (std.mem.indexOf(u8, received, "[Pasted text #") != null) return false;
-    if (std.mem.indexOf(u8, received, "<pasted_content") != null) return false;
-    return countNonSpace(received) < exp_non_ws;
+    if (std.mem.startsWith(u8, s, "<pasted_content ") and std.mem.endsWith(u8, s, "</pasted_content>")) return true;
+    if (!std.mem.startsWith(u8, s, "[Pasted text #")) return false;
+    const count = afterDigits(s["[Pasted text #".len..]) orelse return false;
+    if (!std.mem.startsWith(u8, count, " +")) return false;
+    return std.mem.eql(u8, afterDigits(count[2..]) orelse return false, " lines]");
+}
+
+/// Detect whether Claude received a truncated copy of our typed prompt (e.g.
+/// from a PTY buffer overflow).
+///
+/// Both sides are reduced to `promptPayloadLen` first, so whitespace, CRLF,
+/// control bytes, and ANSI sequences never count. The expected side takes the
+/// smaller of the prompt as written and the prompt as `PasteChunker` sends it:
+/// neutralizing an embedded `ESC[201~` to `ESC[201` lets the input parser
+/// swallow the bytes that follow as the rest of that CSI, and those bytes are
+/// not a truncation. Claude's unexpanded paste placeholders (`[Pasted text
+/// #...]` / `<pasted_content...`) are never truncated.
+pub fn isPromptTruncated(expected: []const u8, received: []const u8) bool {
+    if (expected.len <= prompt_truncation_min_len) return false;
+    const floor = @min(promptPayloadLen(expected, false), promptPayloadLen(expected, true));
+    if (floor <= prompt_truncation_min_len) return false;
+    if (isPastePlaceholder(received)) return false;
+    return promptPayloadLen(received, false) < floor;
 }
 
 /// True when the final text parsed from the transcript agrees with the
@@ -317,18 +578,15 @@ pub fn finalTextMatchesStop(final_text: []const u8, stop_last: ?[]const u8) bool
 }
 
 /// True when this invocation restores an earlier conversation, either via
-/// explicit options or via pass-through `extra_args`.
+/// explicit options or via pass-through `extra_args` (`--resume`, `-r`,
+/// `--continue`, `-c`, `--fork-session`, `--from-pr`, `--teleport`, and the
+/// `--flag=value` spellings).
 pub fn isResumeRun(opts: Options) bool {
     if (opts.resume_session != null or opts.cont) return true;
-    for (opts.extra_args) |a| {
-        if (std.mem.eql(u8, a, "--resume") or
-            std.mem.eql(u8, a, "-r") or
-            std.mem.eql(u8, a, "--continue") or
-            std.mem.eql(u8, a, "-c") or
-            std.mem.startsWith(u8, a, "--resume="))
-        {
-            return true;
-        }
+    const exact = [_][]const u8{ "--resume", "-r", "--continue", "-c", "--fork-session", "--from-pr", "--teleport" };
+    var flags: ExtraFlags = .{ .args = opts.extra_args };
+    while (flags.next()) |arg| {
+        for (exact) |flag| if (std.mem.eql(u8, arg.name, flag)) return true;
     }
     return false;
 }
@@ -372,7 +630,7 @@ pub fn shouldStripChildEnv(name: []const u8) bool {
 
 /// Build the filtered child environment from the current process environment:
 /// strips nested-session markers via `shouldStripChildEnv`, drops inherited
-/// `CLAUDE_P_FIFO` & `TERM`, injects `CLAUDE_P_FIFO=<fifo_path>` and
+/// `CLAUDE_P_FIFO` and `TERM`, injects
 /// `TERM=xterm-256color`, and injects `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`
 /// unless already set. Caller frees with `freeChildEnv`.
 pub fn buildChildEnv(allocator: std.mem.Allocator, fifo_path: []const u8) !std.ArrayList([]u8) {
@@ -399,7 +657,7 @@ pub fn buildChildEnvFromMap(
         try appendEnv(allocator, &list, name, e.value_ptr.*);
     }
 
-    try appendEnv(allocator, &list, "CLAUDE_P_FIFO", fifo_path);
+    _ = fifo_path; // retained for callers of the original API
     try appendEnv(allocator, &list, "TERM", "xterm-256color");
     if (!saw_persistence) {
         try appendEnv(allocator, &list, persistence_env, "1");
@@ -470,20 +728,53 @@ pub const PasteChunker = struct {
 };
 
 pub fn writeBracketedPasteTo(sink: anytype, text: []const u8, gap_ns: u64) !void {
+    return writePasteUntil(sink, text, gap_ns, std.math.maxInt(i128));
+}
+
+fn checkDeadline(deadline_ns: i128) RunError!void {
+    if (isInterrupted()) return error.Interrupted;
+    if (monotonicNs() >= deadline_ns) return error.StopTimeout;
+}
+
+fn pauseUntil(duration_ns: u64, deadline_ns: i128) RunError!void {
+    const end = @min(deadline_ns, monotonicNs() + duration_ns);
+    while (true) {
+        try checkDeadline(deadline_ns);
+        const remaining = end - monotonicNs();
+        if (remaining <= 0) return;
+        std.Thread.sleep(@intCast(@min(remaining, 8 * std.time.ns_per_ms)));
+    }
+}
+
+fn writePasteUntil(sink: anytype, text: []const u8, gap_ns: u64, deadline_ns: i128) !void {
+    try checkDeadline(deadline_ns);
     try sink.writeInput(paste_start);
     var chunker: PasteChunker = .{ .text = text };
     var buf: [paste_chunk_bytes]u8 = undefined;
     while (chunker.next(&buf)) |chunk| {
         try sink.writeInput(chunk);
-        if (gap_ns > 0) std.Thread.sleep(gap_ns);
+        try pauseUntil(gap_ns, deadline_ns);
     }
     try sink.writeInput(paste_end);
 }
 
 pub fn typePromptTo(sink: anytype, text: []const u8, gap_ns: u64, enter_debounce_ns: u64) !void {
-    try writeBracketedPasteTo(sink, text, gap_ns);
-    if (enter_debounce_ns > 0) std.Thread.sleep(enter_debounce_ns);
+    return typePromptUntil(sink, text, gap_ns, enter_debounce_ns, std.math.maxInt(i128));
+}
+
+fn typePromptUntil(sink: anytype, text: []const u8, gap_ns: u64, enter_debounce_ns: u64, deadline_ns: i128) !void {
+    try writePasteUntil(sink, text, gap_ns, deadline_ns);
+    try pauseUntil(enter_debounce_ns, deadline_ns);
     try sink.writeInput("\r");
+}
+
+fn sendPrompt(session: *zmux.NativeSession, opts: Options, trace_start: i128, deadline_ns: i128) RunError!void {
+    typePromptUntil(session, opts.prompt, paste_chunk_gap_ms * std.time.ns_per_ms, ink_enter_debounce_ms * std.time.ns_per_ms, deadline_ns) catch |err| switch (err) {
+        error.Interrupted => return error.Interrupted,
+        error.StopTimeout => return error.StopTimeout,
+        // Child exit may race a final hook. Drain the FIFO before classifying it.
+        else => traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(err)}),
+    };
 }
 
 /// Send `text` as one DECSET 2004 bracketed paste (`\x1b[200~` ... `\x1b[201~`)
@@ -551,7 +842,78 @@ pub const DialogState = struct {
     /// mark is the repaint caused by that key.
     bytes_at_key: u64 = 0,
     keys_sent: u32 = 0,
+    /// Set when a dialog needed a key that `dialogConfirmAllowed` forbids.
+    /// No key is sent for it, now or later; `run` fails with
+    /// `RunError.UnexpectedStartupDialog`.
+    refused: DialogKind = .none,
 };
+
+const ExtraFlag = struct { name: []const u8, value: ?[]const u8 };
+
+const ExtraFlags = struct {
+    args: []const []const u8,
+
+    fn next(self: *ExtraFlags) ?ExtraFlag {
+        while (self.args.len != 0) {
+            const token = self.args[0];
+            self.args = self.args[1..];
+            if (std.mem.eql(u8, token, "--")) {
+                self.args = &.{};
+                return null;
+            }
+            if (!std.mem.startsWith(u8, token, "-")) continue;
+            if (std.mem.indexOfScalar(u8, token, '=')) |eq| {
+                if (std.mem.startsWith(u8, token, "--") or std.mem.eql(u8, token[0..eq], "-p"))
+                    return .{ .name = token[0..eq], .value = token[eq + 1 ..] };
+            }
+            const required = [_][]const u8{
+                "--permission-mode",    "--model",                     "--agent",           "--agents",                                "--system-prompt",          "--append-system-prompt",
+                "--system-prompt-file", "--append-system-prompt-file", "--setting-sources", "--session-id",                            "--effort",                 "--permission-prompt-tool",
+                "--output-format",      "--debug-file",                "--name",            "-n",                                      "--autocompact",            "--environment",
+                "--permission-prompts", "--plugin-dir",                "--plugin-url",      "--remote-control-session-name-prefix",    "--system-prompt-snapshot", "--add-dir",
+                "--allowedTools",       "--allowed-tools",             "--disallowedTools", "--disallowed-tools",                      "--mcp-config",             "--tools",
+                "--file",               "--betas",                     "--channels",        "--dangerously-load-development-channels", "--max-turns",              "--fallback-model",
+                "--settings",           "--input-format",              "--json-schema",     "--max-budget-usd",                        "--from-pr",
+            };
+            for (required) |flag| {
+                if (std.mem.eql(u8, token, flag) and self.args.len > 0 and !std.mem.eql(u8, self.args[0], "--")) {
+                    const value = self.args[0];
+                    self.args = self.args[1..];
+                    return .{ .name = token, .value = value };
+                }
+            }
+            return .{ .name = token, .value = null };
+        }
+        return null;
+    }
+};
+
+pub fn validateOptions(opts: Options) RunError!void {
+    if (opts.max_turns != null or opts.fallback_model != null) return error.InvalidOptions;
+    var flags: ExtraFlags = .{ .args = opts.extra_args };
+    while (flags.next()) |arg| {
+        for (args_mod.rejected_flags ++ [_][]const u8{ "--max-turns", "--fallback-model", "--include-partial-messages", "--forward-subagent-text", "--replay-user-messages" }) |flag| {
+            if (std.mem.eql(u8, flag, arg.name)) return error.InvalidOptions;
+        }
+    }
+}
+
+pub fn dialogConfirmAllowed(opts: Options, kind: DialogKind) bool {
+    var mode = opts.permission_mode;
+    var skip = opts.skip_permissions;
+    var channels = false;
+    var flags: ExtraFlags = .{ .args = opts.extra_args };
+    while (flags.next()) |arg| {
+        if (std.mem.eql(u8, arg.name, "--permission-mode")) mode = arg.value;
+        if (std.mem.eql(u8, arg.name, "--dangerously-skip-permissions") and arg.value == null) skip = true;
+        if (std.mem.eql(u8, arg.name, "--dangerously-load-development-channels")) channels = true;
+    }
+    return switch (kind) {
+        .none, .trust => true,
+        .dev_channels => channels,
+        .bypass_permissions => skip or std.mem.eql(u8, mode orelse "", "bypassPermissions"),
+    };
+}
 
 /// How long to wait for Ink to repaint after a dialog key before retrying a
 /// dropped keystroke. Long enough that a slow repaint on a wrapping 2-option
@@ -805,9 +1167,10 @@ pub fn maybeHandleStartupDialogs(
     session: *zmux.NativeSession,
 ) void {
     const st = &shared.dialog;
+    if (st.refused != .none) return;
     if (st.keys_sent >= max_dialog_keys) return;
 
-    const now_ns: i64 = @intCast(std.time.nanoTimestamp());
+    const now_ns: i64 = @intCast(monotonicNs());
     const last_out: i64 = shared.last_output_ns.load(.seq_cst);
     const quiescence_ns: i64 = @intCast(dialog_quiescence_ms * std.time.ns_per_ms);
     if (last_out == 0 or now_ns - last_out <= quiescence_ns) return;
@@ -849,6 +1212,15 @@ pub fn maybeHandleStartupDialogs(
         .confirm, .move_up, .move_down, .digit => {},
     }
 
+    // Never touch a dialog the caller did not ask for: not Enter, and not the
+    // navigation keys that would line Enter up.
+    if (!dialogConfirmAllowed(opts, decision.kind)) {
+        traceFmt(opts, trace_start, "{s} dialog was not requested by the caller; refusing to answer it", .{@tagName(decision.kind)});
+        st.kind = decision.kind;
+        st.refused = decision.kind;
+        return;
+    }
+
     var digit_buf: [1]u8 = undefined;
     const keys = dialogKeyBytes(decision.action, &digit_buf);
     traceFmt(opts, trace_start, "{s} dialog: sending {s} (key {d}/{d})", .{
@@ -860,7 +1232,7 @@ pub fn maybeHandleStartupDialogs(
     session.writeInput(keys) catch {};
     st.kind = decision.kind;
     st.last = decision.action;
-    st.last_key_ns = @intCast(std.time.nanoTimestamp());
+    st.last_key_ns = @intCast(monotonicNs());
     st.bytes_at_key = total;
     st.keys_sent += 1;
     if (decision.action == .confirm) switch (decision.kind) {
@@ -894,10 +1266,11 @@ pub fn flushPendingToPty(shared: *SharedState, session: *zmux.NativeSession) voi
 }
 
 fn sleepPumpingDec(shared: *SharedState, session: ?*zmux.NativeSession, duration_ms: u64) void {
-    const end_ns: i128 = std.time.nanoTimestamp() + @as(i128, @intCast(duration_ms)) * std.time.ns_per_ms;
+    const end_ns = @min(shared.deadline_ns, monotonicNs() + @as(i128, duration_ms) * std.time.ns_per_ms);
     while (true) {
         if (session) |s| flushPendingToPty(shared, s);
-        const rem_ns = end_ns - std.time.nanoTimestamp();
+        if (isInterrupted()) return;
+        const rem_ns = end_ns - monotonicNs();
         if (rem_ns <= 0) return;
         const step_ns: u64 = @intCast(@min(rem_ns, @as(i128, 15 * std.time.ns_per_ms)));
         std.Thread.sleep(step_ns);
@@ -914,10 +1287,11 @@ fn waitForOutputQuiet(
 ) bool {
     const quiescence_ns: i64 = @intCast(quiet_ms * std.time.ns_per_ms);
     const max_ns: i64 = @intCast(max_ms * std.time.ns_per_ms);
-    const wait_started: i64 = @intCast(std.time.nanoTimestamp());
+    const wait_started: i64 = @intCast(monotonicNs());
     while (true) {
         if (session) |s| flushPendingToPty(shared, s);
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        if (isInterrupted() or monotonicNs() >= shared.deadline_ns) return false;
+        const now: i64 = @intCast(monotonicNs());
         if (now - wait_started > max_ns) {
             traceFmt(opts, trace_start, "Ink readiness wait hit max ({d}ms) — typing anyway", .{max_ms});
             return false;
@@ -949,22 +1323,297 @@ fn settleBeforePrompt(opts: Options, trace_start: i128, shared: *SharedState, se
     _ = waitForOutputQuiet(opts, trace_start, shared, session, ink_quiescence_ms, ink_max_wait_ms / 2);
 }
 
-fn transcriptSize(path: ?[]const u8) u64 {
-    const p = path orelse return 0;
-    const st = std.fs.cwd().statFile(p) catch return 0;
-    return st.size;
+/// Take `transcript_path` from a hook payload. A path with an embedded NUL
+/// cannot name a file and would truncate at the syscall boundary, so it is
+/// dropped as if the hook had sent none.
+pub fn validateTranscriptPath(path: []const u8) bool {
+    return transcript_mod.validateTranscriptPath(path);
+}
+
+pub fn extractSafeTranscriptPath(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
+    const path = (try hook_mod.extractTranscriptPath(allocator, payload_json)) orelse return null;
+    if (!validateTranscriptPath(path)) {
+        allocator.free(path);
+        return null;
+    }
+    return path;
+}
+
+/// The only text `--debug` prints for a hook line: the event name and the
+/// payload size. Payloads carry the user's prompt and the assistant's reply
+/// and are never logged.
+pub fn formatHookTrace(buf: []u8, event: hook_mod.HookEvent, payload_len: usize) []const u8 {
+    return std.fmt.bufPrint(buf, "hook: {s} payload_bytes={d}", .{ @tagName(event), payload_len }) catch "hook: (trace overflow)";
+}
+
+pub const failure_screen_max_lines: usize = 15;
+pub const failure_screen_max_bytes: usize = 1024;
+
+/// Render the tail of raw PTY output for a failure diagnostic: escape
+/// sequences and control bytes stripped, blank lines and trailing spaces dropped, at most
+/// `failure_screen_max_lines` lines and `failure_screen_max_bytes` bytes,
+/// never starting inside a UTF-8 sequence. Returns a slice of `out`.
+pub fn formatFailureScreen(out: *[failure_screen_max_bytes]u8, raw: []const u8) []const u8 {
+    var stripped_buf: [recent_capacity]u8 = undefined;
+    const tail = raw[raw.len -| recent_capacity..];
+    const stripped = stripCsiInto(&stripped_buf, tail);
+
+    // Compact in place: one '\n' per non-blank line, no other control bytes.
+    var n: usize = 0;
+    var line_start: usize = 0;
+    var line_has_text = false;
+    for (stripped) |b| {
+        if (b == '\n' or b == '\r') {
+            if (line_has_text) {
+                while (stripped_buf[n - 1] == ' ') n -= 1;
+                stripped_buf[n] = '\n';
+                n += 1;
+                line_start = n;
+                line_has_text = false;
+            } else {
+                n = line_start;
+            }
+            continue;
+        }
+        if (b < 0x20 or b == 0x7f) continue;
+        if (b != ' ') line_has_text = true;
+        stripped_buf[n] = b;
+        n += 1;
+    }
+    if (!line_has_text) n = line_start;
+    var text: []const u8 = std.mem.trimRight(u8, stripped_buf[0..n], " \n");
+
+    var lines: usize = 1;
+    var i: usize = text.len;
+    while (i > 0) : (i -= 1) {
+        if (text[i - 1] != '\n') continue;
+        if (lines == failure_screen_max_lines) {
+            text = text[i..];
+            break;
+        }
+        lines += 1;
+    }
+    if (text.len > out.len) {
+        text = text[text.len - out.len ..];
+        while (text.len > 0 and (text[0] & 0xC0) == 0x80) text = text[1..];
+    }
+    @memcpy(out[0..text.len], text);
+    return out[0..text.len];
+}
+
+pub fn reportFailure(shared: ?*SharedState, debug_screen: bool, comptime fmt: []const u8, args: anytype) void {
+    var buf: [2048]u8 = undefined;
+    var stderr = std.fs.File.stderr().writerStreaming(&buf);
+    writeFailure(&stderr.interface, shared, debug_screen, fmt, args) catch return;
+    stderr.interface.flush() catch {};
+}
+
+fn writeFailure(writer: *std.Io.Writer, shared: ?*SharedState, debug_screen: bool, comptime fmt: []const u8, args: anytype) !void {
+    try writer.print("claude-p: " ++ fmt, args);
+    const sh = shared orelse return writer.writeByte('\n');
+    try writer.print(" (PTY bytes={d})\n", .{sh.bytes_seen.load(.seq_cst)});
+    if (!debug_screen) return;
+    var out: [failure_screen_max_bytes]u8 = undefined;
+    const screen = blk: {
+        sh.recent_mutex.lock();
+        defer sh.recent_mutex.unlock();
+        const recent = if (sh.startup_done.load(.seq_cst)) sh.post_start[0..sh.post_start_len] else sh.recent.items;
+        break :blk formatFailureScreen(&out, recent);
+    };
+    if (screen.len > 0) try writer.print("claude-p: recent claude output:\n{s}\n", .{screen});
+}
+
+fn transcriptSize(path: ?[]const u8) ?u64 {
+    const file = transcript_mod.openTranscriptRegularFile(path orelse return null) catch return null;
+    defer file.close();
+    return (file.stat() catch return null).size;
+}
+
+pub fn hasExtraHook(hooks: []const hook_mod.ExtraHook, event: []const u8) bool {
+    for (hooks) |hook| if (std.mem.eql(u8, hook.event, event)) return true;
+    return false;
+}
+
+pub fn stopConfirmationNs(hooks: []const hook_mod.ExtraHook) i128 {
+    const ms: i128 = if (hasExtraHook(hooks, "Stop")) 2000 else 150;
+    return ms * std.time.ns_per_ms;
+}
+
+pub fn debugScreenEnabled(debug: bool) bool {
+    return debug or std.mem.eql(u8, std.posix.getenv("CLAUDE_P_DEBUG_SCREEN") orelse "", "1");
+}
+
+pub const StopSummaryStatus = enum { none, confirmed, continued };
+
+fn normalizedPromptEqual(a: []const u8, b: []const u8) bool {
+    var left = std.mem.tokenizeAny(u8, a, " \t\r\n");
+    var right = std.mem.tokenizeAny(u8, b, " \t\r\n");
+    while (left.next()) |token| if (!std.mem.eql(u8, token, right.next() orelse return false)) return false;
+    return right.next() == null;
+}
+
+fn userPromptMatches(allocator: std.mem.Allocator, obj: std.json.ObjectMap, prompt: []const u8) !bool {
+    const message = obj.get("message") orelse return false;
+    if (message != .object) return false;
+    const content = message.object.get("content") orelse return false;
+    if (content == .string) return normalizedPromptEqual(content.string, prompt);
+    if (content != .array) return false;
+    var joined: std.ArrayList(u8) = .{};
+    defer joined.deinit(allocator);
+    for (content.array.items) |block| {
+        if (block != .object) continue;
+        const kind = block.object.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) continue;
+        const part = block.object.get("text") orelse continue;
+        if (part == .string) try joined.appendSlice(allocator, part.string);
+    }
+    return normalizedPromptEqual(joined.items, prompt);
+}
+
+pub fn isContinuationRecord(allocator: std.mem.Allocator, line: []const u8, stop_last: ?[]const u8, current_prompt: ?[]const u8) !bool {
+    return try stopRecordStatus(allocator, line, stop_last, current_prompt) == .continued;
+}
+
+fn stopRecordStatus(allocator: std.mem.Allocator, line: []const u8, stop_last: ?[]const u8, current_prompt: ?[]const u8) !StopSummaryStatus {
+    const record = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .none,
+    };
+    defer record.deinit();
+    if (record.value != .object) return .none;
+    const obj = record.value.object;
+    const ty = obj.get("type") orelse return .none;
+    if (ty != .string) return .none;
+    if (std.mem.eql(u8, ty.string, "user")) {
+        if (current_prompt) |prompt| if (try userPromptMatches(allocator, obj, prompt)) return .none;
+        return .continued;
+    }
+    if (std.mem.eql(u8, ty.string, "tool_use")) return .continued;
+    if (std.mem.eql(u8, ty.string, "system")) {
+        const sub = obj.get("subtype") orelse return .none;
+        if (sub != .string or !std.mem.eql(u8, sub.string, "stop_hook_summary")) return .none;
+        const pc = obj.get("preventedContinuation") orelse return .confirmed;
+        if (pc != .bool) return .none;
+        return if (pc.bool) .continued else .confirmed;
+    }
+    if (!std.mem.eql(u8, ty.string, "assistant")) return .none;
+
+    const message = obj.get("message") orelse return .none;
+    if (message != .object) return .none;
+    const content = message.object.get("content") orelse return .none;
+    var joined: std.ArrayList(u8) = .{};
+    defer joined.deinit(allocator);
+    const text = switch (content) {
+        .string => content.string,
+        .array => |blocks| blk: {
+            for (blocks.items) |block| {
+                if (block != .object) continue;
+                const kind = block.object.get("type") orelse continue;
+                if (kind != .string) continue;
+                if (std.mem.eql(u8, kind.string, "tool_use")) return .continued;
+                if (!std.mem.eql(u8, kind.string, "text")) continue;
+                const part = block.object.get("text") orelse continue;
+                if (part == .string) try joined.appendSlice(allocator, part.string);
+            }
+            break :blk joined.items;
+        },
+        else => return .none,
+    };
+
+    const trimmed_text = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed_text.len == 0) return .none;
+    const expected = stop_last orelse return .none;
+    const trimmed_stop = std.mem.trim(u8, expected, " \t\r\n");
+    if (trimmed_stop.len == 0) return .none;
+    // The current turn's own final assistant message often flushes to disk
+    // asynchronously 20–100 ms after the Stop hook fires; do not mistake it
+    // for a blocking-Stop continuation.
+    if (std.mem.eql(u8, trimmed_text, trimmed_stop) or std.mem.indexOf(u8, trimmed_stop, trimmed_text) != null) {
+        return .none;
+    }
+    return .continued;
+}
+
+/// Only consume complete records. A partial line can finish on the next poll.
+pub fn scanStopRecords(allocator: std.mem.Allocator, file: std.fs.File, pos: *u64, size: u64, stop_last: ?[]const u8, prompt: []const u8) !StopSummaryStatus {
+    var buf: [8192]u8 = undefined;
+    var reader = file.reader(&buf);
+    try reader.seekTo(pos.*);
+    var line: std.Io.Writer.Allocating = .init(allocator);
+    defer line.deinit();
+    while (reader.logicalPos() < size) {
+        line.clearRetainingCapacity();
+        _ = reader.interface.streamDelimiterLimit(&line.writer, '\n', .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+            error.StreamTooLong => {
+                _ = try reader.interface.discardDelimiterInclusive('\n');
+                pos.* = reader.logicalPos();
+                continue;
+            },
+            else => return err,
+        };
+        if (reader.interface.bufferedLen() == 0) break;
+        reader.interface.toss(1);
+        pos.* = reader.logicalPos();
+        const status = try stopRecordStatus(allocator, line.written(), stop_last, prompt);
+        if (status != .none) return status;
+    }
+    return .none;
+}
+
+fn matchesPrompt(allocator: std.mem.Allocator, line: []const u8, prompt: []const u8) !bool {
+    const record = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer record.deinit();
+    if (record.value != .object) return false;
+    const obj = record.value.object;
+    const ty = obj.get("type") orelse return false;
+    return ty == .string and std.mem.eql(u8, ty.string, "user") and try userPromptMatches(allocator, obj, prompt);
+}
+
+fn scanForPrompt(allocator: std.mem.Allocator, path: []const u8, prompt: []const u8) !?u64 {
+    const file = try transcript_mod.openTranscriptRegularFile(path);
+    defer file.close();
+    var buf: [8192]u8 = undefined;
+    var reader = file.reader(&buf);
+    var line: std.Io.Writer.Allocating = .init(allocator);
+    defer line.deinit();
+    var last: ?u64 = null;
+    while (true) {
+        const offset = reader.logicalPos();
+        line.clearRetainingCapacity();
+        _ = reader.interface.streamDelimiterLimit(&line.writer, '\n', .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+            error.StreamTooLong => {
+                _ = reader.interface.discardDelimiterInclusive('\n') catch |e| switch (e) {
+                    error.EndOfStream => break,
+                    else => return e,
+                };
+                continue;
+            },
+            else => return err,
+        };
+        if (try matchesPrompt(allocator, line.written(), prompt)) last = offset;
+        if (reader.interface.bufferedLen() == 0) break;
+        reader.interface.toss(1); // LF
+    }
+    return last;
+}
+
+pub fn findPromptTurnOffset(allocator: std.mem.Allocator, path: []const u8, prompt: []const u8) ?u64 {
+    return scanForPrompt(allocator, path, prompt) catch null;
 }
 
 fn trace(opts: Options, start: i128, label: []const u8) void {
     if (!opts.debug) return;
-    const now: i128 = std.time.nanoTimestamp();
+    const now: i128 = monotonicNs();
     const elapsed_ms: i64 = @intCast(@divTrunc(now - start, std.time.ns_per_ms));
     std.debug.print("[claude-p +{d}ms] {s}\n", .{ elapsed_ms, label });
 }
 
 fn traceFmt(opts: Options, start: i128, comptime fmt: []const u8, args: anytype) void {
     if (!opts.debug) return;
-    const now: i128 = std.time.nanoTimestamp();
+    const now: i128 = monotonicNs();
     const elapsed_ms: i64 = @intCast(@divTrunc(now - start, std.time.ns_per_ms));
     std.debug.print("[claude-p +{d}ms] ", .{elapsed_ms});
     std.debug.print(fmt, args);
@@ -978,17 +1627,27 @@ fn traceFmt(opts: Options, start: i128, comptime fmt: []const u8, args: anytype)
 pub const SharedState = struct {
     session: *zmux.NativeSession,
     debug: bool,
+    debug_screen: bool = false,
+    deadline_ns: i128 = std.math.maxInt(i128),
+    post_start: [2048]u8 = undefined,
+    post_start_len: usize = 0,
     // Bytes the DEC responder wants written back to the PTY. Mutex-guarded.
     write_mutex: std.Thread.Mutex = .{},
     pending_to_pty: std.ArrayList(u8) = .{},
     bytes_seen: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    /// Timestamp (ns since arbitrary epoch — std.time.nanoTimestamp, truncated
-    /// to i64 so atomics work on all targets including x86_64-linux-musl).
+    /// `monotonicNs()` of the last PTY chunk, truncated to i64 so atomics work
+    /// on all targets including x86_64-linux-musl.
     last_output_ns: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
     exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     // Rolling buffer of recently-seen output for startup dialog detection.
+    // Frozen once `startup_done` is set.
     recent_mutex: std.Thread.Mutex = .{},
     recent: std.ArrayList(u8) = .{},
+    /// Freeze the startup dialog buffer. Debug diagnostics then keep only the latest 2 KiB.
+    startup_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Streaming DEC-query decoder (answers queries split across PTY reads)
+    /// touched only by the reader thread.
+    dec: terminal_mod.DecDecoder = .{},
     trust_dismissed: bool = false,
     bypass_perms_accepted: bool = false,
     dev_channels_confirmed: bool = false,
@@ -997,36 +1656,58 @@ pub const SharedState = struct {
 
 pub const recent_capacity: usize = 8192;
 
+pub const dec_reply_capacity = 256;
+
+/// Fixed-buffer convenience for callers that only need a prefix of the replies.
+/// The PTY callback uses its growable queue for lossless handling of arbitrary bursts.
+pub fn decRepliesInto(shared: *SharedState, reply_buf: *[dec_reply_capacity]u8, data: []const u8) []const u8 {
+    var backing = std.heap.FixedBufferAllocator.init(reply_buf);
+    var replies = std.ArrayList(u8).initCapacity(backing.allocator(), reply_buf.len) catch unreachable;
+    shared.dec.feed(backing.allocator(), data, &replies) catch {};
+    return replies.items;
+}
+
 pub fn onZmuxEvent(ctx: *anyopaque, event: zmux.native.Event) void {
     const shared: *SharedState = @ptrCast(@alignCast(ctx));
     switch (event) {
         .pane_output => |po| {
-            // Run the DEC-query responder; queue responses for the main loop.
-            var resp: std.ArrayList(u8) = .{};
-            defer resp.deinit(std.heap.page_allocator);
-            terminal_mod.respondToDecQueries(std.heap.page_allocator, po.data, &resp) catch {};
-            if (resp.items.len > 0) {
-                shared.write_mutex.lock();
-                shared.pending_to_pty.appendSlice(std.heap.page_allocator, resp.items) catch {};
-                shared.write_mutex.unlock();
+            // Feed the entire chunk into the growable reply queue, preserving
+            // decoder state across callbacks and arbitrary query bursts.
+            shared.write_mutex.lock();
+            shared.dec.feed(std.heap.page_allocator, po.data, &shared.pending_to_pty) catch {};
+            shared.write_mutex.unlock();
+            const now_ns: i64 = @intCast(monotonicNs());
+            if (shared.startup_done.load(.seq_cst)) {
+                if (shared.debug_screen or shared.debug) {
+                    shared.recent_mutex.lock();
+                    defer shared.recent_mutex.unlock();
+                    const added = @min(po.data.len, shared.post_start.len);
+                    const kept = @min(shared.post_start_len, shared.post_start.len - added);
+                    std.mem.copyForwards(u8, shared.post_start[0..kept], shared.post_start[shared.post_start_len - kept .. shared.post_start_len]);
+                    @memcpy(shared.post_start[kept..][0..added], po.data[po.data.len - added ..]);
+                    shared.post_start_len = kept + added;
+                }
+                _ = shared.bytes_seen.fetchAdd(po.data.len, .seq_cst);
+                shared.last_output_ns.store(now_ns, .seq_cst);
+            } else {
+                // Update the rolling recent-output buffer AND bytes_seen under
+                // the same mutex so `maybeHandleStartupDialogs` always reads a
+                // consistent `(bytes_seen, recent)` snapshot.
+                shared.recent_mutex.lock();
+                defer shared.recent_mutex.unlock();
+                shared.recent.appendSlice(std.heap.page_allocator, po.data) catch {};
+                if (shared.recent.items.len > recent_capacity) {
+                    const drop = shared.recent.items.len - recent_capacity;
+                    std.mem.copyForwards(
+                        u8,
+                        shared.recent.items[0..recent_capacity],
+                        shared.recent.items[drop..],
+                    );
+                    shared.recent.shrinkRetainingCapacity(recent_capacity);
+                }
+                _ = shared.bytes_seen.fetchAdd(po.data.len, .seq_cst);
+                shared.last_output_ns.store(now_ns, .seq_cst);
             }
-            // Update the rolling recent-output buffer AND bytes_seen under the
-            // same mutex so `maybeHandleStartupDialogs` always reads a
-            // consistent `(bytes_seen, recent)` snapshot.
-            shared.recent_mutex.lock();
-            shared.recent.appendSlice(std.heap.page_allocator, po.data) catch {};
-            if (shared.recent.items.len > recent_capacity) {
-                const drop = shared.recent.items.len - recent_capacity;
-                std.mem.copyForwards(
-                    u8,
-                    shared.recent.items[0..recent_capacity],
-                    shared.recent.items[drop..],
-                );
-                shared.recent.shrinkRetainingCapacity(recent_capacity);
-            }
-            _ = shared.bytes_seen.fetchAdd(po.data.len, .seq_cst);
-            shared.last_output_ns.store(@intCast(std.time.nanoTimestamp()), .seq_cst);
-            shared.recent_mutex.unlock();
             if (shared.debug) std.debug.print("zmux pane_output: {d} bytes\n", .{po.data.len});
         },
         .session_exited => |se| {
@@ -1041,10 +1722,101 @@ pub fn onZmuxEvent(ctx: *anyopaque, event: zmux.native.Event) void {
 // Main driver loop
 // ---------------------------------------------------------------------------
 
-pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
-    if (opts.prompt.len == 0) return RunError.NoPromptSupplied;
+const stop_failure_default_text = "claude reported StopFailure before finishing the turn";
 
-    const trace_start: i128 = std.time.nanoTimestamp();
+/// Build the error `Summary` for a `StopFailure` hook: `is_error = true` (exit
+/// code 1), the hook's error text when it carries one, and its `session_id`.
+pub fn synthesizeStopFailureSummary(allocator: std.mem.Allocator, payload: []const u8) !transcript_mod.Summary {
+    var message = try hook_mod.extractErrorMessageAlloc(allocator, payload);
+    errdefer if (message) |m| allocator.free(m);
+    if (message) |m| {
+        if (std.mem.trim(u8, m, " \t\r\n").len == 0) {
+            allocator.free(m);
+            message = null;
+        }
+    }
+    if (message == null) message = try allocator.dupe(u8, stop_failure_default_text);
+
+    const sid = (try hook_mod.extractSessionId(allocator, payload)) orelse try allocator.dupe(u8, "");
+    errdefer allocator.free(sid);
+    const replay = try allocator.dupe(u8, "");
+    const final_text = message.?;
+    message = null;
+    return .{
+        .final_text = final_text,
+        .session_id = sid,
+        .is_error = true,
+        .num_turns = 1,
+        .total_cost_usd = 0.0,
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = replay,
+    };
+}
+
+/// When the transcript text still disagrees with Stop's non-empty
+/// `last_assistant_message` after every retry, the transcript is stale: Stop
+/// describes the turn that just ended. Replace `final_text` with Stop's text.
+pub fn preferStopText(
+    allocator: std.mem.Allocator,
+    summary: *transcript_mod.Summary,
+    stop_last: ?[]const u8,
+) std.mem.Allocator.Error!void {
+    if (finalTextMatchesStop(summary.final_text, stop_last)) return;
+    const fresh = try allocator.dupe(u8, stop_last.?);
+    allocator.free(summary.final_text);
+    summary.final_text = fresh;
+    summary.is_error = false;
+    if (summary.subtype) |old| allocator.free(old);
+    summary.subtype = null;
+    if (summary.permission_denials) |old| allocator.free(old);
+    summary.permission_denials = null;
+    summary.usage = .{};
+    summary.num_turns = 1;
+    summary.total_cost_usd = 0;
+    summary.duration_api_ms = 0;
+}
+
+/// Pump new transcript lines to the caller's writer and flush them. A failed
+/// write (closed stdout) and OOM propagate so `run` tears the session down;
+/// read errors on a file claude is still appending to are retried next tick.
+pub fn pumpStream(tailer: *stream_mod.Tailer, writer: *std.Io.Writer) error{ WriteFailed, OutOfMemory }!usize {
+    const n = tailer.pump(writer) catch |e| switch (e) {
+        error.WriteFailed => return error.WriteFailed,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return 0,
+    };
+    if (n > 0) try writer.flush();
+    return n;
+}
+
+pub fn run(allocator: std.mem.Allocator, opts: Options) RunError!Result {
+    const scope = InterruptScope.enter();
+    defer scope.exit();
+    return runSession(allocator, opts) catch |err| {
+        if (err == error.Interrupted) clearInterrupt();
+        return err;
+    };
+}
+
+fn runSession(caller_allocator: std.mem.Allocator, opts: Options) RunError!Result {
+    try validateOptions(opts);
+    if (opts.prompt.len == 0) return RunError.NoPromptSupplied;
+    if (isInterrupted()) return RunError.Interrupted;
+    const cwd = if (opts.cwd) |dir| try resolveCwd(caller_allocator, dir) else null;
+    defer if (cwd) |dir| caller_allocator.free(dir);
+    const debug_screen = debugScreenEnabled(opts.debug);
+
+    // zmux's reader thread allocates from the allocator the session is created
+    // with while this thread keeps allocating too. Route both through one lock
+    // so a caller's single-threaded allocator is never raced. Memory returned
+    // in `Result` is still freed with the caller's allocator: the wrapper
+    // forwards every call unchanged.
+    var tsa: std.heap.ThreadSafeAllocator = .{ .child_allocator = caller_allocator };
+    const allocator = tsa.allocator();
+
+    const trace_start: i128 = monotonicNs();
+    const deadline_ns = if (opts.timeout_ms == 0) std.math.maxInt(i128) else trace_start + @as(i128, opts.timeout_ms) * std.time.ns_per_ms;
     trace(opts, trace_start, "run() entered");
 
     var harness = hook_mod.createWithOptions(allocator, .{
@@ -1052,32 +1824,51 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
         .extra_settings_json = opts.extra_settings_json,
     }) catch |e| switch (e) {
         error.InvalidExtraSettings => return RunError.InvalidExtraSettings,
-        else => return e,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SpawnFailed,
     };
     defer harness.deinit();
     trace(opts, trace_start, "hook harness ready (FIFO + relay script + --settings)");
 
-    const claude_bin = opts.claude_path orelse "claude";
+    const claude_bin = resolveClaudeBinary(allocator, opts.claude_path) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            reportFailure(null, debug_screen, "claude executable not found: `{s}` is not an executable file{s}", .{
+                opts.claude_path orelse "claude",
+                if (opts.claude_path == null) " on PATH" else "",
+            });
+            return RunError.SpawnFailed;
+        },
+    };
+    defer allocator.free(claude_bin);
+    traceFmt(opts, trace_start, "claude binary: {s}", .{claude_bin});
 
     var argv = try buildArgv(allocator, claude_bin, harness.settings_json, opts);
     defer argv.deinit(allocator);
 
-    const shell_cmd = try shellQuoteArgv(allocator, argv.items);
+    const shell_cmd = try buildShellCommandInDir(allocator, argv.items, cwd);
     defer allocator.free(shell_cmd);
 
-    var env_list = try buildChildEnv(allocator, harness.fifo_path);
+    var env_list = buildChildEnv(allocator, harness.fifo_path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SpawnFailed,
+    };
     defer freeChildEnv(allocator, &env_list);
 
     // Open the FIFO for reading BEFORE spawning so the child's hook never
-    // blocks trying to open the write side.
+    // blocks trying to open the write side. CLOEXEC keeps the read end out of
+    // the child and everything it spawns.
     const fifo_z = try allocator.dupeZ(u8, harness.fifo_path);
     defer allocator.free(fifo_z);
-    const fifo_fd = std.posix.openZ(fifo_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch return RunError.SpawnFailed;
+    const fifo_fd = std.posix.openZ(fifo_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return RunError.SpawnFailed;
     defer std.posix.close(fifo_fd);
 
     var shared: SharedState = .{
         .session = undefined, // set after create
         .debug = opts.debug,
+        .debug_screen = debug_screen,
+        .deadline_ns = deadline_ns,
+        .dec = .{ .rows = opts.rows, .cols = opts.cols },
     };
     defer {
         shared.write_mutex.lock();
@@ -1097,12 +1888,15 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
         .id = "claude-p",
         .shell = "/bin/sh",
         .command = shell_cmd,
-        .cwd = opts.cwd,
+        .cwd = cwd,
         .env = env_list.items,
         .rows = opts.rows,
         .cols = opts.cols,
         .event_sink = sink,
-    }) catch return RunError.SpawnFailed;
+    }) catch |e| {
+        reportFailure(null, debug_screen, "could not start claude under a PTY: {s}", .{@errorName(e)});
+        return RunError.SpawnFailed;
+    };
     shared.session = session;
     defer session.destroy();
     trace(opts, trace_start, "zmux session spawned; child claude PID up, Ink booting");
@@ -1116,7 +1910,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     var prompt_typed_ns: i128 = 0;
     var prompt_injections: u32 = 0;
     var prompt_accepted = false;
-    var pre_prompt_transcript_offset: u64 = 0;
+    var last_progress_ns: i128 = 0;
+    var last_transcript_size: u64 = 0;
+    var pre_prompt_transcript_offset: ?u64 = null;
+    const resumed = isResumeRun(opts);
     var exited_seen_ns: ?i128 = null;
 
     var fifo_buf: std.ArrayList(u8) = .{};
@@ -1127,6 +1924,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     defer if (transcript_path) |p| allocator.free(p);
     var stop_payload_owned: ?[]u8 = null;
     defer if (stop_payload_owned) |p| allocator.free(p);
+    var stop_failed = false;
+    var confirm_until: i128 = 0;
+    var provisional_size: u64 = 0;
+    var stop_last: ?[]u8 = null;
+    defer if (stop_last) |answer| allocator.free(answer);
 
     const streaming = opts.output_format == .stream_json and opts.stream_writer != null;
     var tailer: ?stream_mod.Tailer = null;
@@ -1134,11 +1936,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     var tailer_open_attempts: u32 = 0;
 
     while (true) {
-        const now: i128 = std.time.nanoTimestamp();
-        const elapsed_ms: u64 = @intCast(@divTrunc(now - start_ns, std.time.ns_per_ms));
-        if (elapsed_ms > opts.timeout_ms) {
-            if (state == .waiting_for_ready) return RunError.SessionStartTimeout;
-            return RunError.StopTimeout;
+        // A signal handler asked us to stop: unwind through the defers above
+        // so the PTY session is destroyed and the temp dir is removed.
+        if (isInterrupted()) {
+            trace(opts, trace_start, "interrupted; tearing down");
+            return RunError.Interrupted;
         }
 
         // Flush any DEC-responder bytes back to the PTY.
@@ -1146,7 +1948,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
 
         // Drain ALL available FIFO bytes before checking dialogs, watchdog, or
         // child-exit so an in-flight Stop or UserPromptSubmit is never missed.
-        while (stop_payload_owned == null) {
+        while (!stop_failed) {
             const fifo_n = std.posix.read(fifo_fd, &fifo_read_buf) catch |e| switch (e) {
                 error.WouldBlock => break,
                 else => break,
@@ -1156,27 +1958,56 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
             while (true) {
                 const nl = std.mem.indexOfScalar(u8, fifo_buf.items, '\n') orelse break;
                 const line = fifo_buf.items[0..nl];
-                if (hook_mod.parseLine(line)) |ev| {
-                    if (opts.debug) std.debug.print("hook: {s} payload={s}\n", .{ @tagName(ev.event), ev.payload });
+                // With a per-run nonce, lines from any other writer are dropped.
+                const maybe_ev = hook_mod.parseLineWithNonce(line, &harness.nonce);
+                if (maybe_ev) |ev| {
+                    if (opts.debug) {
+                        // Event name and size only; see `formatHookTrace`.
+                        var trace_buf: [96]u8 = undefined;
+                        std.debug.print("{s}\n", .{formatHookTrace(&trace_buf, ev.event, ev.payload.len)});
+                    }
+                    if (state == .awaiting_stop and (ev.event == .user_prompt_submit or ev.event == .stop or ev.event == .stop_failure)) {
+                        if (try extractSafeTranscriptPath(allocator, ev.payload)) |path| {
+                            if (transcript_path != null and std.mem.eql(u8, transcript_path.?, path)) {
+                                allocator.free(path);
+                            } else {
+                                if (transcript_path) |old| allocator.free(old);
+                                transcript_path = path;
+                                pre_prompt_transcript_offset = null;
+                                if (tailer) |*t| t.deinit();
+                                tailer = null;
+                            }
+                        }
+                        // On resume the current user record may appear after UserPromptSubmit.
+                        // Delay recovery until Stop to avoid streaming an earlier identical prompt.
+                        if (pre_prompt_transcript_offset == null and (!resumed or ev.event != .user_prompt_submit)) {
+                            if (transcript_path) |path| {
+                                pre_prompt_transcript_offset = findPromptTurnOffset(allocator, path, opts.prompt);
+                                if (!resumed and pre_prompt_transcript_offset == null) pre_prompt_transcript_offset = 0;
+                            }
+                        }
+                    }
                     switch (ev.event) {
                         .session_start => {
                             trace(opts, trace_start, "SessionStart hook fired (Ink is up)");
+                            shared.startup_done.store(true, .seq_cst);
                             if (transcript_path == null) {
-                                if (try hook_mod.extractTranscriptPath(allocator, ev.payload)) |p| {
+                                if (try extractSafeTranscriptPath(allocator, ev.payload)) |p| {
                                     transcript_path = p;
                                     traceFmt(opts, trace_start, "transcript_path from SessionStart: {s}", .{p});
                                 }
                             }
                             if (state == .waiting_for_ready) {
                                 settleBeforePrompt(opts, trace_start, &shared, session);
+                                if (isInterrupted()) return RunError.Interrupted;
                                 pre_prompt_transcript_offset = transcriptSize(transcript_path);
-                                traceFmt(opts, trace_start, "typing prompt ({d} bytes; transcript offset {d})", .{ opts.prompt.len, pre_prompt_transcript_offset });
-                                typePrompt(session, opts.prompt) catch |e| {
-                                    traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(e)});
-                                };
+                                traceFmt(opts, trace_start, "typing prompt ({d} bytes; transcript offset {?d})", .{ opts.prompt.len, pre_prompt_transcript_offset });
+                                try sendPrompt(session, opts, trace_start, deadline_ns);
                                 // Start acceptance timer AFTER typePrompt finishes so large
                                 // chunked pastes never eat into prompt_accept_timeout_ms.
-                                prompt_typed_ns = std.time.nanoTimestamp();
+                                prompt_typed_ns = monotonicNs();
+                                last_progress_ns = prompt_typed_ns;
+                                last_transcript_size = pre_prompt_transcript_offset orelse 0;
                                 prompt_injections = 1;
                                 trace(opts, trace_start, "prompt + Enter sent; confirming acceptance");
                                 state = .awaiting_stop;
@@ -1184,9 +2015,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                         },
                         .user_prompt_submit => {
                             if (state == .awaiting_stop) {
-                                if (transcript_path == null) {
-                                    transcript_path = try hook_mod.extractTranscriptPath(allocator, ev.payload);
-                                }
                                 if (try hook_mod.extractPrompt(allocator, ev.payload)) |received| {
                                     defer allocator.free(received);
                                     if (isPromptTruncated(opts.prompt, received)) {
@@ -1203,46 +2031,71 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                                 prompt_accepted = true;
                             }
                         },
-                        .stop => {
-                            if (state == .awaiting_stop and stop_payload_owned == null) {
-                                trace(opts, trace_start, "Stop hook fired (assistant turn finished)");
-                                prompt_accepted = true;
-                                if (try hook_mod.extractTranscriptPath(allocator, ev.payload)) |p| {
-                                    if (transcript_path) |old| {
-                                        if (std.mem.eql(u8, old, p)) {
-                                            allocator.free(p);
-                                        } else {
-                                            traceFmt(opts, trace_start, "transcript moved to {s}; resetting offset to 0", .{p});
-                                            allocator.free(old);
-                                            transcript_path = p;
-                                            pre_prompt_transcript_offset = 0;
-                                            if (tailer) |*t| t.deinit();
-                                            tailer = null;
-                                        }
-                                    } else {
-                                        transcript_path = p;
-                                    }
-                                }
-                                stop_payload_owned = try allocator.dupe(u8, ev.payload);
-                            }
+                        .permission_request => if (state == .awaiting_stop and !hasExtraHook(opts.extra_hooks, "PermissionRequest")) {
+                            const tool = hook_mod.extractPermissionTool(allocator, ev.payload);
+                            defer if (tool) |name| allocator.free(name);
+                            reportFailure(&shared, debug_screen, "awaiting Stop: permission prompt blocked ({s})", .{tool orelse "unknown tool"});
+                            return error.PermissionPromptBlocked;
+                        },
+                        .stop, .stop_failure => if (state == .awaiting_stop) {
+                            prompt_accepted = true;
+                            const replacement = try allocator.dupe(u8, ev.payload);
+                            if (stop_payload_owned) |old| allocator.free(old);
+                            stop_payload_owned = replacement;
+                            if (stop_last) |old| allocator.free(old);
+                            stop_last = null;
+                            stop_last = try hook_mod.extractLastAssistantMessage(allocator, ev.payload);
+                            stop_failed = ev.event == .stop_failure;
+                            provisional_size = transcriptSize(transcript_path) orelse 0;
+                            confirm_until = @min(deadline_ns, monotonicNs() + stopConfirmationNs(opts.extra_hooks));
+                            traceFmt(opts, trace_start, "terminal hook received (stop_hook_active={any})", .{hook_mod.parseStopHookActive(allocator, ev.payload)});
                         },
                         .unknown => {},
                     }
                 }
                 std.mem.copyForwards(u8, fifo_buf.items, fifo_buf.items[nl + 1 ..]);
                 fifo_buf.shrinkRetainingCapacity(fifo_buf.items.len - (nl + 1));
-                if (stop_payload_owned != null) break;
+                if (stop_failed) break;
             }
         }
 
-        if (stop_payload_owned != null) break;
+        if (stop_failed) break;
+        if (stop_payload_owned) |payload| {
+            const status: StopSummaryStatus = scan: {
+                const file = transcript_mod.openTranscriptRegularFile(transcript_path orelse break :scan .none) catch break :scan .none;
+                defer file.close();
+                const size = (file.stat() catch break :scan .none).size;
+                if (size <= provisional_size) break :scan .none;
+                break :scan scanStopRecords(allocator, file, &provisional_size, size, stop_last, opts.prompt) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => .none,
+                };
+            };
+            if (status == .continued) {
+                trace(opts, trace_start, "assistant continued after provisional Stop");
+                allocator.free(payload);
+                stop_payload_owned = null;
+            } else if (status == .confirmed or monotonicNs() >= confirm_until) break;
+        }
+        const now: i128 = monotonicNs();
+        const elapsed_ms: u64 = @intCast(@max(0, @divTrunc(now - start_ns, std.time.ns_per_ms)));
+        // `timeout_ms == 0` means no wall-clock timeout.
+        if (now >= deadline_ns and stop_payload_owned == null) {
+            if (state == .waiting_for_ready) {
+                reportFailure(&shared, debug_screen, "timed out after {d} ms waiting for claude to start", .{elapsed_ms});
+                return RunError.SessionStartTimeout;
+            }
+            reportFailure(&shared, debug_screen, "timed out after {d} ms waiting for claude to finish the turn", .{elapsed_ms});
+            return RunError.StopTimeout;
+        }
 
         // Fail fast if child exited early (after draining any final FIFO events).
         // Check both `shared.exited` (from `.session_exited` event) and
         // `session.state() == .terminated` (zmux can mark the session terminated
         // on PTY EOF without firing `.session_exited`).
-        if (shared.exited.load(.seq_cst) or session.state() == .terminated) {
+        if (stop_payload_owned == null and (shared.exited.load(.seq_cst) or session.state() == .terminated)) {
             if (state == .waiting_for_ready) {
+                reportFailure(&shared, debug_screen, "claude exited before it finished starting", .{});
                 return RunError.SpawnFailed;
             }
             const first_exited = exited_seen_ns orelse blk: {
@@ -1252,7 +2105,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
             const since_exit_ms: u64 = @intCast(@max(0, @divTrunc(now - first_exited, std.time.ns_per_ms)));
             if (since_exit_ms >= post_exit_fifo_grace_ms) {
                 traceFmt(opts, trace_start, "child exited without Stop (prompt_accepted={any}) — failing fast", .{prompt_accepted});
-                return if (prompt_accepted) RunError.TranscriptUnavailable else RunError.PromptNotAccepted;
+                if (prompt_accepted) return RunError.TranscriptUnavailable;
+                reportFailure(&shared, debug_screen, "claude exited before it accepted the prompt", .{});
+                return RunError.PromptNotAccepted;
             }
         }
 
@@ -1260,15 +2115,31 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
         // development channels).
         if (state == .waiting_for_ready) {
             maybeHandleStartupDialogs(opts, trace_start, &shared, session);
+            if (shared.dialog.refused != .none) {
+                reportFailure(&shared, debug_screen, "claude asked to confirm a {s} dialog that this run did not request; refusing to answer it. " ++
+                    "Pass --dangerously-skip-permissions, --permission-mode bypassPermissions, or " ++
+                    "--dangerously-load-development-channels to approve it explicitly", .{@tagName(shared.dialog.refused)});
+                return RunError.UnexpectedStartupDialog;
+            }
+        }
+
+        if (opts.transcript_idle_timeout_ms) |idle_ms| {
+            if (idle_ms != 0 and state == .awaiting_stop and stop_payload_owned == null and exited_seen_ns == null) {
+                const size = transcriptSize(transcript_path) orelse 0;
+                if (size > last_transcript_size) last_progress_ns = now;
+                last_transcript_size = size;
+                const last_activity = @max(last_progress_ns, shared.last_output_ns.load(.seq_cst));
+                if (now - last_activity >= @as(i128, idle_ms) * std.time.ns_per_ms) return error.TranscriptStalled;
+            }
         }
 
         // Prompt-acceptance watchdog.
         if (state == .awaiting_stop and exited_seen_ns == null) {
-            if (!prompt_accepted and transcriptSize(transcript_path) > pre_prompt_transcript_offset) {
+            if (!prompt_accepted and (pre_prompt_transcript_offset != null or !resumed) and (transcriptSize(transcript_path) orelse 0) > (pre_prompt_transcript_offset orelse 0)) {
                 trace(opts, trace_start, "transcript grew past pre-prompt offset (prompt accepted)");
                 prompt_accepted = true;
             }
-            const since_typed_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp() - prompt_typed_ns, std.time.ns_per_ms));
+            const since_typed_ms: i64 = @intCast(@divTrunc(monotonicNs() - prompt_typed_ns, std.time.ns_per_ms));
             switch (promptWatchdogAction(prompt_accepted, prompt_injections, since_typed_ms)) {
                 .wait => {},
                 .reinject => {
@@ -1280,29 +2151,29 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                     session.writeInput("\x15") catch {}; // Ctrl-U: clear residual input
                     sleepPumpingDec(&shared, session, ink_enter_debounce_ms);
                     _ = waitForOutputQuiet(opts, trace_start, &shared, session, ink_quiescence_ms, ink_max_wait_ms);
-                    typePrompt(session, opts.prompt) catch |e| {
-                        traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(e)});
-                    };
+                    if (isInterrupted()) return RunError.Interrupted;
+                    try sendPrompt(session, opts, trace_start, deadline_ns);
                     prompt_injections += 1;
-                    prompt_typed_ns = std.time.nanoTimestamp();
+                    prompt_typed_ns = monotonicNs();
                 },
                 .give_up => {
                     traceFmt(opts, trace_start, "prompt not accepted after {d} injection(s) — aborting", .{prompt_injections});
+                    reportFailure(&shared, debug_screen, "claude did not accept the prompt after {d} attempts", .{prompt_injections});
                     return RunError.PromptNotAccepted;
                 },
             }
         }
 
         // Open the live streaming tailer once `pre_prompt_transcript_offset` is known.
-        if (streaming and tailer == null and state == .awaiting_stop) {
+        if (streaming and tailer == null and state == .awaiting_stop and (pre_prompt_transcript_offset != null or !resumed)) {
             if (transcript_path) |p| {
                 tailer_open_attempts += 1;
                 if (stream_mod.Tailer.open(allocator, p)) |t_const| {
                     var t = t_const;
-                    t.pos = pre_prompt_transcript_offset;
+                    t.pos = pre_prompt_transcript_offset orelse 0;
                     tailer = t;
                     traceFmt(opts, trace_start, "transcript opened for tailing @ {d} after {d} attempt(s): {s}", .{
-                        pre_prompt_transcript_offset,
+                        t.pos,
                         tailer_open_attempts,
                         p,
                     });
@@ -1319,11 +2190,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
             }
         }
 
-        // Pump any newly flushed transcript lines to `stream_writer`.
-        if (streaming and tailer != null and opts.stream_writer != null) {
-            const n = tailer.?.pump(opts.stream_writer.?) catch 0;
+        // Pump any newly flushed transcript lines to `stream_writer`. A failed
+        // write returns, which destroys the session through the defers.
+        if (streaming and tailer != null) {
+            const n = try pumpStream(&tailer.?, opts.stream_writer.?);
             if (n > 0) {
-                opts.stream_writer.?.flush() catch {};
                 total_lines_streamed += n;
                 if (!first_emit_logged) {
                     traceFmt(opts, trace_start, "first transcript line streamed ({d} line(s) in first flush)", .{n});
@@ -1337,77 +2208,57 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
         std.Thread.sleep(5 * std.time.ns_per_ms);
     }
 
-    // Final pump — Claude often flushes the last assistant message a few ms
-    // after the Stop hook fires.
-    if (streaming and opts.stream_writer != null) {
-        trace(opts, trace_start, "draining post-Stop transcript flush window (20 × 20ms)");
-        if (tailer == null) {
-            if (transcript_path) |p| {
-                if (stream_mod.Tailer.open(allocator, p)) |t_const| {
-                    var t = t_const;
-                    t.pos = pre_prompt_transcript_offset;
-                    tailer = t;
-                } else |_| {}
-            }
-        }
-        if (tailer != null) {
-            var attempt: u32 = 0;
-            var post_stop_lines: usize = 0;
-            while (attempt < 20) : (attempt += 1) {
-                const n = tailer.?.pump(opts.stream_writer.?) catch 0;
-                post_stop_lines += n;
+    // Pump and parse the same bounded turn until its terminal record agrees
+    // with Stop. Finishing both here avoids a second fixed stream-drain delay.
+    const keep_replay = opts.retain_replay and opts.stream_writer == null;
+    var summary = blk: {
+        if (transcript_path) |path| if (pre_prompt_transcript_offset) |offset| {
+            for (0..20) |attempt| {
+                if (isInterrupted()) return error.Interrupted;
+                if (streaming and tailer == null) {
+                    if (stream_mod.Tailer.open(allocator, path)) |t| {
+                        tailer = t;
+                        tailer.?.pos = offset;
+                    } else |_| {}
+                }
+                if (tailer) |*t| total_lines_streamed += try pumpStream(t, opts.stream_writer.?);
+                if (transcript_mod.parseFileFromOffsetWithOptions(allocator, path, offset, .{ .keep_replay = keep_replay, .stop_text = if (stop_failed) null else stop_last })) |candidate| {
+                    var parsed = candidate;
+                    if (stop_failed) {
+                        errdefer parsed.deinit(allocator);
+                        if (try hook_mod.extractErrorMessageAlloc(allocator, stop_payload_owned.?)) |message| {
+                            if (std.mem.trim(u8, message, " \t\r\n").len > 0) {
+                                allocator.free(parsed.final_text);
+                                parsed.final_text = message;
+                            } else allocator.free(message);
+                        }
+                        parsed.is_error = true;
+                        if (parsed.subtype) |sub| if (std.mem.eql(u8, sub, "success")) {
+                            allocator.free(sub);
+                            parsed.subtype = null;
+                        };
+                        break :blk parsed;
+                    }
+                    if ((parsed.final_text.len > 0 or parsed.is_error) and finalTextMatchesStop(parsed.final_text, stop_last)) break :blk parsed;
+                    if ((attempt == 19 or monotonicNs() >= deadline_ns) and !finalTextMatchesStop(parsed.final_text, stop_last)) {
+                        errdefer parsed.deinit(allocator);
+                        try preferStopText(allocator, &parsed, stop_last);
+                        break :blk parsed;
+                    }
+                    parsed.deinit(allocator);
+                } else |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.FileNotFound, error.NoAssistantMessage => {},
+                    else => break,
+                }
+                if (stop_failed or attempt == 19 or monotonicNs() >= deadline_ns) break;
                 std.Thread.sleep(20 * std.time.ns_per_ms);
             }
-            opts.stream_writer.?.flush() catch {};
-            traceFmt(opts, trace_start, "post-Stop drain streamed {d} more line(s)", .{post_stop_lines});
-        }
-    }
-
-    const stop_last: ?[]u8 = if (stop_payload_owned) |payload|
-        try hook_mod.extractLastAssistantMessage(allocator, payload)
-    else
-        null;
-    defer if (stop_last) |s| allocator.free(s);
-
-    // Parse ONLY bytes appended after `pre_prompt_transcript_offset` so
-    // `--resume` / `--continue` never returns a prior turn's answer. Retry up
-    // to 20 × 50ms while Claude flushes the trailing line, plus extra retries
-    // when the parsed text disagrees with Stop's `last_assistant_message`.
-    var summary = blk: {
-        var candidate: ?transcript_mod.Summary = null;
-        errdefer if (candidate) |*c| c.deinit(allocator);
-        if (transcript_path) |tp| {
-            var attempt: u32 = 0;
-            var mismatches: u32 = 0;
-            while (attempt < 20 or (candidate != null and mismatches < 10)) : (attempt += 1) {
-                if (attempt >= 30) break;
-                var maybe = transcript_mod.parseFileFromOffset(allocator, tp, pre_prompt_transcript_offset) catch |e| switch (e) {
-                    error.NoAssistantMessage, error.FileNotFound => null,
-                    else => return e,
-                };
-                if (maybe) |*valid| {
-                    if (valid.final_text.len > 0 or valid.is_error) {
-                        if (candidate) |*c| c.deinit(allocator);
-                        candidate = valid.*;
-                        if (valid.is_error or finalTextMatchesStop(valid.final_text, stop_last)) {
-                            const done = candidate.?;
-                            candidate = null;
-                            break :blk done;
-                        }
-                        mismatches += 1;
-                    } else {
-                        valid.deinit(allocator);
-                    }
-                }
-                std.Thread.sleep(50 * std.time.ns_per_ms);
-            }
-        }
-        if (candidate) |c| {
-            candidate = null;
-            break :blk c;
-        }
+        };
+        if (stop_failed) break :blk try synthesizeStopFailureSummary(allocator, stop_payload_owned.?);
         if (stop_payload_owned) |payload| {
             if (stop_last) |text| {
+                if (std.mem.trim(u8, text, " \t\r\n").len == 0) return RunError.TranscriptUnavailable;
                 const final_text = try allocator.dupe(u8, text);
                 errdefer allocator.free(final_text);
                 const sid = (try hook_mod.extractSessionId(allocator, payload)) orelse try allocator.dupe(u8, "");
@@ -1428,11 +2279,19 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
     };
     errdefer summary.deinit(allocator);
 
+    if (tailer) |*t| {
+        _ = try pumpStream(t, opts.stream_writer.?);
+        t.flushPartial(opts.stream_writer.?) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.WriteFailed,
+        };
+    }
+
     // Tear down the child immediately — we already have the answer.
     session.terminate();
 
-    const total_ns: i128 = std.time.nanoTimestamp() - start_ns;
-    const duration_ms: u64 = @intCast(@divTrunc(total_ns, std.time.ns_per_ms));
+    const total_ns: i128 = monotonicNs() - start_ns;
+    const duration_ms: u64 = @intCast(@max(0, @divTrunc(total_ns, std.time.ns_per_ms)));
 
     var streamed = false;
     if (streaming) {
@@ -1441,7 +2300,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !Result {
                 .summary = &summary,
                 .duration_ms = duration_ms,
             });
-            w.flush() catch {};
+            try w.flush();
             streamed = true;
             trace(opts, trace_start, "result envelope emitted; stream done");
         }
@@ -1679,6 +2538,36 @@ test "isPromptTruncated: detects long truncation without false positives on CRLF
     try testing.expect(!isPromptTruncated("y" ** 5000, "<pasted_content id=\"1\">summary</pasted_content>"));
 }
 
+test "isPromptTruncated: ANSI codes, control bytes, and embedded ESC[201~ never look like truncation" {
+    const body = "word " ** 40;
+
+    // Claude receives the text with the SGR sequences and control bytes gone.
+    const colored = "\x1b[1;31m" ++ body ++ "\x1b[0m\x00\x07\x7f tail";
+    try testing.expect(!isPromptTruncated(colored, body ++ " tail"));
+    // ...or with the sequences kept verbatim.
+    try testing.expect(!isPromptTruncated(colored, colored));
+    // ...or with only the ESC byte dropped.
+    try testing.expect(!isPromptTruncated(colored, "[1;31m" ++ body ++ "[0m tail"));
+
+    // PasteChunker sends ESC[201~ as ESC[201; the input parser then reads
+    // "ESC[201" plus the following "12 h" as one CSI and drops it.
+    const marked = body ++ paste_end ++ "12 hello" ++ body;
+    try testing.expect(!isPromptTruncated(marked, body ++ "ello" ++ body));
+    try testing.expect(!isPromptTruncated(marked, body ++ "[20112 hello" ++ body));
+    try testing.expect(!isPromptTruncated(marked, marked));
+    try testing.expectEqual(promptPayloadLen(body, false) * 2 + 4, promptPayloadLen(marked, true));
+    try testing.expectEqual(promptPayloadLen(body, false) * 2 + 7, promptPayloadLen(marked, false));
+
+    // A real loss is still caught on prompts that carry escape sequences.
+    try testing.expect(isPromptTruncated(colored, body[0 .. body.len / 2]));
+    try testing.expect(isPromptTruncated(marked, body));
+
+    // OSC and DCS string bodies are not prompt text.
+    try testing.expectEqual(@as(usize, 2), promptPayloadLen("a\x1b]0;title\x07b", false));
+    try testing.expectEqual(@as(usize, 2), promptPayloadLen("a\x1bPq\x07zz\x1b\\b", false));
+    try testing.expectEqual(@as(usize, 1), promptPayloadLen("a\x1b", false));
+}
+
 test "finalTextMatchesStop and isResumeRun" {
     try testing.expect(finalTextMatchesStop("anything", null));
     try testing.expect(finalTextMatchesStop("anything", ""));
@@ -1691,6 +2580,12 @@ test "finalTextMatchesStop and isResumeRun" {
     try testing.expect(isResumeRun(.{ .prompt = "x", .extra_args = &.{ "--verbose", "-c" } }));
     try testing.expect(isResumeRun(.{ .prompt = "x", .extra_args = &.{"--resume=abc"} }));
     try testing.expect(!isResumeRun(.{ .prompt = "x", .extra_args = &.{"--chrome"} }));
+    for ([_][]const u8{ "-r", "--continue=abc", "--fork-session", "--from-pr", "--from-pr=12", "--teleport", "--teleport=abc" }) |flag| {
+        try testing.expect(isResumeRun(.{ .prompt = "x", .extra_args = &.{ "--verbose", flag } }));
+    }
+    for ([_][]const u8{ "--continued", "--teleporter", "--from-prs", "-rc", "--fork" }) |flag| {
+        try testing.expect(!isResumeRun(.{ .prompt = "x", .extra_args = &.{flag} }));
+    }
 }
 
 test "shouldStripChildEnv: strips nested-session markers while preserving auth and backend config" {
@@ -1741,7 +2636,7 @@ fn testEnvValue(list: []const []u8, name: []const u8) ?[]const u8 {
     return found;
 }
 
-test "buildChildEnvFromMap: filters nested markers, preserves auth/backend vars, injects FIFO + TERM + persistence" {
+test "buildChildEnvFromMap: filters nested markers, preserves auth/backend vars, drops the FIFO and sets TERM + persistence" {
     var map = std.process.EnvMap.init(testing.allocator);
     defer map.deinit();
     try map.put("PATH", "/usr/bin");
@@ -1769,7 +2664,7 @@ test "buildChildEnvFromMap: filters nested markers, preserves auth/backend vars,
     try testing.expectEqualStrings("1", testEnvValue(env.items, "CLAUDE_CODE_USE_VERTEX").?);
     try testing.expectEqualStrings("1", testEnvValue(env.items, "CLAUDE_CODE_USE_FOUNDRY").?);
     try testing.expectEqualStrings("/cfg", testEnvValue(env.items, "CLAUDE_CONFIG_DIR").?);
-    try testing.expectEqualStrings("/tmp/x/events.fifo", testEnvValue(env.items, "CLAUDE_P_FIFO").?);
+    try testing.expect(testEnvValue(env.items, "CLAUDE_P_FIFO") == null);
     try testing.expectEqualStrings("xterm-256color", testEnvValue(env.items, "TERM").?);
     try testing.expectEqualStrings("1", testEnvValue(env.items, persistence_env).?);
 
@@ -1954,6 +2849,9 @@ test "run: handles 2.1.330 trust dialog, chunked bracketed paste, and resumed tr
         \\set -eu
         \\stty raw -echo
         \\read_bytes() { dd bs=1 count="$1" 2>/dev/null; }
+        \\# Events go through the real relay script, exactly as claude sends them.
+        \\
+    ++ fixture_relay ++
         \\down=$(printf '\033[B')
         \\enter=$(printf '\r')
         \\printf 'Quick safety check: Is this a project you trust?\r\nreview this folder first.\r\n❯ No, exit\r\n  Yes, I trust this folder\r\n'
@@ -1963,12 +2861,12 @@ test "run: handles 2.1.330 trust dialog, chunked bracketed paste, and resumed tr
         \\printf '\033[2J\033[HReady ? for shortcuts'
         \\file="$PWD/session.jsonl"
         \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"previous turn"}]}}' > "$file"
-        \\printf 'SessionStart\t{"transcript_path":"%s"}\n' "$file" > "$CLAUDE_P_FIFO"
+        \\printf '{"transcript_path":"%s"}' "$file" | hook SessionStart
         \\{ printf '\033[200~'; cat prompt; printf '\033[201~\r'; } > expected
         \\read_bytes "$(wc -c < expected | tr -d ' ')" | cmp - expected
-        \\{ printf 'UserPromptSubmit\t'; cat submit.json; printf '\n'; } > "$CLAUDE_P_FIFO"
+        \\hook UserPromptSubmit < submit.json
         \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"current turn"}]}}' >> "$file"
-        \\printf 'Stop\t{"transcript_path":"%s","last_assistant_message":"current turn"}\n' "$file" > "$CLAUDE_P_FIFO"
+        \\printf '{"transcript_path":"%s","last_assistant_message":"current turn"}' "$file" | hook Stop
         \\
     ;
     {
@@ -2012,9 +2910,11 @@ test "run: fails fast if child exits early without Stop" {
     const fixture =
         \\#!/bin/sh
         \\set -eu
+        \\
+    ++ fixture_relay ++
         \\printf 'Ready\r\n'
-        \\printf 'SessionStart\t{"transcript_path":"%s/none.jsonl"}\n' "$PWD" > "$CLAUDE_P_FIFO"
-        \\printf 'UserPromptSubmit\t{"prompt":"hello"}\n' > "$CLAUDE_P_FIFO"
+        \\printf '{"transcript_path":"%s/none.jsonl"}' "$PWD" | hook SessionStart
+        \\printf '{"prompt":"hello"}' | hook UserPromptSubmit
         \\exit 1
         \\
     ;
@@ -2038,4 +2938,849 @@ test "run: fails fast if child exits early without Stop" {
     try testing.expectError(RunError.TranscriptUnavailable, err);
     // Must fail fast (well under the 30s timeout).
     try testing.expect(elapsed_ms < 5_000);
+}
+
+// -------- Round 1 review fixes --------
+
+fn writeFixture(dir: std.fs.Dir, name: []const u8, body: []const u8) ![]u8 {
+    {
+        const f = try dir.createFile(name, .{ .mode = 0o700 });
+        defer f.close();
+        try f.writeAll(body);
+    }
+    return dir.realpathAlloc(testing.allocator, name);
+}
+
+/// Count `claude-p-<pid>-*` harness directories left under the temp root.
+fn leftoverHarnessDirs() !usize {
+    const root = std.posix.getenv("TMPDIR") orelse "/tmp";
+    var prefix_buf: [64]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buf, "claude-p-{d}-", .{std.c.getpid()});
+    var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.name, prefix)) n += 1;
+    }
+    return n;
+}
+
+test "monotonicNs: never goes backwards and tracks real time" {
+    const a = monotonicNs();
+    std.Thread.sleep(2 * std.time.ns_per_ms);
+    const b = monotonicNs();
+    try testing.expect(b - a >= 2 * std.time.ns_per_ms);
+    try testing.expect(b - a < 5 * std.time.ns_per_s);
+    var prev = b;
+    for (0..1000) |_| {
+        const now = monotonicNs();
+        try testing.expect(now >= prev);
+        prev = now;
+    }
+    // Fits the i64 atomics in SharedState.
+    _ = @as(i64, @intCast(prev));
+}
+
+test "validateCwd: accepts directories, rejects files, missing paths, and NUL" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "plain", .data = "x" });
+    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir_path);
+    const file_path = try tmp.dir.realpathAlloc(testing.allocator, "plain");
+    defer testing.allocator.free(file_path);
+
+    try validateCwd(null);
+    try validateCwd(dir_path);
+    try testing.expectError(RunError.InvalidCwd, validateCwd(file_path));
+    try testing.expectError(RunError.InvalidCwd, validateCwd("/nonexistent/claude-p/cwd"));
+    try testing.expectError(RunError.InvalidCwd, validateCwd(""));
+    try testing.expectError(RunError.InvalidCwd, validateCwd("/tmp\x00/x"));
+
+    // run() refuses before it creates a harness or spawns anything.
+    const before = try leftoverHarnessDirs();
+    try testing.expectError(RunError.InvalidCwd, run(testing.allocator, .{
+        .prompt = "hi",
+        .cwd = "/nonexistent/claude-p/cwd",
+    }));
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+}
+
+test "resolveClaudeBinaryIn: PATH search, explicit override, and non-executables" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("empty");
+    try tmp.dir.makePath("bin/claude-dir");
+    try tmp.dir.makePath("shadow/claude"); // a directory named claude is skipped
+    try tmp.dir.writeFile(.{ .sub_path = "bin/not-exec", .data = "x" });
+    const exe = try writeFixture(tmp.dir, "bin/claude", "#!/bin/sh\n");
+    defer testing.allocator.free(exe);
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const path_env = try std.fmt.allocPrint(testing.allocator, "{s}/missing:{s}/empty:{s}/shadow:{s}/bin:/usr/bin", .{ root, root, root, root });
+    defer testing.allocator.free(path_env);
+
+    const found = try resolveClaudeBinaryIn(testing.allocator, null, path_env);
+    defer testing.allocator.free(found);
+    try testing.expectEqualStrings(exe, found);
+
+    const by_path = try resolveClaudeBinaryIn(testing.allocator, exe, "");
+    defer testing.allocator.free(by_path);
+    try testing.expectEqualStrings(exe, by_path);
+
+    const sh = try resolveClaudeBinaryIn(testing.allocator, "sh", "/nonexistent:/bin");
+    defer testing.allocator.free(sh);
+    const resolved_sh = try std.fs.cwd().realpathAlloc(testing.allocator, "/bin/sh");
+    defer testing.allocator.free(resolved_sh);
+    try testing.expectEqualStrings(resolved_sh, sh);
+
+    const empty_path = try std.fmt.allocPrint(testing.allocator, "{s}/empty", .{root});
+    defer testing.allocator.free(empty_path);
+    const not_exec = try std.fmt.allocPrint(testing.allocator, "{s}/bin/not-exec", .{root});
+    defer testing.allocator.free(not_exec);
+    const a_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin/claude-dir", .{root});
+    defer testing.allocator.free(a_dir);
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, null, empty_path));
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, "", path_env));
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, not_exec, path_env));
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, a_dir, path_env));
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, "/nonexistent/claude", path_env));
+    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, "not-exec", path_env));
+
+    const Ctx = struct {
+        fn resolve(allocator: std.mem.Allocator, env: []const u8, want: []const u8) !void {
+            const got = try resolveClaudeBinaryIn(allocator, null, env);
+            defer allocator.free(got);
+            try testing.expectEqualStrings(want, got);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.resolve, .{ path_env, exe });
+}
+
+test "run: a missing claude binary fails before spawning and leaves no temp dir" {
+    const before = try leftoverHarnessDirs();
+    const t0 = monotonicNs();
+    try testing.expectError(RunError.SpawnFailed, run(testing.allocator, .{
+        .prompt = "hi",
+        .claude_path = "/nonexistent/claude",
+        .timeout_ms = 30_000,
+    }));
+    try testing.expect(monotonicNs() - t0 < 2 * std.time.ns_per_s);
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+}
+
+test "buildShellCommand: exec-prefixes the quoted argv" {
+    const cmd = try buildShellCommand(testing.allocator, &.{ "/opt/my bin/claude", "--model", "it's" });
+    defer testing.allocator.free(cmd);
+    try testing.expectEqualStrings("exec '/opt/my bin/claude' '--model' 'it'\\''s'", cmd);
+}
+
+test "formatHookTrace: prints the event name and payload size, never the payload" {
+    const secret = "{\"prompt\":\"my password is hunter2\",\"last_assistant_message\":\"TOP-SECRET-REPLY\"}";
+    var buf: [96]u8 = undefined;
+    const line = formatHookTrace(&buf, .user_prompt_submit, secret.len);
+    try testing.expectEqualStrings("hook: user_prompt_submit payload_bytes=79", line);
+    try testing.expect(std.mem.indexOf(u8, line, "hunter2") == null);
+    try testing.expect(std.mem.indexOf(u8, line, "SECRET") == null);
+    // The signature takes a length, so no caller can hand it payload bytes.
+    const params = @typeInfo(@TypeOf(formatHookTrace)).@"fn".params;
+    try testing.expectEqual(@as(usize, 3), params.len);
+    try testing.expect(params[2].type.? == usize);
+    var tiny: [4]u8 = undefined;
+    try testing.expectEqualStrings("hook: (trace overflow)", formatHookTrace(&tiny, .stop, 1));
+}
+
+test "formatFailureScreen: strips escapes, drops blank lines, keeps the last 15 lines within 1024 bytes" {
+    var out: [failure_screen_max_bytes]u8 = undefined;
+    try testing.expectEqualStrings("", formatFailureScreen(&out, ""));
+    try testing.expectEqualStrings("", formatFailureScreen(&out, "\r\n \x1b[2J\r\n"));
+    try testing.expectEqualStrings(
+        "sh: claude: command not found\nbye",
+        formatFailureScreen(&out, "\x1b[31msh: claude:\x07 command not found\x1b[0m\r\r\n\r\n   \r\nbye\r\n"),
+    );
+
+    var many: std.ArrayList(u8) = .{};
+    defer many.deinit(testing.allocator);
+    for (0..40) |i| try many.writer(testing.allocator).print("\x1b[1mline {d}\x1b[0m\r\n\r\n", .{i});
+    const tail = formatFailureScreen(&out, many.items);
+    try testing.expect(std.mem.startsWith(u8, tail, "line 25\n"));
+    try testing.expect(std.mem.endsWith(u8, tail, "\nline 39"));
+    try testing.expectEqual(@as(usize, 14), std.mem.count(u8, tail, "\n"));
+
+    // One very long line: bounded to 1024 bytes on a UTF-8 boundary.
+    const wide = "\xe2\x9d\xaf" ** 2000;
+    const cut = formatFailureScreen(&out, wide);
+    try testing.expect(cut.len <= failure_screen_max_bytes);
+    try testing.expect(cut.len > failure_screen_max_bytes - 4);
+    try testing.expect(std.unicode.utf8ValidateSlice(cut));
+}
+
+test "extractSafeTranscriptPath: drops paths with an embedded NUL" {
+    const ok = (try extractSafeTranscriptPath(testing.allocator, "{\"transcript_path\":\"/tmp/a.jsonl\"}")).?;
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("/tmp/a.jsonl", ok);
+    try testing.expect((try extractSafeTranscriptPath(testing.allocator, "{\"transcript_path\":\"/tmp/a\\u0000/../../etc/passwd\"}")) == null);
+    try testing.expect((try extractSafeTranscriptPath(testing.allocator, "{\"transcript_path\":\"\"}")) == null);
+    try testing.expect((try extractSafeTranscriptPath(testing.allocator, "{}")) == null);
+}
+
+test "dialogConfirmAllowed: ordinary runs never approve bypass-permissions or dev-channels dialogs" {
+    const plain: Options = .{ .prompt = "x" };
+    try testing.expect(dialogConfirmAllowed(plain, .trust));
+    try testing.expect(dialogConfirmAllowed(plain, .none));
+    try testing.expect(!dialogConfirmAllowed(plain, .bypass_permissions));
+    try testing.expect(!dialogConfirmAllowed(plain, .dev_channels));
+
+    // Flags that do not ask for bypass do not unlock it.
+    const near: Options = .{
+        .prompt = "--dangerously-skip-permissions",
+        .permission_mode = "acceptEdits",
+        .extra_args = &.{ "--permission-mode", "plan", "--permission-mode=acceptEdits", "bypassPermissions", "--dangerously-skip-permissions-x", "--allow-dangerously-skip-permissions" },
+    };
+    try testing.expect(!dialogConfirmAllowed(near, .bypass_permissions));
+    try testing.expect(!dialogConfirmAllowed(near, .dev_channels));
+
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .skip_permissions = true }, .bypass_permissions));
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .permission_mode = "bypassPermissions" }, .bypass_permissions));
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .extra_args = &.{"--dangerously-skip-permissions"} }, .bypass_permissions));
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .extra_args = &.{ "--permission-mode", "bypassPermissions" } }, .bypass_permissions));
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .extra_args = &.{"--permission-mode=bypassPermissions"} }, .bypass_permissions));
+    // Bypass intent does not approve development channels, and vice versa.
+    try testing.expect(!dialogConfirmAllowed(.{ .prompt = "x", .skip_permissions = true }, .dev_channels));
+    const dev: Options = .{ .prompt = "x", .extra_args = &.{ "--dangerously-load-development-channels", "server:x" } };
+    try testing.expect(dialogConfirmAllowed(dev, .dev_channels));
+    try testing.expect(!dialogConfirmAllowed(dev, .bypass_permissions));
+    try testing.expect(dialogConfirmAllowed(.{ .prompt = "x", .extra_args = &.{"--dangerously-load-development-channels=server:x"} }, .dev_channels));
+}
+
+test "run: refuses an unrequested bypass-permissions dialog without sending a key" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Any key the driver sends lands in `keys`; the fixture then exits.
+    const program = try writeFixture(tmp.dir, "bypass-claude",
+        \\#!/bin/sh
+        \\stty raw -echo
+        \\printf 'WARNING: Claude Code running in Bypass Permissions mode\r\nBy proceeding, you accept all responsibility\r\n❯ 1. No, exit\r\n  2. Yes, I accept\r\nEnter to confirm\r\n'
+        \\dd bs=1 count=1 > keys 2>/dev/null
+        \\
+    );
+    defer testing.allocator.free(program);
+    const cwd = std.fs.path.dirname(program).?;
+
+    const before = try leftoverHarnessDirs();
+    const t0 = monotonicNs();
+    try testing.expectError(RunError.UnexpectedStartupDialog, run(testing.allocator, .{
+        .claude_path = program,
+        .cwd = cwd,
+        .prompt = "hello",
+        .timeout_ms = 30_000,
+    }));
+    try testing.expect(monotonicNs() - t0 < 5 * std.time.ns_per_s);
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+    const keys = tmp.dir.readFileAlloc(testing.allocator, "keys", 16) catch |e| switch (e) {
+        error.FileNotFound => try testing.allocator.dupe(u8, ""),
+        else => return e,
+    };
+    defer testing.allocator.free(keys);
+    try testing.expectEqualStrings("", keys);
+}
+
+test "run: approves a requested bypass dialog, runs with timeout 0 under exec, and prefers Stop text over a stale transcript" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const program = try writeFixture(tmp.dir, "bypass-ok-claude",
+        \\#!/bin/sh
+        \\set -eu
+        \\stty raw -echo
+        \\echo "$PPID" > ppid
+        \\read_bytes() { dd bs=1 count="$1" 2>/dev/null; }
+        \\# Events go through the real relay script, exactly as claude sends them.
+        \\
+    ++ fixture_relay ++
+        \\enter=$(printf '\r')
+        \\printf 'WARNING: Claude Code running in Bypass Permissions mode\r\nBy proceeding, you accept all responsibility\r\n❯ 1. No, exit\r\n  2. Yes, I accept\r\nEnter to confirm\r\n'
+        \\[ "$(read_bytes 1)" = "2" ]
+        \\printf '\r  1. No, exit\r\n❯ 2. Yes, I accept\r\n'
+        \\[ "$(read_bytes 1)" = "$enter" ]
+        \\printf '\033[2J\033[HReady ? for shortcuts'
+        \\file="$PWD/session.jsonl"
+        \\: > "$file"
+        \\printf '{"transcript_path":"%s"}' "$file" | hook SessionStart
+        \\read_bytes 18 > /dev/null
+        \\printf '{"prompt":"hello"}' | hook UserPromptSubmit
+        \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"stale text"}]}}' >> "$file"
+        \\printf '{"transcript_path":"%s","last_assistant_message":"fresh text"}' "$file" | hook Stop
+        \\sleep 30
+        \\
+    );
+    defer testing.allocator.free(program);
+    const cwd = std.fs.path.dirname(program).?;
+
+    var result = try run(testing.allocator, .{
+        .claude_path = program,
+        .cwd = cwd,
+        .prompt = "hello",
+        .skip_permissions = true,
+        .timeout_ms = 0, // no wall-clock timeout
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("fresh text", result.summary.final_text);
+    try testing.expect(!result.summary.is_error);
+
+    // `exec` made the fixture the PTY child itself: its parent is this process.
+    const ppid_text = try tmp.dir.readFileAlloc(testing.allocator, "ppid", 32);
+    defer testing.allocator.free(ppid_text);
+    const ppid = try std.fmt.parseInt(i64, std.mem.trim(u8, ppid_text, " \r\n"), 10);
+    try testing.expectEqual(@as(i64, std.c.getpid()), ppid);
+}
+
+test "preferStopText: replaces stale text, keeps agreeing text and clears stale error metadata" {
+    const a = testing.allocator;
+    const make = struct {
+        fn summary(text: []const u8, is_error: bool) !transcript_mod.Summary {
+            return .{
+                .final_text = try testing.allocator.dupe(u8, text),
+                .session_id = try testing.allocator.dupe(u8, "s"),
+                .is_error = is_error,
+                .num_turns = 1,
+                .total_cost_usd = 0,
+                .duration_api_ms = 0,
+                .usage = .{},
+                .jsonl_replay = try testing.allocator.dupe(u8, ""),
+            };
+        }
+    }.summary;
+
+    var stale = try make("old answer", false);
+    defer stale.deinit(a);
+    try preferStopText(a, &stale, "new answer");
+    try testing.expectEqualStrings("new answer", stale.final_text);
+
+    var same = try make("answer\n", false);
+    defer same.deinit(a);
+    try preferStopText(a, &same, " answer");
+    try testing.expectEqualStrings("answer\n", same.final_text);
+
+    var no_stop = try make("answer", false);
+    defer no_stop.deinit(a);
+    try preferStopText(a, &no_stop, null);
+    try preferStopText(a, &no_stop, " \n");
+    try testing.expectEqualStrings("answer", no_stop.final_text);
+
+    var failed = try make("API Error: 529", true);
+    defer failed.deinit(a);
+    try preferStopText(a, &failed, "something else");
+    try testing.expectEqualStrings("something else", failed.final_text);
+    try testing.expect(!failed.is_error);
+
+    // Allocation failure leaves the summary intact.
+    var keep = try make("old", false);
+    defer keep.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, preferStopText(failing.allocator(), &keep, "new"));
+    try testing.expectEqualStrings("old", keep.final_text);
+}
+
+test "synthesizeStopFailureSummary: error summary with exit code 1" {
+    const Ctx = struct {
+        fn check(allocator: std.mem.Allocator, payload: []const u8, want_text: []const u8, want_sid: []const u8) !void {
+            var result: Result = .{
+                .summary = try synthesizeStopFailureSummary(allocator, payload),
+                .duration_ms = 1,
+            };
+            defer result.deinit(allocator);
+            try testing.expect(result.summary.is_error);
+            try testing.expectEqual(@as(u8, 1), result.exitCode());
+            try testing.expectEqualStrings(want_text, result.summary.final_text);
+            try testing.expectEqualStrings(want_sid, result.summary.session_id);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.check, .{
+        "{\"session_id\":\"abc\",\"last_assistant_message\":\"API Error: overloaded\"}",
+        "API Error: overloaded",
+        "abc",
+    });
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.check, .{ "{\"last_assistant_message\":\"  \"}", stop_failure_default_text, "" });
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.check, .{ "not json", stop_failure_default_text, "" });
+}
+
+test "run: a StopFailure hook ends the run at once with an error result" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const program = try writeFixture(tmp.dir, "failing-claude",
+        \\#!/bin/sh
+        \\set -eu
+        \\stty raw -echo
+        \\
+    ++ fixture_relay ++
+        \\printf 'Ready ? for shortcuts'
+        \\printf '{"session_id":"sess-1"}' | hook SessionStart
+        \\dd bs=1 count=18 > /dev/null 2>&1
+        \\printf '{"prompt":"hello"}' | hook UserPromptSubmit
+        \\printf '{"session_id":"sess-1","error":"API Error: overloaded"}' | hook StopFailure
+        \\sleep 30
+        \\
+    );
+    defer testing.allocator.free(program);
+
+    const t0 = monotonicNs();
+    var result = try run(testing.allocator, .{
+        .claude_path = program,
+        .cwd = std.fs.path.dirname(program).?,
+        .prompt = "hello",
+        .timeout_ms = 30_000,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expect(monotonicNs() - t0 < 10 * std.time.ns_per_s);
+    try testing.expect(result.summary.is_error);
+    try testing.expectEqual(@as(u8, 1), result.exitCode());
+    try testing.expectEqualStrings("API Error: overloaded", result.summary.final_text);
+    try testing.expectEqualStrings("sess-1", result.summary.session_id);
+}
+
+test "pumpStream: a failed stdout write propagates instead of being swallowed" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"a\":1}\n{\"b\":2}\npartial" });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
+    defer testing.allocator.free(path);
+
+    {
+        var tailer = try stream_mod.Tailer.open(testing.allocator, path);
+        defer tailer.deinit();
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        try testing.expectEqual(@as(usize, 2), try pumpStream(&tailer, &out.writer));
+        try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n", out.written());
+        try testing.expectEqual(@as(usize, 0), try pumpStream(&tailer, &out.writer));
+    }
+    {
+        var tailer = try stream_mod.Tailer.open(testing.allocator, path);
+        defer tailer.deinit();
+        var closed: std.Io.Writer = .failing;
+        try testing.expectError(error.WriteFailed, pumpStream(&tailer, &closed));
+    }
+}
+
+test "onZmuxEvent: stops copying into `recent` after startup and queues complete DEC replies" {
+    var shared: SharedState = .{ .session = undefined, .debug = false };
+    defer shared.pending_to_pty.deinit(std.heap.page_allocator);
+    defer shared.recent.deinit(std.heap.page_allocator);
+
+    onZmuxEvent(@ptrCast(&shared), .{ .pane_output = .{ .pane_id = "p", .data = "hello\x1b[c" } });
+    try testing.expectEqualStrings("hello\x1b[c", shared.recent.items);
+    try testing.expectEqualStrings("\x1b[?1;2c", shared.pending_to_pty.items);
+    try testing.expectEqual(@as(u64, 8), shared.bytes_seen.load(.seq_cst));
+    const first_ns = shared.last_output_ns.load(.seq_cst);
+    try testing.expect(first_ns != 0);
+
+    shared.startup_done.store(true, .seq_cst);
+    std.Thread.sleep(std.time.ns_per_ms);
+    // Holding recent_mutex proves the post-startup path never takes it.
+    shared.recent_mutex.lock();
+    onZmuxEvent(@ptrCast(&shared), .{ .pane_output = .{ .pane_id = "p", .data = "world\x1b[6n" } });
+    shared.recent_mutex.unlock();
+    try testing.expectEqualStrings("hello\x1b[c", shared.recent.items);
+    try testing.expectEqualStrings("\x1b[?1;2c\x1b[1;1R", shared.pending_to_pty.items);
+    try testing.expectEqual(@as(u64, 17), shared.bytes_seen.load(.seq_cst));
+    try testing.expect(shared.last_output_ns.load(.seq_cst) > first_ns);
+
+    onZmuxEvent(@ptrCast(&shared), .{ .pane_output = .{ .pane_id = "p", .data = "\x1b[c" ** 100 } });
+    try testing.expectEqualStrings("\x1b[?1;2c\x1b[1;1R" ++ "\x1b[?1;2c" ** 100, shared.pending_to_pty.items);
+}
+
+/// Wait until the fixture has written `dir/pid` (it is running), then interrupt.
+fn interruptOnceRunning(dir: std.fs.Dir) void {
+    for (0..1000) |_| {
+        if (dir.statFile("pid")) |st| {
+            if (st.size > 1) break;
+        } else |_| {}
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+    requestInterrupt();
+}
+
+test "run: requestInterrupt returns Interrupted and cleans up the session and temp dir" {
+    defer interrupted.store(false, .seq_cst);
+    try testing.expect(!isInterrupted());
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const program = try writeFixture(tmp.dir, "slow-claude",
+        \\#!/bin/sh
+        \\echo $$ > pid
+        \\printf 'Booting\r\n'
+        \\sleep 30
+        \\
+    );
+    defer testing.allocator.free(program);
+    const cwd = std.fs.path.dirname(program).?;
+    const before = try leftoverHarnessDirs();
+
+    // Mid-run: the signal arrives while run() waits for SessionStart.
+    const thread = try std.Thread.spawn(.{}, interruptOnceRunning, .{tmp.dir});
+    const t0 = monotonicNs();
+    const err = run(testing.allocator, .{
+        .claude_path = program,
+        .cwd = cwd,
+        .prompt = "hello",
+        .timeout_ms = 30_000,
+    });
+    const elapsed_ns = monotonicNs() - t0;
+    thread.join();
+    try testing.expectError(RunError.Interrupted, err);
+    try testing.expect(elapsed_ns < 15 * std.time.ns_per_s);
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+
+    // The PTY child is gone once run() has unwound.
+    const pid_text = try tmp.dir.readFileAlloc(testing.allocator, "pid", 32);
+    defer testing.allocator.free(pid_text);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, pid_text, " \r\n"), 10);
+    var gone = false;
+    for (0..100) |_| {
+        std.posix.kill(pid, 0) catch {
+            gone = true;
+            break;
+        };
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    try testing.expect(gone);
+
+    try testing.expect(!isInterrupted());
+    requestInterrupt();
+    // Already interrupted: run() returns before creating anything.
+    try testing.expectError(RunError.Interrupted, run(testing.allocator, .{
+        .claude_path = program,
+        .cwd = cwd,
+        .prompt = "hello",
+    }));
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+}
+
+const fixture_relay =
+    \\relay=$(python3 -c 'import json,shlex,sys; print(shlex.split(json.loads(sys.argv[1])["hooks"]["Stop"][0]["hooks"][0]["command"])[0])' "$2")
+    \\hook() { "$relay" "$1"; }
+    \\
+;
+
+const fixture_shell =
+    \\#!/bin/sh
+    \\set -eu
+    \\stty raw -echo
+    \\[ "$1" = --settings ]
+    \\
+++ fixture_relay ++
+    \\printf 'Ready'
+    \\file="$PWD/session.jsonl"
+    \\: > "$file"
+    \\printf '{"transcript_path":"%s"}' "$file" | hook SessionStart
+    \\dd bs=1 count=18 of=/dev/null 2>/dev/null
+    \\printf '{"prompt":"hello"}' | hook UserPromptSubmit
+    \\
+;
+
+test "run: PermissionRequest fails before Stop timeout and releases the hook harness" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\printf '{"tool_name":"Bash"}' | hook PermissionRequest
+        \\sleep 30
+    );
+    defer testing.allocator.free(exe);
+    const before = try leftoverHarnessDirs();
+    const started = monotonicNs();
+    try testing.expectError(error.PermissionPromptBlocked, run(testing.allocator, .{
+        .prompt = "hello",
+        .claude_path = exe,
+        .cwd = std.fs.path.dirname(exe),
+        .timeout_ms = 30_000,
+    }));
+    try testing.expect(monotonicNs() - started < 5 * std.time.ns_per_s);
+    try testing.expectEqual(before, try leftoverHarnessDirs());
+}
+
+test "run: configured permission and slow Stop hooks can complete the turn" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\printf '{}' | hook PermissionRequest
+        \\printf '{"last_assistant_message":"draft"}' | hook Stop
+        \\sleep 0.5
+        \\printf '%s\n' '{"type":"system","subtype":"stop_hook_summary","preventedContinuation":true}' >> "$file"
+        \\sleep 1.65
+        \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"final"}],"usage":{"output_tokens":3}}}' >> "$file"
+        \\printf '{"last_assistant_message":"final"}' | hook Stop
+        \\sleep 0.05
+        \\printf '%s\n' '{"type":"system","subtype":"stop_hook_summary","preventedContinuation":false}' >> "$file"
+        \\# Waiting the full fallback after confirmation would consume this later failure.
+        \\sleep 0.7
+        \\printf '{"error":"late failure"}' | hook StopFailure
+        \\exec sleep 5
+    );
+    defer testing.allocator.free(exe);
+    var result = try run(testing.allocator, .{
+        .prompt = "hello",
+        .claude_path = exe,
+        .cwd = std.fs.path.dirname(exe),
+        .extra_hooks = &.{ .{ .event = "PermissionRequest", .command = "true" }, .{ .event = "Stop", .command = "sleep 0.5" } },
+        .timeout_ms = 8000,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("final", result.summary.final_text);
+    try testing.expectEqual(3, result.summary.usage.output_tokens);
+}
+
+test "run: continued assistant output supersedes provisional Stop until the second Stop" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "0.03", "0.2" }) |delay| {
+        const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+            \\printf '{"last_assistant_message":"draft"}' | hook Stop
+            \\sleep 0.04
+            \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}' >> "$file"
+            \\
+        ++ "sleep " ++ delay ++ "\n" ++
+            \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"second answer"}],"usage":{"output_tokens":3}}}' >> "$file"
+            \\printf '{"last_assistant_message":"second answer","stop_hook_active":true}' | hook Stop
+        );
+        defer testing.allocator.free(exe);
+        var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+        defer result.deinit(testing.allocator);
+        try testing.expectEqualStrings("second answer", result.summary.final_text);
+        try testing.expectEqual(3, result.summary.usage.output_tokens);
+        var replay: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer replay.deinit();
+        try result.write(testing.allocator, &replay.writer, .stream_json);
+        try testing.expect(std.mem.indexOf(u8, replay.written(), "tool_use") != null);
+    }
+}
+
+test "a post-Stop user record only continues a turn when it differs from the current prompt" {
+    const line =
+        \\{"type":"user","message":{"content":"hello\nworld"}}
+    ;
+    try testing.expect(!try isContinuationRecord(testing.allocator, line, "done", "hello world"));
+    try testing.expect(try isContinuationRecord(testing.allocator, line, "done", "different prompt"));
+    try testing.expect(try isContinuationRecord(testing.allocator, line, "done", null));
+}
+
+test "run: late-flushed current user and final assistant records preserve provisional Stop" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock-late-flush", fixture_shell ++
+        \\printf '{"last_assistant_message":"PONG"}' | hook Stop
+        \\sleep 0.05
+        \\printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"  hello  "}]}}' >> "$file"
+        \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"PONG"}],"usage":{"output_tokens":5}}}' >> "$file"
+        \\printf '%s\n' '{"type":"system","subtype":"stop_hook_summary","preventedContinuation":false}' >> "$file"
+        \\exec sleep 5
+    );
+    defer testing.allocator.free(exe);
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("PONG", result.summary.final_text);
+    try testing.expectEqual(@as(u64, 5), result.summary.usage.output_tokens);
+}
+
+test "run: resumed transcript path change isolates a matched turn or uses Stop alone" {
+    const new_path =
+        \\file="$PWD/resumed.jsonl"
+        \\printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"private history"}]}}' > "$file"
+        \\
+    ;
+    const matched =
+        \\printf '%s\n' '{"type":"user","message":{"content":"hello"}}' '{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":9}}}' >> "$file"
+        \\
+    ;
+    const stop =
+        \\printf '{"transcript_path":"%s","last_assistant_message":"answer"}' "$file" | hook Stop
+    ;
+    inline for (.{ true, false }) |has_match| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++ new_path ++ (if (has_match) matched else "") ++ stop);
+        defer testing.allocator.free(exe);
+        var output: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        var result = try run(testing.allocator, .{
+            .prompt = "hello",
+            .cont = true,
+            .cwd = std.fs.path.dirname(exe),
+            .claude_path = exe,
+            .output_format = .stream_json,
+            .stream_writer = &output.writer,
+            .timeout_ms = 5000,
+        });
+        defer result.deinit(testing.allocator);
+        try testing.expectEqualStrings("answer", result.summary.final_text);
+        try testing.expectEqual(@as(u64, if (has_match) 9 else 0), result.summary.usage.input_tokens);
+        try testing.expect(std.mem.indexOf(u8, output.written(), "private history") == null);
+    }
+}
+
+test "findPromptTurnOffset returns the last matching user entry and rejects unsafe paths" {
+    const first = "{\"type\":\"user\",\"message\":{\"content\":\"some text\"}}\r\n{torn\n";
+    const last =
+        \\{"type":"user","message":{"content":[{"type":"text","text":"  some\r\ntext "}]}}
+        \\{"type":"assistant","message":{"content":"some text"}}
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeFixture(tmp.dir, "transcript", first ++ last);
+    defer testing.allocator.free(path);
+    try testing.expectEqual(@as(?u64, first.len), findPromptTurnOffset(testing.allocator, path, "some text"));
+    try testing.expectEqual(null, findPromptTurnOffset(testing.allocator, path, "different"));
+    for ([_][]const u8{ "", "relative", "/a/../b", "/..", "/a\x00b" }) |invalid| {
+        try testing.expect(!validateTranscriptPath(invalid));
+        try testing.expectEqual(null, findPromptTurnOffset(testing.allocator, invalid, "some text"));
+        try testing.expectError(error.InvalidTranscriptPath, transcript_mod.openTranscriptRegularFile(invalid));
+    }
+}
+
+test "reportFailure includes screen content only with debug screen consent" {
+    var shared: SharedState = .{ .session = undefined, .debug = false, .debug_screen = true };
+    defer shared.recent.deinit(std.heap.page_allocator);
+    onZmuxEvent(@ptrCast(&shared), .{ .pane_output = .{ .pane_id = "p", .data = "SENTINEL-startup-secret" } });
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const capture = try tmp.dir.createFile("stderr", .{ .read = true });
+    defer capture.close();
+    {
+        const previous = try std.posix.dup(std.posix.STDERR_FILENO);
+        defer std.posix.close(previous);
+        try std.posix.dup2(capture.handle, std.posix.STDERR_FILENO);
+        defer std.posix.dup2(previous, std.posix.STDERR_FILENO) catch unreachable;
+        reportFailure(&shared, false, "startup timeout", .{});
+        shared.startup_done.store(true, .seq_cst);
+        onZmuxEvent(@ptrCast(&shared), .{ .pane_output = .{ .pane_id = "p", .data = "x" ** 2200 ++ "recent-output" } });
+        reportFailure(&shared, true, "stop timeout", .{});
+    }
+    try capture.seekTo(0);
+    const logged = try capture.readToEndAlloc(testing.allocator, 4096);
+    defer testing.allocator.free(logged);
+    try testing.expect(std.mem.indexOf(u8, logged, "startup timeout") != null);
+    try testing.expect(std.mem.indexOf(u8, logged, "SENTINEL") == null);
+    try testing.expect(std.mem.indexOf(u8, logged, "recent-output") != null);
+}
+
+test "chunked paste observes interrupts and deadlines before the second chunk or Enter" {
+    const Sink = struct {
+        writes: usize = 0,
+        interrupt: bool,
+        pub fn writeInput(self: *@This(), _: []const u8) !void {
+            self.writes += 1;
+            if (self.interrupt and self.writes == 2) requestInterrupt();
+        }
+    };
+    defer clearInterrupt();
+    for ([_]bool{ false, true }) |cancel| {
+        var sink: Sink = .{ .interrupt = cancel };
+        const start = monotonicNs();
+        const deadline = start + (if (cancel) @as(i128, 60 * std.time.ns_per_s) else 20 * std.time.ns_per_ms);
+        try testing.expectError(if (cancel) error.Interrupted else error.StopTimeout, typePromptUntil(&sink, "x" ** (64 * 1024), std.time.ns_per_s, std.time.ns_per_s, deadline));
+        try testing.expect(sink.writes <= 2);
+        try testing.expect(monotonicNs() - start < std.time.ns_per_s);
+    }
+}
+
+test "run validates unsupported library options before spawning" {
+    const blocked = [_][]const u8{
+        "--bare",                 "--safe-mode",    "--no-session-persistence", "--max-turns",                "--max-budget-usd",
+        "--fallback-model",       "--input-format", "--json-schema",            "--include-partial-messages", "--forward-subagent-text",
+        "--replay-user-messages", "-p",             "--print",                  "--settings",
+    };
+    inline for (blocked) |flag| {
+        try testing.expectError(error.InvalidOptions, run(testing.allocator, .{ .prompt = "x", .extra_args = &.{flag} }));
+        try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "x", .extra_args = &.{flag ++ "=value"} }));
+        try validateOptions(.{ .prompt = "x", .extra_args = &.{ "--system-prompt", flag } });
+        try validateOptions(.{ .prompt = "x", .extra_args = &.{ "--", flag } });
+    }
+    try validateOptions(.{ .prompt = "x", .extra_args = &.{ "--from-pr", "--print" } });
+    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "x", .max_turns = 1 }));
+    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "x", .fallback_model = "other" }));
+}
+
+test "run: blank Stop text without an assistant transcript is unavailable" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\printf '{"last_assistant_message":"  "}' | hook Stop
+    );
+    defer testing.allocator.free(exe);
+    try testing.expectError(error.TranscriptUnavailable, run(testing.allocator, .{
+        .prompt = "hello",
+        .claude_path = exe,
+        .cwd = std.fs.path.dirname(exe),
+        .timeout_ms = 5000,
+    }));
+}
+
+test "run: oversized transcript falls back to authoritative Stop" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\dd if=/dev/zero of="$file" bs=1 count=1 seek=67108864 2>/dev/null
+        \\printf '{"session_id":"s","last_assistant_message":"done"}' | hook Stop
+    );
+    defer testing.allocator.free(exe);
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("done", result.summary.final_text);
+    try testing.expectEqualStrings("s", result.summary.session_id);
+    try testing.expectEqualStrings("", result.summary.jsonl_replay);
+}
+
+test "run: StopFailure preserves transcript usage and turns" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\printf '%s\n' '{"type":"assistant","message":{"usage":{"input_tokens":9}}}' '{"type":"assistant","message":{"usage":{"output_tokens":5}}}' >> "$file"
+        \\printf '{"last_assistant_message":"quota reached","error":"generic"}' | hook StopFailure
+    );
+    defer testing.allocator.free(exe);
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.summary.is_error);
+    try testing.expectEqualStrings("quota reached", result.summary.final_text);
+    try testing.expectEqual(2, result.summary.num_turns);
+    try testing.expectEqual(9, result.summary.usage.input_tokens);
+    try testing.expectEqual(5, result.summary.usage.output_tokens);
+}
+
+test "shell refuses to exec after a previously validated cwd disappears" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("it's here");
+    const cwd = try tmp.dir.realpathAlloc(testing.allocator, "it's here");
+    defer testing.allocator.free(cwd);
+    const command = try buildShellCommandInDir(testing.allocator, &.{ "/bin/echo", "unexpected" }, cwd);
+    defer testing.allocator.free(command);
+    try tmp.dir.deleteDir("it's here");
+    const res = try std.process.Child.run(.{ .allocator = testing.allocator, .argv = &.{ "/bin/sh", "-c", command } });
+    defer testing.allocator.free(res.stdout);
+    defer testing.allocator.free(res.stderr);
+    try testing.expectEqual(126, res.term.Exited);
+    try testing.expectEqualStrings("", res.stdout);
+}
+
+test "run: transcript idle timeout waits for PTY progress and ends a silent turn" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try writeFixture(tmp.dir, "mock", fixture_shell ++
+        \\for i in 1 2 3 4 5 6; do printf .; sleep 0.05; done
+        \\touch still-running
+        \\sleep 5
+    );
+    defer testing.allocator.free(exe);
+    try testing.expectError(error.TranscriptStalled, run(testing.allocator, .{
+        .prompt = "hello",
+        .claude_path = exe,
+        .cwd = std.fs.path.dirname(exe),
+        .timeout_ms = 5000,
+        .transcript_idle_timeout_ms = 250,
+    }));
+    try tmp.dir.access("still-running", .{});
 }

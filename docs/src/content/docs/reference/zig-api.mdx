@@ -17,7 +17,7 @@ pub const Options = driver.Options;
 pub const Result = driver.Result;
 pub const Usage = transcript.Usage;
 
-pub fn run(allocator: std.mem.Allocator, opts: Options) !Result;
+pub fn run(allocator: std.mem.Allocator, opts: Options) RunError!Result;
 
 // Re-exported submodules
 pub const args = @import("args.zig");
@@ -39,14 +39,14 @@ pub const daemon = @import("daemon.zig");
 | `prompt` | `[]const u8` | *(required)* | Prompt text; empty returns `RunError.NoPromptSupplied`. |
 | `output_format` | `OutputFormat` | `.text` | `.text`, `.json`, or `.stream_json`. |
 | `model` | `?[]const u8` | `null` | Passed to `--model`. |
-| `max_turns` | `?u32` | `null` | Passed to `--max-turns`. |
-| `allowed_tools` | `?[]const u8` | `null` | Passed to `--allowedTools`. |
-| `disallowed_tools` | `?[]const u8` | `null` | Passed to `--disallowedTools`. |
+| `max_turns` | `?u32` | `null` | Must stay `null`: a value makes `run` return `RunError.InvalidOptions` (`--max-turns` is print-mode-only). |
+| `allowed_tools` | `?[]const u8` | `null` | Passed as one `--allowedTools` value. The CLI never sets it; it forwards each rule as an `--allowedTools <rule>` pair in `extra_args`. |
+| `disallowed_tools` | `?[]const u8` | `null` | Passed as one `--disallowedTools` value. The CLI forwards rules through `extra_args` instead. |
 | `skip_permissions` | `bool` | `false` | Adds `--dangerously-skip-permissions`. |
 | `permission_mode` | `?[]const u8` | `null` | Passed to `--permission-mode`. |
 | `system_prompt` | `?[]const u8` | `null` | Passed to `--system-prompt`. |
 | `append_system_prompt` | `?[]const u8` | `null` | Passed to `--append-system-prompt`. |
-| `fallback_model` | `?[]const u8` | `null` | Passed to `--fallback-model`. |
+| `fallback_model` | `?[]const u8` | `null` | Must stay `null`: a value makes `run` return `RunError.InvalidOptions`. |
 | `setting_sources` | `?[]const u8` | `null` | Passed to `--setting-sources`. |
 | `add_dirs` | `[]const []const u8` | `&.{}` | Repeated `--add-dir` entries. |
 | `mcp_configs` | `[]const []const u8` | `&.{}` | Repeated `--mcp-config` entries. |
@@ -54,15 +54,17 @@ pub const daemon = @import("daemon.zig");
 | `cont` | `bool` | `false` | Adds `--continue`; enables offset isolation. |
 | `session_id` | `?[]const u8` | `null` | Passed to `--session-id`. |
 | `cwd` | `?[]const u8` | `null` | Child working directory. |
-| `extra_args` | `[]const []const u8` | `&.{}` | Appended verbatim to child argv. |
+| `extra_args` | `[]const []const u8` | `&.{}` | Appended verbatim to child argv. A rejected print-only flag here (`--max-turns`, `--fallback-model`, `--include-partial-messages`, `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`, and the rest of `args.rejected_flags`) returns `RunError.InvalidOptions`. |
 | `extra_hooks` | `[]const hook.ExtraHook` | `&.{}` | Appended after relay hooks in inline `--settings`. |
 | `extra_settings_json` | `?[]const u8` | `null` | JSON object whose top-level keys (except `"hooks"`) merge into `--settings`. |
 | `verbose` | `bool` | `false` | Adds `--verbose`. |
 | `timeout_ms` | `u64` | `300_000` | Total wall-time cap in milliseconds. |
+| `transcript_idle_timeout_ms` | `?u64` | `null` | While awaiting `Stop`, return `RunError.TranscriptStalled` when neither the transcript nor the PTY grew for this long. `null` or `0` disables. The CLI passes `--transcript-idle-timeout` (default `600 s`). |
 | `claude_path` | `?[]const u8` | `null` | Overrides `"claude"` binary path (useful for testing). |
 | `cols` / `rows` | `u16` | `120` / `40` | PTY dimensions. |
 | `debug` | `bool` | `false` | Prints millisecond-stamped trace to stderr. |
 | `stream_writer` | `?*std.Io.Writer` | `null` | When set with `.stream_json`, streams transcript lines live and sets `Result.streamed = true`. |
+| `retain_replay` | `bool` | `true` | Keep the parsed turn's original JSONL lines in `Summary.jsonl_replay`. Set `false` to skip the copy; it is always skipped when `stream_writer` is set. |
 
 ### `driver.Result`
 
@@ -87,30 +89,55 @@ pub const Result = struct {
 
 ```zig
 pub const RunError = error{
+    WriteFailed,
+    /// A `PermissionRequest` hook fired while awaiting `Stop`: claude is
+    /// showing a permission prompt nobody can answer. CLI exit `2`.
+    PermissionPromptBlocked,
+    /// `max_turns`, `fallback_model`, or a rejected flag in `extra_args`.
+    /// CLI exit `2`.
+    InvalidOptions,
     SessionStartTimeout,
     StopTimeout,
+    /// No transcript or PTY growth for `transcript_idle_timeout_ms` while
+    /// awaiting `Stop`. CLI exit `124`.
+    TranscriptStalled,
     PromptNotAccepted,
     PromptTruncated,
     TranscriptUnavailable,
     SpawnFailed,
     NoPromptSupplied,
     InvalidExtraSettings,
+    /// `driver.requestInterrupt()` was called (the CLI does this on SIGINT,
+    /// SIGTERM, SIGHUP); `run` unwinds and removes the PTY and temp dir.
+    /// The CLI exits `128 + sig` after a caught signal, else `2`.
+    Interrupted,
+    /// `opts.cwd` is not a directory this process can open.
+    InvalidCwd,
+    /// claude showed a bypass-permissions or development-channels dialog
+    /// that `opts` did not ask for; the driver never answers it.
+    UnexpectedStartupDialog,
 } || std.mem.Allocator.Error;
 ```
+
+`driver.clearInterrupt()` resets the interrupt flag so a long-lived library caller can start another `run` after handling a cancellation.
+
+**Failure diagnostics.** On failure the driver writes one redacted line to stderr: stage, cause, status, timings, and the PTY byte count (`claude-p: timed out after 300000 ms waiting for claude to finish the turn (PTY bytes=N)`). The recent-screen excerpt, which can contain prompt or tool text, is added only when `debug` is set or `CLAUDE_P_DEBUG_SCREEN=1`.
 
 ## Daemon API (`daemon.Options`, `daemon.run`)
 
 ```zig
-pub fn run(allocator: std.mem.Allocator, opts: daemon.Options) !u8;
+pub fn run(allocator: std.mem.Allocator, opts: daemon.Options) daemon.RunError!u8;
 ```
 
-`daemon.Options` mirrors `driver.Options` (including `extra_hooks` and `extra_settings_json`), omits `prompt`, `output_format`, `max_turns`, and `stream_writer`, and replaces `timeout_ms` with:
+`daemon.Options` mirrors `driver.Options` (including `extra_hooks` and `extra_settings_json`), omits `prompt`, `output_format`, `max_turns`, `retain_replay`, and `stream_writer`, and replaces `timeout_ms` with:
 
 - `session_start_timeout_ms: u64 = 300_000`
 - `idle_progress_timeout_ms: u64 = 180_000` (`0` disables)
 - `transcript_idle_timeout_ms: u64 = 600_000` (`0` disables)
 
-`daemon.RunError`: `SessionStartTimeout`, `IdleTimeout`, `TranscriptStalled`, `InvalidExtraSettings`, `TranscriptUnavailable`, `SpawnFailed`, plus `std.mem.Allocator.Error`.
+`daemon.RunError`: `InvalidExtraSettings`, `InvalidOptions` (same checks as `driver.validateOptions`), `IoFailure`, plus `std.mem.Allocator.Error`.
+
+`daemon.run` reports most outcomes through its `u8` return value after writing a frame to stdout: `0` on stdin EOF (including EOF before `SessionStart` with nothing queued), `2` for `claude_not_found`, `spawn_failed`, `child_exited`, `unexpected_startup_dialog`, and `prompt_truncated`, `124` for `session_start_timeout`, `idle_timeout`, and `transcript_stalled`, and `130` when interrupted. A write failure from a closed stdout (`BrokenPipe`) returns `0`; other write failures return `2`.
 
 ## Hook, emit, and transcript types
 
@@ -131,6 +158,14 @@ pub fn emitErrorResult(
     duration_ms: u64,
 ) !void;
 
+/// Daemon protocol rejection: `{"type":"error","error":"<reason>"}`.
+pub fn writeProtocolError(writer: *std.Io.Writer, reason: []const u8) !void;
+
+// src/stream.zig
+/// A partial line longer than this is dropped and skipped through its
+/// newline, bounding `Tailer` memory on a runaway record.
+pub const default_max_partial_bytes: usize = 16 * 1024 * 1024;
+
 // src/transcript.zig
 pub const Usage = struct {
     input_tokens: u64 = 0,
@@ -143,10 +178,13 @@ pub const Summary = struct {
     final_text: []u8,
     session_id: []u8,
     is_error: bool,
+    subtype: ?[]u8 = null,
+    permission_denials: ?[]u8 = null,
     num_turns: u32,
     total_cost_usd: f64,
     duration_api_ms: u64,
     usage: Usage,
+    /// Original lines of the turn; empty when `retain_replay` is false.
     jsonl_replay: []u8,
 
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void;

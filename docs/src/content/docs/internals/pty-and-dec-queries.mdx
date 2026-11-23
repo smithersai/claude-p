@@ -14,17 +14,19 @@ import VtByteGrammarDiagram from '../../../components/diagrams/VtByteGrammarDiag
 
 ## Wire grammar (`src/terminal.zig`)
 
-`terminal.respondToDecQueries(allocator, bytes, out)` scans each incoming PTY chunk for CSI sequences (`0x1b '['`, optional private `'>'`, parameter bytes `0x30..0x3f`, intermediate bytes `0x20..0x2f`, final byte) and appends any matching reply to `out`.
+`terminal.DecDecoder.feed(allocator, chunk, out)` scans each incoming PTY chunk for CSI sequences (`0x1b '['`, optional private `'>'`, parameter bytes `0x30..0x3f`, intermediate bytes `0x20..0x2f`, final byte) and appends any matching reply to `out`. The driver keeps one `DecDecoder` per PTY on its shared state.
 
 <VtByteGrammarDiagram />
 
-All non-matching bytes and non-query CSI sequences are ignored. The scanner holds no state between calls, so it is thread-safe by construction and verified by unit tests in `src/terminal.zig`.
+All non-matching bytes and non-query CSI sequences are ignored. `DecDecoder` carries an incomplete trailing `ESC` or CSI (up to 32 bytes) into the next `feed` call, so a query split across two PTY reads is still answered. It is not thread-safe; only zmux's reader thread touches it. `respondToDecQueries` is a one-shot form that drops an incomplete trailing sequence; do not use it on a live PTY stream.
+
+The window-size reply `ESC [ 8 ; rows ; cols t` reports the decoder's configured `rows` and `cols` (default 40 × 120, matching the PTY size).
 
 ## Why no full VT emulator?
 
 An early prototype considered embedding `libghostty-vt` to maintain a screen grid and read replies off the rendered terminal. Once `Stop` hooks and JSONL transcript parsing replaced screen scraping, `claude-p` needed only two operations on PTY bytes:
 
-1. Answer the five startup probes (`src/terminal.zig`, ~65 lines).
+1. Answer the five startup probes (`src/terminal.zig`).
 2. Strip CSI, OSC, and DCS escapes into a stack buffer (`driver.stripCsiInto`) so the startup dialog handler can inspect plain text and the `❯` cursor.
 
 If a future Claude Code release adds a new boot probe, the failure surfaces as `SessionStartTimeout` (visible under `--debug`), and the fix is one `switch` arm in `src/terminal.zig`.

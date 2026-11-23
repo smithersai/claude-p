@@ -1,26 +1,36 @@
 ---
-description: Probe the installed Claude Code CLI release for flag drift, hook suppression, Ink terminal probes, and startup dialog regressions.
-capabilities: ["fs:read:**", "fs:write:.smithers/reports/claude-compat-probe.json", "proc:spawn:claude *", "proc:spawn:sh .smithers/run-zig.sh *", "proc:spawn:rg *"]
+description: Probe the installed Claude Code CLI release for flag drift, hook suppression, and rejected-flag coverage using only read-only version and help output.
+capabilities: ["fs:read:**", "fs:write:.smithers/reports/claude-compat-probe.json", "proc:spawn:claude --version", "proc:spawn:claude --help", "proc:spawn:npm view @anthropic-ai/claude-code version", "proc:spawn:rg *"]
 model: sol
 budget:
   tokens: 64000
   milliseconds: 1200000
 ---
 
-Audit compatibility between `claude-p` and the currently installed `claude` CLI:
+Audit compatibility between `claude-p` and the currently installed `claude`
+CLI. This flow is read-only inspection: the only processes it may start are
+`claude --version`, `claude --help`, `npm view @anthropic-ai/claude-code version`,
+and `rg`. It never runs a Claude session, never calls the API, never runs the
+real-Claude E2E suite (run `smthrs run //.smithers:test-e2e` for that), and
+never passes environment overrides.
 
-1. Run `claude --version` and `claude --help` (zero API cost).
-2. Compare every boolean long flag in `claude --help` against
-   `known_boolean_long_flags` in `src/args.zig` — report any new boolean flags
+1. Run `claude --version` and record the exact version string it prints.
+2. Run `npm view @anthropic-ai/claude-code version` and record the latest
+   published version. Record whether the inspected version equals it. If the
+   lookup fails, record `latest_npm_version: null` and
+   `matches_latest: null`; never guess.
+3. Run `claude --help`. Build one set from `src/args.zig`: the flags `parse`
+   handles explicitly, the flags `isRejectedFlag` refuses, and
+   `known_boolean_long_flags` (passthrough booleans). Compare every long flag
+   in `claude --help` against that combined set. Report flags in none of the
+   three groups, and boolean flags missing from `known_boolean_long_flags`
    that could swallow a positional prompt under greedy passthrough.
-3. Check `--permission-mode` allowed choices and any new flags that disable or
-   alter hooks (like `--bare` and `--safe-mode`), and verify `src/args.zig`
-   handles or rejects them appropriately.
-4. If `CLAUDE_P_E2E=1` is enabled in the environment, run
-   `env -u ANTHROPIC_API_KEY CLAUDE_P_E2E=1 sh .smithers/run-zig.sh build test-integration --summary all`
-   and record pass/fail counts and elapsed time; otherwise mark live E2E as
-   `skipped` (never fabricate pass results).
+4. Check `--permission-mode` allowed choices and any new flags that disable or
+   alter hooks (like `--bare` and `--safe-mode`), and verify `isRejectedFlag`
+   in `src/args.zig` rejects them.
 
 Write a structured summary to `.smithers/reports/claude-compat-probe.json`:
-{"claude_version":"...","missing_boolean_flags":[],"hook_risk_flags":[],"permission_modes":[],"e2e_status":"passed|failed|skipped","regressions":[],"summary":"..."}
-Never expose credentials or OAuth tokens in the report.
+{"claude_version":"...","latest_npm_version":"...","matches_latest":true,"missing_boolean_flags":[],"unknown_flags":[],"hook_risk_flags":[],"permission_modes":[],"regressions":[],"summary":"..."}
+If the inspected version is not the latest npm release, say so in `summary`:
+the findings describe the inspected version only. Never expose credentials or
+OAuth tokens in the report.

@@ -3,7 +3,7 @@ interface Props {
   caption?: string;
 }
 const {
-  caption = 'Stop can arrive before Claude flushes the last assistant JSONL line. driver.run() retries parseFileFromOffset() up to 20×50 ms (30× if text mismatches Stop) before falling back to last_assistant_message.',
+  caption = 'Stop can arrive before Claude flushes the last assistant JSONL line. driver.run() pumps and parses the transcript up to 20×20 ms (daemon: 30×25 ms), exiting early when the text matches Stop, before falling back to last_assistant_message.',
 } = Astro.props;
 ---
 
@@ -19,7 +19,7 @@ const {
     <line x1="150" y1="36" x2="808" y2="36" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#race-arr)" />
     <text x="150" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">t = 0 ms</text>
     <text x="310" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+35 ms</text>
-    <text x="450" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+50 ms</text>
+    <text x="450" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+20 ms</text>
     <text x="640" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+1000 ms (20×)</text>
 
     <!-- Track labels -->
@@ -45,7 +45,7 @@ const {
     <!-- Driver retry attempt 1 (miss) -->
     <rect x="150" y="178" width="136" height="44" rx="7" fill="var(--diag-rose-fill)" stroke="var(--diag-rose)" stroke-width="1.25" />
     <text x="218" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="var(--diag-rose)">try #1: miss</text>
-    <text x="218" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">sleep 50 ms</text>
+    <text x="218" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">sleep 20 ms</text>
 
     <!-- Driver retry attempt 2 (hit) -->
     <rect x="446" y="178" width="174" height="44" rx="7" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />

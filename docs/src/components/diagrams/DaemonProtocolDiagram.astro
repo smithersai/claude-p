@@ -3,12 +3,12 @@ interface Props {
   caption?: string;
 }
 const {
-  caption = 'claude-p daemon keeps one interactive Claude session open across turns. ping is answered inline; interrupt cancels a busy turn without killing the session; dual busy watchdogs emit structured error frames before exiting.',
+  caption = 'claude-p daemon keeps one interactive Claude session open across turns. ping is answered inline; interrupt cancels a busy turn without killing the session. type:"error" frames reject one input line; type:"result" frames end a turn or the session.',
 } = Astro.props;
 ---
 
 <figure class="cp-diagram">
-  <svg viewBox="0 0 860 364" role="img" aria-label="Daemon mode NDJSON protocol and state machine diagram">
+  <svg viewBox="0 0 860 420" role="img" aria-label="Daemon mode NDJSON protocol and state machine diagram">
     <defs>
       <marker id="dmn-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
         <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
@@ -22,13 +22,13 @@ const {
     </defs>
 
     <!-- Left column: Stdin frames -->
-    <rect x="14" y="18" width="246" height="328" rx="10" fill="var(--diag-surface)" stroke="var(--diag-blue)" stroke-width="1.5" />
+    <rect x="14" y="18" width="246" height="386" rx="10" fill="var(--diag-surface)" stroke="var(--diag-blue)" stroke-width="1.5" />
     <text x="28" y="42" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-blue)">stdin (NDJSON)</text>
 
     <rect x="26" y="56" width="222" height="64" rx="7" fill="var(--diag-blue-fill)" stroke="var(--diag-border)" stroke-width="1" />
     <text x="38" y="75" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">&lbrace;"type":"user", ...&rbrace;</text>
-    <text x="38" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">Queued; submitted via paced</text>
-    <text x="38" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">bracketed paste when idle.</text>
+    <text x="38" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">Queued (64 prompts / 64 MiB);</text>
+    <text x="38" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">pasted when idle.</text>
 
     <rect x="26" y="130" width="222" height="54" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border)" stroke-width="1" />
     <text x="38" y="149" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">&lbrace;"type":"ping"&rbrace;</text>
@@ -44,13 +44,17 @@ const {
     <text x="38" y="305" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">Drains active turn + queue,</text>
     <text x="38" y="320" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">terminates child, exits 0.</text>
 
+    <rect x="26" y="342" width="222" height="50" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border)" stroke-width="1" />
+    <text x="38" y="361" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">blank line</text>
+    <text x="38" y="379" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">Ignored silently; no frame.</text>
+
     <!-- Middle column: State machine -->
-    <rect x="304" y="18" width="252" height="328" rx="10" fill="var(--diag-surface)" stroke="var(--diag-accent)" stroke-width="1.5" />
+    <rect x="304" y="18" width="252" height="386" rx="10" fill="var(--diag-surface)" stroke="var(--diag-accent)" stroke-width="1.5" />
     <text x="320" y="42" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-accent)">daemon state loop</text>
 
     <rect x="320" y="58" width="220" height="48" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border-strong)" stroke-width="1.25" />
     <text x="430" y="78" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="700" fill="var(--diag-text)">waiting_for_ready</text>
-    <text x="430" y="95" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">--timeout (300 s → exit 2)</text>
+    <text x="430" y="95" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">--timeout (300 s → exit 124) · EOF → 0</text>
 
     <rect x="320" y="138" width="220" height="48" rx="7" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
     <text x="430" y="158" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="700" fill="var(--diag-green)">idle</text>
@@ -63,6 +67,10 @@ const {
     <text x="430" y="296" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">spinner-immune · exit 124</text>
     <text x="430" y="313" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-rose)">ESC → 1.5 s window → idle</text>
 
+    <rect x="320" y="342" width="220" height="50" rx="7" fill="var(--diag-rose-fill)" stroke="var(--diag-border)" stroke-width="1" />
+    <text x="430" y="361" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="var(--diag-rose)">PermissionRequest</text>
+    <text x="430" y="379" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">ESC → permission_prompt_blocked → idle</text>
+
     <!-- State transitions -->
     <line x1="430" y1="106" x2="430" y2="135" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#dmn-arr)" />
     <text x="438" y="125" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-muted)">SessionStart</text>
@@ -74,7 +82,7 @@ const {
     <text x="486" y="207" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-green)">Stop / ESC</text>
 
     <!-- Right column: Stdout frames -->
-    <rect x="600" y="18" width="246" height="328" rx="10" fill="var(--diag-surface)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <rect x="600" y="18" width="246" height="386" rx="10" fill="var(--diag-surface)" stroke="var(--diag-green)" stroke-width="1.5" />
     <text x="614" y="42" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-green)">stdout (NDJSON)</text>
 
     <rect x="612" y="56" width="222" height="46" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border)" stroke-width="1" />
@@ -87,7 +95,7 @@ const {
 
     <rect x="612" y="164" width="222" height="48" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border)" stroke-width="1" />
     <text x="624" y="183" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">&lbrace;"type":"result", ...&rbrace;</text>
-    <text x="624" y="200" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">Turn slice [start..end) on Stop</text>
+    <text x="624" y="200" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">Turn slice on confirmed Stop (150 ms)</text>
 
     <rect x="612" y="220" width="222" height="46" rx="7" fill="var(--diag-surface-alt)" stroke="var(--diag-border)" stroke-width="1" />
     <text x="624" y="239" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">&lbrace;"type":"pong","ts":…&rbrace;</text>
@@ -95,8 +103,12 @@ const {
 
     <rect x="612" y="274" width="222" height="58" rx="7" fill="var(--diag-rose-fill)" stroke="var(--diag-border)" stroke-width="1" />
     <text x="624" y="293" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-rose)">interrupted / error result</text>
-    <text x="624" y="311" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">Structured reason before exit</text>
+    <text x="624" y="311" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">Ends a turn or the session</text>
     <text x="624" y="325" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">is_error: false on interrupted</text>
+
+    <rect x="612" y="342" width="222" height="50" rx="7" fill="var(--diag-blue-fill)" stroke="var(--diag-border)" stroke-width="1" />
+    <text x="624" y="361" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-text)">&lbrace;"type":"error","error":…&rbrace;</text>
+    <text x="624" y="379" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" fill="var(--diag-muted)">Rejects one line; no turn ends</text>
 
     <!-- Connector arrows -->
     <line x1="260" y1="182" x2="301" y2="182" stroke="var(--diag-blue)" stroke-width="1.8" marker-end="url(#dmn-arr-b)" />

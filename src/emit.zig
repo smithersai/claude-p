@@ -13,6 +13,7 @@ pub const OutputFormat = args_mod.OutputFormat;
 pub const ResultEnvelope = struct {
     summary: *const Summary,
     duration_ms: u64,
+    error_reason: ?[]const u8 = null,
 };
 
 pub fn emit(
@@ -46,6 +47,10 @@ pub fn emitJson(
     try jw.write("result");
     try jw.objectField("subtype");
     try jw.write(s.subtype orelse if (s.is_error) "error_during_execution" else "success");
+    if (env.error_reason) |reason| {
+        try jw.objectField("error");
+        try jw.write(reason);
+    }
     try jw.objectField("session_id");
     try jw.write(s.session_id);
     try jw.objectField("result");
@@ -72,8 +77,9 @@ pub fn emitJson(
     try jw.write(s.usage.cache_creation_input_tokens);
     try jw.endObject();
     try jw.objectField("permission_denials");
-    try jw.beginArray();
-    try jw.endArray();
+    try jw.beginWriteRaw();
+    try jw.writer.writeAll(s.permission_denials orelse "[]");
+    jw.endWriteRaw();
     try jw.endObject();
     try writer.writeAll("\n");
 }
@@ -93,6 +99,13 @@ pub fn emitStreamJson(
     try emitJson(allocator, writer, env);
 }
 
+/// Reject an input frame without completing the caller's active turn.
+pub fn writeProtocolError(writer: *std.Io.Writer, reason: []const u8) !void {
+    try std.json.Stringify.value(.{ .type = "error", .@"error" = reason }, .{}, writer);
+    try writer.writeByte('\n');
+    try writer.flush();
+}
+
 /// Emit one structured daemon result line for a turn that did not finish
 /// normally: an interrupted turn or a terminal watchdog timeout. Same field
 /// set as `emitJson` plus `error`, so a hub parses both with one schema.
@@ -106,6 +119,17 @@ pub fn emitErrorResult(
     duration_ms: u64,
 ) !void {
     _ = allocator;
+    return emitErrorResultDetail(writer, subtype, error_reason, session_id, duration_ms, .{});
+}
+
+pub fn emitErrorResultDetail(
+    writer: *std.Io.Writer,
+    subtype: []const u8,
+    error_reason: []const u8,
+    session_id: []const u8,
+    duration_ms: u64,
+    detail: struct { stage: ?[]const u8 = null, message: ?[]const u8 = null },
+) !void {
     var jw = std.json.Stringify{ .writer = writer, .options = .{} };
     try jw.beginObject();
     try jw.objectField("type");
@@ -114,6 +138,14 @@ pub fn emitErrorResult(
     try jw.write(subtype);
     try jw.objectField("error");
     try jw.write(error_reason);
+    if (detail.stage) |stage| {
+        try jw.objectField("stage");
+        try jw.write(stage);
+    }
+    if (detail.message) |message| {
+        try jw.objectField("message");
+        try jw.write(message);
+    }
     try jw.objectField("session_id");
     try jw.write(session_id);
     try jw.objectField("result");
@@ -205,6 +237,19 @@ test "emit json: result object shape" {
     const usage = obj.get("usage").?.object;
     try testing.expectEqual(@as(i64, 2), usage.get("input_tokens").?.integer);
     try testing.expectEqual(@as(i64, 1), usage.get("output_tokens").?.integer);
+}
+
+test "emit json preserves permission denials as an array" {
+    const out = try parseAndEmit(testing.allocator, .json,
+        \\{"type":"result","result":"ok","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"echo hi"}}]}
+    );
+    defer testing.allocator.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const denials = parsed.value.object.get("permission_denials").?.array.items;
+    try testing.expectEqual(1, denials.len);
+    try testing.expectEqualStrings("Bash", denials[0].object.get("tool_name").?.string);
+    try testing.expectEqualStrings("echo hi", denials[0].object.get("tool_input").?.object.get("command").?.string);
 }
 
 test "emit json: error result" {

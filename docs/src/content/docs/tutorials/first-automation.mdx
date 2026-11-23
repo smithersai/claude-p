@@ -45,10 +45,10 @@ Run this in any repository:
 {
   printf 'Review the following diff for bugs. Reply in 3 bullet points max.\n\n'
   git diff HEAD~1 2>/dev/null || printf '+ const x = 1 / 0;\n'
-} | npx claude-p --dangerously-skip-permissions
+} | npx claude-p --disallowedTools Bash Edit Write
 ```
 
-You should see a plain-text review printed to stdout and exit code `0`.
+You should see a plain-text review printed to stdout and exit code `0`. A text-only review needs no tools, so `--disallowedTools` denies shell and file writes instead of granting everything with `--dangerously-skip-permissions`. If Claude still asks for a permission, `claude-p` fails fast with exit `2` (`PermissionPromptBlocked`) rather than hanging.
 
 <Callout title="What just happened?" kind="concept">
   Why didn't your multiline diff submit after line 1? Because <code>claude-p</code> wraps the
@@ -61,15 +61,13 @@ You should see a plain-text review printed to stdout and exit code `0`.
 
 ## Step 2: Switch to `--output-format json`
 
-Plain text is great for humans, awkward for scripts. Ask `claude-p` for the JSON result envelope instead, and combine it with `--system-prompt` and `--max-turns` to keep the review tight:
+Plain text is great for humans, awkward for scripts. Ask `claude-p` for the JSON result envelope instead, and combine it with `--system-prompt` to keep the review tight (`--max-turns` is print-mode-only, so `claude-p` rejects it):
 
 ```bash
 REVIEW_JSON=$(
   printf 'Spot any bug in this code:\n\nfunction div(a, b) { return a / b; }\n' \
   | npx claude-p \
       --output-format json \
-      --max-turns 1 \
-      --dangerously-skip-permissions \
       --system-prompt "You are a terse code reviewer. No preamble."
 )
 
@@ -116,7 +114,6 @@ Now add `--verbose` and watch each JSONL frame arrive:
 npx claude-p \
   --output-format stream-json \
   --verbose \
-  --dangerously-skip-permissions \
   "Reply with the single word OK." | jq -c '{type, subtype}'
 ```
 
@@ -132,12 +129,13 @@ Notice the last line is always `{"type":"result","subtype":"success"}`—the exa
 | --- | --- | --- |
 | `0` | Nothing (`is_error: false`) | Parse stdout and continue. |
 | `1` | Assistant returned `is_error: true` | Surface `.result` to the caller; do not retry blindly. |
-| `2` | Bad flags, empty prompt, `PromptNotAccepted`, `PromptTruncated`, `InvalidExtraSettings`, or spawn error | Read stderr (or rerun with `--debug`). |
-| `124` | Timed out (`SessionStartTimeout` or `StopTimeout`) | Raise `--timeout` or retry with a smaller prompt. |
-| `130` | Interrupted via `SIGINT` (npm shim) | Stop cleanly. |
+| `2` | Bad or rejected flags (including print-only `--max-turns`), empty prompt, `PermissionPromptBlocked`, `PromptNotAccepted`, `PromptTruncated`, `TranscriptUnavailable`, `InvalidExtraSettings`, `InvalidCwd`, `UnexpectedStartupDialog`, or spawn error | Read stderr (or rerun with `--debug`; stderr omits screen contents unless `--debug` or `CLAUDE_P_DEBUG_SCREEN=1`). |
+| `124` | Timed out (`SessionStartTimeout`, `StopTimeout`, or `TranscriptStalled`) | Raise `--timeout` or `--transcript-idle-timeout`, or retry with a smaller prompt. |
+| `128 + sig` | Interrupted: `130` for `SIGINT`, `143` for `SIGTERM`, `129` for `SIGHUP`. The native binary sets this code after cleaning up; a duplicate signal within 2 s is ignored so cleanup finishes. | Stop cleanly. |
 
 <Callout title="Watch out for variadic flags before PROMPT!" kind="trap">
-  <code>--add-dir</code> and <code>--mcp-config</code> are variadic: they consume every following
+  <code>--add-dir</code>, <code>--mcp-config</code>, <code>--allowedTools</code>, and
+  <code>--disallowedTools</code> are variadic: they consume every following
   non-flag argument, just like <code>claude</code>. If you pass a positional prompt after them,
   put <code>--</code> first:
   <br />
@@ -171,9 +169,8 @@ set +e
 OUT="$(npx claude-p \
   --output-format json \
   --input-file "$TMP_PROMPT" \
-  --max-turns 1 \
   --timeout 120 \
-  --dangerously-skip-permissions)"
+  --disallowedTools Bash Edit Write)"
 CODE=$?
 set -e
 
