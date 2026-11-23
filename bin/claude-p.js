@@ -6,22 +6,19 @@ const { spawn } = require("node:child_process");
 const { constants: { signals } } = require("node:os");
 const path = require("node:path");
 
-function platformDir() {
-  const platform = process.platform;
-  const arch = process.arch;
-  return `${platform}-${arch}`;
-}
-
 function binaryPath() {
-  const dir = path.join(__dirname, "..", "prebuilt", platformDir());
-  const name = process.platform === "win32" ? "claude-p.exe" : "claude-p";
-  return path.join(dir, name);
+  return path.join(__dirname, "..", "prebuilt", `${process.platform}-${process.arch}`, "claude-p");
 }
 
 function main() {
   const child = spawn(binaryPath(), process.argv.slice(2), {
     stdio: "inherit",
   });
+  // Forward signals so `kill <launcher pid>` reaches the binary. On Ctrl-C or
+  // `kill -INT -<pgid>` the kernel has already signalled the binary (same
+  // process group), so it sees the signal twice; claude-p ignores a duplicate
+  // inside 2 s and still unwinds, removing its temp dir, before exiting
+  // `128 + signal`.
   const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
   const forwardSignal = (signal) => child.kill(signal);
   for (const signal of forwardedSignals) {

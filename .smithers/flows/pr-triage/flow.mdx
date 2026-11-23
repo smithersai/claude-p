@@ -1,6 +1,6 @@
 ---
 description: Triage a claude-p pull request from supplied metadata and diff without executing untrusted PR code.
-capabilities: ["fs:read:**", "fs:write:.smithers/reports/pr-triage.json", "proc:spawn:rg *"]
+capabilities: ["fs:read:**", "fs:write:.smithers/reports/pr-triage.json"]
 model: sol
 budget:
   tokens: 64000
@@ -14,8 +14,10 @@ credential and must not publish, approve, assign, close, merge, or change main.
 
 Assess scope, description, focused unit/E2E regressions, `SPEC.md`/`README.md`
 updates where public behavior changes, and diff size. Flag high-risk changes to
-`src/driver.zig`, `src/hook.zig`, `src/daemon.zig`, `build.zig.zon`,
-`scripts/install.js`, or `scripts/publish.mjs`. Verify Zig memory ownership,
+`src/driver.zig`, `src/hook.zig`, `src/daemon.zig`, `build.zig`,
+`build.zig.zon`, `package.json`, `bin/claude-p.js`, `scripts/install.js`,
+`scripts/publish.mjs`, `scripts/build-in-linux.sh`, `.github/workflows/**`, or
+`.smithers/**`. Verify Zig memory ownership,
 zmux callback thread safety, macOS `TTYHOG` paste safety, `--resume` offset
 isolation, targeted child env filtering, and SHA-256 supply-chain invariants.
 

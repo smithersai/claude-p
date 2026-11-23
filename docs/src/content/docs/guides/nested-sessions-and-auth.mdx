@@ -18,7 +18,8 @@ Spawning `claude` inside an existing Claude Code session or agent harness trigge
 | Stripped (exact) | `CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID` |
 | Stripped (prefix) | `CLAUDE_CODE_SESSION_*`, `CLAUDE_CODE_PARENT_*`, `CLAUDE_CODE_SUBAGENT_*` |
 | Preserved | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, and all other caller variables |
-| Injected / defaulted | `CLAUDE_P_FIFO=<per-run FIFO path>`, `TERM=xterm-256color`, `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` (when unset) |
+| Injected / defaulted | `TERM=xterm-256color`, `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` (when unset) |
+| Dropped | An inherited `CLAUDE_P_FIFO`. `hook.sh` embeds the FIFO path, so `claude-p` exports no FIFO variable. |
 
 Because `CLAUDE_CODE_*` is never blanket-stripped, OAuth, Bedrock, Vertex, and Foundry configurations work without wrapper-specific flags:
 
@@ -37,7 +38,7 @@ ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project \
 | --- | --- |
 | `--dangerously-skip-permissions` | Bypasses tool permission prompts; `claude-p` auto-accepts the startup confirmation modal. |
 | `--permission-mode <mode>` | Sets `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `default`, `dontAsk`, or `plan`. |
-| `--allowedTools` / `--disallowedTools` | Restricts which tools `claude` may run without prompting. |
+| `--allowedTools` / `--disallowedTools` | Restricts which tools `claude` may run without prompting. Repeatable and variadic; every rule is forwarded in order. |
 
 ```bash
 npx claude-p \
@@ -46,3 +47,5 @@ npx claude-p \
   --output-format json \
   "Find all TODO comments in src/."
 ```
+
+If a tool still needs approval, Claude Code fires `PermissionRequest` and `claude-p` fails fast instead of hanging until `--timeout`: one-shot exits `2` (`PermissionPromptBlocked`), and the daemon emits a `permission_prompt_blocked` result frame and returns to idle.

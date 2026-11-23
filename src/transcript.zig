@@ -39,6 +39,8 @@ pub const Summary = struct {
     session_id: []u8,
     is_error: bool,
     subtype: ?[]u8 = null,
+    /// Owned JSON array from the terminal result, when supplied.
+    permission_denials: ?[]u8 = null,
     num_turns: u32,
     total_cost_usd: f64,
     duration_api_ms: u64,
@@ -47,6 +49,7 @@ pub const Summary = struct {
     jsonl_replay: []u8,
 
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
+        if (self.permission_denials) |value| allocator.free(value);
         if (self.subtype) |value| allocator.free(value);
         allocator.free(self.final_text);
         allocator.free(self.session_id);
@@ -91,7 +94,7 @@ fn appendText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), msg: std.js
     }
 }
 
-pub const ParseOptions = struct { keep_replay: bool = true };
+pub const ParseOptions = struct { keep_replay: bool = true, stop_text: ?[]const u8 = null };
 
 /// Parse a transcript from raw JSONL bytes.
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary {
@@ -99,6 +102,20 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
 }
 
 pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOptions) ParseError!Summary {
+    var matched_end: usize = 0;
+    var summary = try parseRecords(allocator, bytes, opts, &matched_end);
+    if (matched_end > 0 and !textMatches(summary.final_text, opts.stop_text.?)) {
+        summary.deinit(allocator);
+        return parseRecords(allocator, bytes[0..matched_end], .{ .keep_replay = opts.keep_replay }, &matched_end);
+    }
+    return summary;
+}
+
+fn textMatches(text: []const u8, wanted: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), std.mem.trim(u8, wanted, " \t\r\n"));
+}
+
+fn parseRecords(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOptions, matched_end: *usize) ParseError!Summary {
     var final_text_buf: std.ArrayList(u8) = .{};
     errdefer final_text_buf.deinit(allocator);
 
@@ -110,15 +127,20 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
 
     var usage: Usage = .{};
     var result_usage: Usage = .{};
+    var result_fields = std.EnumSet(std.meta.FieldEnum(Usage)).initEmpty();
+    var permission_denials: ?[]u8 = null;
+    errdefer if (permission_denials) |value| allocator.free(value);
     var usage_by_id = std.StringHashMap(Usage).init(allocator);
     var id_arena = std.heap.ArenaAllocator.init(allocator);
     defer id_arena.deinit();
+    var seen_records = std.StringHashMap(void).init(id_arena.allocator());
     defer usage_by_id.deinit();
     var last_msg_id: ?[]const u8 = null;
     var is_error = false;
     var subtype: ?[]u8 = null;
     errdefer if (subtype) |value| allocator.free(value);
     var num_turns: u32 = 0;
+    var result_turns: ?u32 = null;
     var total_cost_usd: f64 = 0.0;
     var duration_api_ms: u64 = 0;
     var saw_assistant = false;
@@ -151,6 +173,12 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
         if (root != .object) continue;
         const obj = root.object;
 
+        if (stringField(obj, "uuid")) |uuid| {
+            const seen = try seen_records.getOrPut(uuid);
+            if (seen.found_existing) continue;
+            seen.key_ptr.* = try id_arena.allocator().dupe(u8, uuid);
+        }
+
         // Session id (every event has one). Field is `sessionId` in real
         // Claude transcripts and `session_id` in the legacy stream-json
         // format. Accept both.
@@ -164,7 +192,16 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
 
         const ty = stringField(obj, "type") orelse continue;
         var next_subtype: ?[]const u8 = null;
-        if (std.mem.eql(u8, ty, "assistant")) {
+        const assistant = std.mem.eql(u8, ty, "assistant");
+        if (!assistant and !std.mem.eql(u8, ty, "result")) continue;
+        // Only the current terminal record can override the assistant totals.
+        result_fields = .initEmpty();
+        result_turns = null;
+        total_cost_usd = 0;
+        duration_api_ms = 0;
+        if (permission_denials) |old| allocator.free(old);
+        permission_denials = null;
+        if (assistant) {
             saw_assistant = true;
             const msg = objectField(obj, "message") orelse std.json.ObjectMap.init(allocator);
             const id = stringField(msg, "id");
@@ -180,7 +217,12 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
                     entry.value_ptr.* = .{};
                     num_turns +|= 1;
                 }
-                if (msg_usage) |u| entry.value_ptr.* = Usage.fromObject(u);
+                if (msg_usage) |u| {
+                    inline for (std.meta.fields(Usage)) |field| {
+                        const n = unsignedField(u64, u, field.name) orelse 0;
+                        if (n != 0) @field(entry.value_ptr.*, field.name) = n;
+                    }
+                }
                 last_msg_id = entry.key_ptr.*;
             } else {
                 last_msg_id = null;
@@ -193,12 +235,17 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
             is_error = (api_error == .bool and api_error.bool) or
                 std.mem.eql(u8, stringField(msg, "model") orelse "", "<synthetic>");
             if (is_error) next_subtype = "error_during_execution";
-        } else if (std.mem.eql(u8, ty, "result")) {
+        } else {
             last_msg_id = null;
-            if (obj.get("is_error")) |flag| {
-                if (flag == .bool) is_error = flag.bool;
-            }
             next_subtype = stringField(obj, "subtype");
+            const flag = obj.get("is_error") orelse .null;
+            if (flag == .bool) {
+                is_error = flag.bool;
+            } else if (next_subtype) |kind| {
+                is_error = std.mem.startsWith(u8, kind, "error");
+            } else if (stringField(obj, "result")) |text| {
+                if (!textMatches(text, final_text_buf.items)) is_error = false;
+            }
             if (stringField(obj, "result")) |result| {
                 final_text_buf.clearRetainingCapacity();
                 try final_text_buf.appendSlice(allocator, result);
@@ -218,25 +265,44 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
                     }
                 }
             }
-            if (objectField(obj, "usage")) |u| result_usage = Usage.fromObject(u);
-            if (unsignedField(u32, obj, "num_turns")) |n| num_turns = n;
+            if (objectField(obj, "usage")) |u| {
+                inline for (std.meta.fields(Usage)) |field| {
+                    if (unsignedField(u64, u, field.name)) |n| {
+                        @field(result_usage, field.name) = n;
+                        result_fields.insert(@field(std.meta.FieldEnum(Usage), field.name));
+                    }
+                }
+            }
+            if (obj.get("permission_denials")) |denials| {
+                if (denials == .array) permission_denials = try std.json.Stringify.valueAlloc(allocator, denials, .{});
+            }
+            result_turns = unsignedField(u32, obj, "num_turns");
             if (obj.get("total_cost_usd")) |x| switch (x) {
                 .float => total_cost_usd = x.float,
                 .integer => total_cost_usd = @floatFromInt(x.integer),
                 else => {},
             };
             if (unsignedField(u64, obj, "duration_api_ms")) |n| duration_api_ms = n;
-        } else continue;
+        }
 
         const owned_subtype = if (next_subtype) |value| try allocator.dupe(u8, value) else null;
         if (subtype) |old| allocator.free(old);
         subtype = owned_subtype;
+        if (opts.stop_text) |wanted| {
+            if (wanted.len > 0 and textMatches(final_text_buf.items, wanted)) {
+                matched_end.* = line_iter.index orelse bytes.len;
+            }
+        }
     }
 
     if (!saw_assistant) return error.NoAssistantMessage;
     var usage_iter = usage_by_id.valueIterator();
     while (usage_iter.next()) |u| usage.add(u.*);
-    if (std.meta.eql(usage, Usage{})) usage = result_usage;
+    inline for (std.meta.fields(Usage)) |field| {
+        if (result_fields.contains(@field(std.meta.FieldEnum(Usage), field.name))) {
+            @field(usage, field.name) = @field(result_usage, field.name);
+        }
+    }
 
     const final_text = try final_text_buf.toOwnedSlice(allocator);
     errdefer allocator.free(final_text);
@@ -247,7 +313,8 @@ pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: P
         .session_id = session_id,
         .is_error = is_error,
         .subtype = subtype,
-        .num_turns = num_turns,
+        .permission_denials = permission_denials,
+        .num_turns = result_turns orelse num_turns,
         .total_cost_usd = total_cost_usd,
         .duration_api_ms = duration_api_ms,
         .usage = usage,
@@ -271,14 +338,24 @@ pub fn parseFileFromOffset(allocator: std.mem.Allocator, path: []const u8, start
     return parseFileFromOffsetWithOptions(allocator, path, start_offset, .{});
 }
 
+pub fn validateTranscriptPath(path: []const u8) bool {
+    if (path.len == 0 or path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var components = std.mem.tokenizeScalar(u8, path, '/');
+    while (components.next()) |part| if (std.mem.eql(u8, part, "..")) return false;
+    return true;
+}
+
+pub const openTranscriptFile = openTranscriptRegularFile;
+
 /// Open nonblocking so checking the descriptor kind also works for an idle FIFO.
-pub fn openTranscriptFile(path: []const u8) !std.fs.File {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidTranscriptPath;
+pub fn openTranscriptRegularFile(path: []const u8) !std.fs.File {
+    if (!validateTranscriptPath(path)) return error.InvalidTranscriptPath;
     const file: std.fs.File = .{ .handle = try std.posix.open(path, .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
         .NONBLOCK = true,
         .NOCTTY = true,
+        .NOFOLLOW = true,
     }, 0) };
     errdefer file.close();
     if ((try file.stat()).kind != .file) return error.InvalidTranscriptPath;
@@ -288,8 +365,9 @@ pub fn openTranscriptFile(path: []const u8) !std.fs.File {
 pub fn parseFileFromOffsetWithOptions(allocator: std.mem.Allocator, path: []const u8, start_offset: u64, opts: ParseOptions) !Summary {
     const file = try openTranscriptFile(path);
     defer file.close();
-    const size = try file.getEndPos();
+    const size = (try file.stat()).size;
     if (size <= start_offset) return ParseError.NoAssistantMessage;
+    if (size - start_offset > 64 * 1024 * 1024) return error.FileTooBig;
     try file.seekTo(start_offset);
     const bytes = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(bytes);
@@ -495,4 +573,17 @@ test "parseFileFromOffset: missing file returns FileNotFound" {
         error.FileNotFound,
         parseFileFromOffset(testing.allocator, "/nonexistent/claude-p/t.jsonl", 0),
     );
+}
+
+test "Stop metadata belongs to the matching terminal record" {
+    const data =
+        \\{"type":"result","result":"finished","is_error":false,"subtype":"success","usage":{"input_tokens":7}}
+        \\{"type":"result","result":"stale failure","is_error":true,"subtype":"error","usage":{"input_tokens":42}}
+    ;
+    var s = try parseWithOptions(testing.allocator, data, .{ .stop_text = "finished" });
+    defer s.deinit(testing.allocator);
+    try testing.expectEqualStrings("finished", s.final_text);
+    try testing.expectEqualStrings("success", s.subtype.?);
+    try testing.expect(!s.is_error);
+    try testing.expectEqual(7, s.usage.input_tokens);
 }

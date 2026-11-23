@@ -273,10 +273,14 @@ fn checkUserFrames(alloc: Allocator, a: []const u8, b: []const u8) !void {
             .{ .type = "image", .text = "skip", .source = .{ .type = "text", .text = a } },
             .{ .type = "text", .text = b },
         } } },
+        .{ .type = "user", .message = .{ .content = .{
+            .{ .type = "text", .text = a },
+            .{ .type = "text", .text = b },
+        } } },
     }, 0..) |message, i| {
         frame.clearRetainingCapacity();
         try std.json.Stringify.value(message, .{}, &frame.writer);
-        try checkFrame(alloc, frame.written(), .user, a, if (i == 2) b else "");
+        try checkFrame(alloc, frame.written(), if (i == 2) .ignored else .user, a, if (i == 3) b else "");
     }
 }
 
@@ -340,7 +344,7 @@ test "fuzz stdin frame exclusion and structured content" {
 
 fn allocatedBlocks(alloc: Allocator) !void {
     const frame =
-        \\{"type":"user","message":{"content":[{"type":"text","text":"line\n"},{"type":"image","text":"ignored"},{"type":"text","text":"two longer than initial capacity"}]}}
+        \\{"type":"user","message":{"content":[{"type":"text","text":"line\n"},{"type":"text","text":"two longer than initial capacity"}]}}
     ;
     const prompt = (try daemon.parseUserMessageContent(alloc, frame)) orelse return error.MissingUserContent;
     defer alloc.free(prompt);
@@ -425,4 +429,14 @@ test "replayed stream has one terminal result with upstream error details" {
     try testing.expectEqualStrings("error_max_turns", s.subtype.?);
     try testing.expectEqualStrings("max turns", s.final_text);
     try testing.expectEqual(2, s.usage.output_tokens);
+}
+
+test "blank stdin records and malformed JSON never emit a result" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var lines = std.mem.splitScalar(u8, "\n\r\n   \t\r\n", '\n');
+    while (lines.next()) |line| try testing.expect(try daemon.readInputFrame(testing.allocator, &out.writer, line) == null);
+    try testing.expectEqual(0, out.written().len);
+    try testing.expect(try daemon.readInputFrame(testing.allocator, &out.writer, "{") == null);
+    try testing.expectEqualStrings("{\"type\":\"error\",\"error\":\"invalid_json\"}\n", out.written());
 }

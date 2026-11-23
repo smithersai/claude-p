@@ -9,7 +9,7 @@ import { Smithers as S } from "@smthrs/targets"
 export const review = S.Flow({
   flow: "checks/review",
   featured: true,
-  summary: "Review changes for PTY/Ink safety, Zig memory ownership, claude -p wire parity, and supply-chain integrity."
+  summary: "Review changes for PTY/Ink safety, Zig memory ownership, claude -p output contract, and supply-chain integrity."
 })
 
 export const issueRepro = S.Flow({
@@ -33,7 +33,7 @@ export const prTriage = S.Flow({
 export const compatProbe = S.Flow({
   flow: "claude-compat-probe",
   featured: true,
-  summary: "Probe a Claude Code CLI release for flag drift, hook suppression, Ink probes, and startup dialog regressions."
+  summary: "Inspect a Claude Code CLI release with read-only --version/--help for flag drift, hook-suppressing flags, and rejected-flag coverage."
 })
 
 export const factory = S.Factory({
@@ -55,8 +55,14 @@ export const factory = S.Factory({
       "src/hook.zig",
       "src/daemon.zig",
       "build.zig.zon",
+      "build.zig",
+      "package.json",
+      "bin/claude-p.js",
       "scripts/install.js",
-      "scripts/publish.mjs"
+      "scripts/publish.mjs",
+      "scripts/build-in-linux.sh",
+      ".github/workflows/**",
+      ".smithers/**"
     ]
   })
 })
@@ -66,7 +72,7 @@ export const home = S.Factory.Home({
     {
       type: "text",
       title: "claude-p factory",
-      text: "Drop-in replacement for `claude -p` driving interactive Claude Code inside an in-process zmux PTY. Local-first incremental Zig 0.15.2 and JS CI with Cloudflare cache sync, zero-mock real-Claude E2E gates, and weekly Claude Code compatibility probes."
+      text: "Emulates `claude -p` by driving interactive Claude Code inside an in-process zmux PTY. Local-first incremental Zig 0.15.2 and JS CI with Cloudflare cache sync, zero-mock real-Claude E2E gates, and weekly Claude Code compatibility probes."
     },
     {
       type: "prompt",

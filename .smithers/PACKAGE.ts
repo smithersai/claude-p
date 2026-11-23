@@ -42,10 +42,12 @@ const factorySources = S.Filegroup({
 })
 
 const zigRunner = S.file("run-zig.sh")
-const jsTestFile = S.file("tests/install-checksum.test.mjs")
 const jsPropTestFile = S.file("//tests/prop/js_supplychain_prop.mjs")
 
+// CLAUDE_P_HOST_KEY joins the action key so native outputs built on macOS
+// and Linux (or x64 and arm64) never share a cache entry.
 const zigEnv = {
+  CLAUDE_P_HOST_KEY: `${process.platform}-${process.arch}-zig-0.15.2`,
   ZIG_GLOBAL_CACHE_DIR: fileURLToPath(new URL("./cache/tools/zig/global", import.meta.url)),
   ZIG_LOCAL_CACHE_DIR: fileURLToPath(new URL("./cache/tools/zig/local", import.meta.url))
 }
@@ -73,11 +75,11 @@ const testJs = S.Shell.Test({
   args: [
     "-eu",
     "-c",
-    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs"
+    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && node --test .smithers/tests/install-checksum.test.mjs .smithers/tests/factory-projections.test.mjs tests/prop/js_supplychain_prop.mjs"
   ],
   sandbox: "none",
   timeout: "2m",
-  data: [jsSources, jsTestFile, jsPropTestFile]
+  data: [jsSources, versionSources, factorySources, jsPropTestFile]
 })
 
 const build = S.Shell.Build({
@@ -87,10 +89,11 @@ const build = S.Shell.Build({
   outDirs: ["//zig-out/native"]
 })
 
+// src/main.zig's process-group signal test reads bin/claude-p.js.
 const testUnit = S.Shell.Test({
   ...zigCommon,
   args: [".smithers/run-zig.sh", "build", "test", "--summary", "all"],
-  data: [zigSources, zigRunner]
+  data: [zigSources, zigRunner, S.file("//bin/claude-p.js")]
 })
 
 const crossBuild = (name: string, target: string) =>

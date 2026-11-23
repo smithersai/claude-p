@@ -3,7 +3,7 @@
     {
       "type": "text",
       "title": "claude-p factory",
-      "text": "Drop-in replacement for `claude -p` driving interactive Claude Code inside an in-process zmux PTY. Local-first incremental Zig 0.15.2 and JS CI with Cloudflare cache sync, zero-mock real-Claude E2E gates, and weekly Claude Code compatibility probes."
+      "text": "Emulates `claude -p` by driving interactive Claude Code inside an in-process zmux PTY. Local-first incremental Zig 0.15.2 and JS CI with Cloudflare cache sync, zero-mock real-Claude E2E gates, and weekly Claude Code compatibility probes."
     },
     {
       "type": "prompt",

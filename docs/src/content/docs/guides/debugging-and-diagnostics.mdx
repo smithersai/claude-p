@@ -29,9 +29,20 @@ Key milestones to look for in the trace:
 [claude-p +2940ms] Stop hook fired (assistant turn finished)
 ```
 
+## Failure messages are redacted by default
+
+Without `--debug`, a failed run writes only the stage, cause, status, timings, and PTY byte count to stderr:
+
+```text
+claude-p: timed out after 300000 ms waiting for claude to finish the turn (PTY bytes=48210)
+claude-p: StopTimeout: timed out waiting for claude to finish the turn (Stop hook never fired); raise --timeout
+```
+
+The PTY screen can show prompt text, file contents, or tool output, so the recent-screen excerpt (`claude-p: recent claude output:`) is printed only with `--debug` or `CLAUDE_P_DEBUG_SCREEN=1`. Set `CLAUDE_P_DEBUG_SCREEN=1` when you want the screen without the full trace, for example in CI logs you control.
+
 ## Daemon PTY telemetry (`CLAUDE_P_PTY_TRACE`)
 
-In daemon mode, a hung Ink TUI can look identical to a slow tool call from stdout alone. `claude-p daemon` prints a structured `[pty-trace]` line to stderr every 60 seconds by default:
+In daemon mode, a hung Ink TUI can look identical to a slow tool call from stdout alone. `claude-p daemon --debug` prints a structured `[pty-trace]` line to stderr every 60 seconds. The trace is off without `--debug` unless `CLAUDE_P_PTY_TRACE` sets an interval:
 
 ```text
 [pty-trace] state=busy pty_bytes=48210 pty_delta=1920 last_byte_age_ms=340 turn_age_ms=60012 transcript_pos=8192
@@ -44,8 +55,8 @@ Configure the trace interval via `CLAUDE_P_PTY_TRACE`:
 
 | Value | Behavior |
 | --- | --- |
-| Unset / empty | Print every `60` seconds (default). |
-| `<positive integer>` | Print every `N` seconds (e.g. `CLAUDE_P_PTY_TRACE=10`). |
+| Unset, empty, or not a number | Off, or every `60` seconds with `--debug`. |
+| `<positive integer>` | Print every `N` seconds, with or without `--debug` (e.g. `CLAUDE_P_PTY_TRACE=10`). |
 | `0`, `off`, `false`, `no` | Disable `[pty-trace]` output. |
 
 ## Diagnosing specific errors
@@ -53,10 +64,17 @@ Configure the trace interval via `CLAUDE_P_PTY_TRACE`:
 | Error / symptom | Cause | Fix |
 | --- | --- | --- |
 | `Error: --output-format=stream-json requires --verbose` | `stream-json` passed without `--verbose` in one-shot mode. | Add `--verbose`. |
-| `Error: unsupported flag` | Passed `-p`/`--print`, `--settings`, or `--bare`/`--safe-mode`. | Remove `-p`/`--print` (already emulated); replace `--settings` with `--extra-hook` or `--setting-json`; remove `--bare`/`--safe-mode` (they suppress `--settings` hooks). |
-| `SessionStartTimeout` | Ink hung before `SessionStart` fired (unhandled modal, new terminal probe, or `claude` auth prompt). Exits `124` (one-shot) or `2` with `session_start_timeout` frame (daemon). | Re-run with `--debug`; verify `claude` works interactively in `--cwd`; raise `--timeout`. |
+| `Error: unsupported flag` | Passed `-p`/`--print`, `--settings`, `--bare`/`--safe-mode`, `--no-session-persistence`, a print-mode-only flag (`--input-format`, `--json-schema`, `--max-budget-usd`, `--max-turns`, `--fallback-model`, `--include-partial-messages`, `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`), or `--output-format text`/`json` in daemon mode. | Remove `-p`/`--print` (already emulated); replace `--settings` with `--extra-hook` or `--setting-json`; remove the rest (they suppress hooks, stop the transcript, or are print-mode-only). |
+| `InvalidOptions` (library, exit `2`) | `driver.Options` set `max_turns`, `fallback_model`, or a rejected flag in `extra_args`. | Remove the option; `claude-p` cannot enforce it in an interactive session. |
+| `PermissionPromptBlocked` (exit `2`); daemon `permission_prompt_blocked` | Claude Code fired `PermissionRequest`: a tool needs approval and nobody can answer the prompt. The stderr line names the tool. | Grant the tool with `--allowedTools`, pick a `--permission-mode`, or pass `--dangerously-skip-permissions`. |
+| `SessionStartTimeout` | Ink hung before `SessionStart` fired (unhandled modal, new terminal probe, or `claude` auth prompt). Exits `124` in both modes; the daemon first writes a `session_start_timeout` error frame. | Re-run with `--debug`; verify `claude` works interactively in `--cwd`; raise `--timeout`. |
 | `PromptNotAccepted` | Four prompt injections went unacknowledged by `UserPromptSubmit` or transcript growth. | Check `--debug` for a lingering modal or non-responsive TUI; ensure `--setting-sources` didn't block inline hooks. |
 | `PromptTruncated` | `UserPromptSubmit` reported fewer non-whitespace bytes than sent (for prompts > 64 non-space bytes). | Inspect `--debug` byte counts; pass large prompts via `--input-file` or stdin. |
 | `TranscriptUnavailable` | `Stop` fired (or child exited) with neither a parseable assistant message nor `last_assistant_message`. | Check `claude` stderr/auth state; verify `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE` is not set to `0`. |
 | `idle_timeout` / `transcript_stalled` (daemon, exit `124`) | No PTY bytes for `--idle-timeout` or no transcript growth for `--transcript-idle-timeout` while `.busy`. | Inspect `[pty-trace]` (spinner ticking with flat `transcript_pos` means wedged turn) or raise/disable with `0`. |
-| Missing binary (`ENOENT` from `bin/claude-p.js`) | Postinstall download failed or `CLAUDE_P_SKIP_DOWNLOAD=1` was set. | Re-run `npm install claude-p` or build from source with Zig 0.15.2. |
+| `TranscriptStalled` (one-shot, exit `124`) | Neither the transcript nor the PTY grew for `--transcript-idle-timeout` (default `600 s`) while awaiting `Stop`. | Re-run with `--debug`; raise or disable with `--transcript-idle-timeout 0`. |
+| `Interrupted` | A signal arrived (CLI exits `128 + sig`; a duplicate signal within 2 s is ignored so cleanup finishes), or a library caller invoked `requestInterrupt` (CLI-equivalent exit `2`). | Call `driver.clearInterrupt()` before the next library `run`. |
+| `UnexpectedStartupDialog` (exit `2`) | `claude` showed a bypass-permissions or development-channels dialog this invocation did not ask for (for example, enabled by a settings file). | Pass `--dangerously-skip-permissions` or `--dangerously-load-development-channels` if you intend it; otherwise fix the settings. |
+| `InvalidCwd` (exit `2`) | `--cwd` is not an accessible directory. | Fix the path. |
+| `is_error: true` with a `StopFailure` message (exit `1`) | The turn ended in an API error and Claude Code fired `StopFailure`. | Read `result` for the error text; retry or check auth and quota. |
+| Missing binary (`ENOENT` from `bin/claude-p.js`) | Postinstall download failed (network failures warn and exit `0` unless `CLAUDE_P_STRICT_INSTALL=1`) or `CLAUDE_P_SKIP_DOWNLOAD=1` was set. | Re-run `npm install claude-p` or build from source with Zig 0.15.2. |

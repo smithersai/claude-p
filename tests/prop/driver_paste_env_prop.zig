@@ -379,14 +379,93 @@ fn modelNonSpace(s: []const u8) usize {
 }
 
 fn hasPlaceholder(s: []const u8) bool {
-    return std.mem.indexOf(u8, s, "[Pasted text #") != null or
-        std.mem.indexOf(u8, s, "<pasted_content") != null;
+    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    var parts = std.mem.tokenizeAny(u8, trimmed, " ");
+    if (std.mem.startsWith(u8, trimmed, "<pasted_content ") and std.mem.endsWith(u8, trimmed, "</pasted_content>")) return true;
+    const first = parts.next() orelse return false;
+    const image = std.mem.eql(u8, first, "[Image");
+    if (!image and (!std.mem.eql(u8, first, "[Pasted") or !std.mem.eql(u8, parts.next() orelse return false, "text"))) return false;
+    const numbered = parts.next() orelse return false;
+    if (numbered.len < 2 or numbered[0] != '#') return false;
+    if (image and numbered[numbered.len - 1] != ']') return false;
+    const number = numbered[1 .. numbered.len - @intFromBool(image)];
+    if (number.len == 0 or std.mem.indexOfNone(u8, number, "0123456789") != null) return false;
+    if (image) return parts.next() == null;
+    const lines = parts.next() orelse return false;
+    return lines.len > 1 and lines[0] == '+' and std.mem.indexOfNone(u8, lines[1..], "0123456789") == null and
+        std.mem.eql(u8, parts.next() orelse return false, "lines]") and parts.next() == null;
 }
 
-fn modelTruncated(expected: []const u8, received: []const u8) bool {
-    if (modelNonSpace(expected) <= 64) return false;
+/// Index one past the escape sequence that starts at `s[i]` (`s[i] == ESC`):
+/// CSI (`ESC [` params, intermediates, one final byte), OSC (`ESC ]` to BEL or
+/// `ESC \`), DCS/SOS/PM/APC (`ESC P|X|^|_` to `ESC \`), or any two-byte escape.
+fn modelEscapeEnd(s: []const u8, i: usize) usize {
+    if (i + 1 >= s.len) return s.len;
+    const kind = s[i + 1];
+    var j = i + 2;
+    switch (kind) {
+        '[' => {
+            while (j < s.len and s[j] >= 0x30 and s[j] <= 0x3f) j += 1;
+            while (j < s.len and s[j] >= 0x20 and s[j] <= 0x2f) j += 1;
+            return @min(j + 1, s.len);
+        },
+        ']', 'P', 'X', '^', '_' => {
+            while (j < s.len) : (j += 1) {
+                if (kind == ']' and s[j] == 0x07) return j + 1;
+                if (s[j] == 0x1b and j + 1 < s.len and s[j + 1] == '\\') return j + 2;
+            }
+            return s.len;
+        },
+        else => return j,
+    }
+}
+
+/// Bytes a terminal input parser delivers as text: no escape sequences, no
+/// control bytes, no spaces.
+fn modelPayload(s: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 0x1b) {
+            i = modelEscapeEnd(s, i);
+            continue;
+        }
+        n += @intFromBool(s[i] > 0x20 and s[i] != 0x7f);
+        i += 1;
+    }
+    return n;
+}
+
+/// What a terminal input parser keeps of `s`: the same bytes `modelPayload`
+/// counts, plus whitespace.
+fn modelDelivered(a: std.mem.Allocator, out: *Bytes, s: []const u8) !void {
+    out.clearRetainingCapacity();
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 0x1b) {
+            i = modelEscapeEnd(s, i);
+            continue;
+        }
+        if ((s[i] > 0x20 and s[i] != 0x7f) or modelIsSpace(s[i])) try out.append(a, s[i]);
+        i += 1;
+    }
+}
+
+/// The smallest payload an intact delivery of `expected` can have: as
+/// written, or as the chunker sends it with `ESC[201~` cut to `ESC[201`.
+fn modelFloor(expected: []const u8) !usize {
+    var sent: Bytes = .empty;
+    defer sent.deinit(testing.allocator);
+    try modelNeutralize(testing.allocator, expected, &sent);
+    return @min(modelPayload(expected), modelPayload(sent.items));
+}
+
+fn modelTruncated(expected: []const u8, received: []const u8) !bool {
+    if (expected.len <= 64) return false;
+    const floor = try modelFloor(expected);
+    if (floor <= 64) return false;
     if (hasPlaceholder(received)) return false;
-    return modelNonSpace(received) < modelNonSpace(expected);
+    return modelPayload(received) < floor;
 }
 
 /// Copy `s` with every `\n` turned into `\r\n` and random outer whitespace.
@@ -403,10 +482,11 @@ fn crlfPadded(a: std.mem.Allocator, out: *Bytes, r: Random, s: []const u8) !void
     while (i > 0) : (i -= 1) try out.append(a, ws[r.uintLessThan(usize, ws.len)]);
 }
 
-/// Prompt text with exactly `non_ws` significant bytes and no placeholder
-/// openers (`[`, `<`), so truncation is decided by content alone.
+/// Prompt text with exactly `non_ws` significant bytes, no escape or control
+/// bytes, and no placeholder openers (`[`, `<`), so truncation is decided by
+/// content alone.
 fn genPrompt(a: std.mem.Allocator, out: *Bytes, r: Random, non_ws: usize) !void {
-    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,;:!?#$%^&*()-_=+]>{}|/\\'\"`~\x1b\x00\x7f\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80\xff";
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,;:!?#$%^&*()-_=+]>{}|/\\'\"`~\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80\xff";
     const ws = " \n\t\r";
     out.clearRetainingCapacity();
     var n: usize = 0;
@@ -457,7 +537,8 @@ test "prop: isPromptTruncated is reflexive and whitespace/CRLF invariant" {
             driver.isPromptTruncated(other.items, x.items),
             driver.isPromptTruncated(other.items, y.items),
         );
-        try testing.expectEqual(modelTruncated(x.items, other.items), driver.isPromptTruncated(x.items, other.items));
+        try testing.expectEqual(try modelTruncated(x.items, other.items), driver.isPromptTruncated(x.items, other.items));
+        try testing.expectEqual(try modelTruncated(other.items, x.items), driver.isPromptTruncated(other.items, x.items));
         // Longer never counts as truncated.
         try y.appendSlice(a, other.items);
         try testing.expect(!driver.isPromptTruncated(x.items, y.items));
@@ -475,6 +556,7 @@ test "prop: isPromptTruncated ignores short prompts and paste placeholders" {
 
     const placeholders = [_][]const u8{
         "[Pasted text #1 +42 lines]",
+        "[Image #2]",
         "[Pasted text #1]",
         "[Pasted text #",
         "[Pasted text #999 +1 lines][Pasted text #2 +3 lines]",
@@ -491,12 +573,11 @@ test "prop: isPromptTruncated ignores short prompts and paste placeholders" {
         try testing.expect(!driver.isPromptTruncated(expected.items, received.items));
         try testing.expect(!driver.isPromptTruncated(expected.items, ""));
 
-        // Placeholder anywhere in the received text disarms the check.
-        try genPrompt(a, &expected, r, 65 + r.uintLessThan(usize, 600));
-        try genPrompt(a, &received, r, r.uintLessThan(usize, 40));
-        const at = r.uintAtMost(usize, received.items.len);
-        try received.insertSlice(a, at, placeholders[trial % placeholders.len]);
-        try testing.expect(!driver.isPromptTruncated(expected.items, received.items));
+        const sample = placeholders[trial % placeholders.len];
+        try testing.expectEqual(!hasPlaceholder(sample), driver.isPromptTruncated("x" ** 200, sample));
+        try received.insertSlice(a, 0, "prefix");
+        try received.appendSlice(a, sample);
+        try testing.expect(driver.isPromptTruncated("x" ** 300, received.items));
     }
 }
 
@@ -555,9 +636,12 @@ fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
     const received = input[split..];
 
     const got = driver.isPromptTruncated(expected, received);
-    try testing.expectEqual(modelTruncated(expected, received), got);
+    try testing.expectEqual(try modelTruncated(expected, received), got);
+    try testing.expectEqual(modelPayload(expected), driver.promptPayloadLen(expected, false));
+    try testing.expectEqual(modelPayload(received), driver.promptPayloadLen(received, false));
     if (got) {
         try testing.expect(expected.len > 64);
+        try testing.expect(modelPayload(expected) > 64);
         try testing.expect(!hasPlaceholder(received));
     }
     try testing.expect(!driver.isPromptTruncated(expected, expected));
@@ -566,6 +650,20 @@ fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
     _ = driver.isPromptTruncated(received, expected);
     // A prefix can only be flagged when the full text is long enough.
     if (driver.isPromptTruncated(input, expected)) try testing.expect(modelNonSpace(input) > 64);
+
+    // What the input parser keeps of the stream the chunker sends is never a
+    // truncation, however the prompt mixes escapes, controls and ESC[201~.
+    var sent: Bytes = .empty;
+    defer sent.deinit(testing.allocator);
+    var kept: Bytes = .empty;
+    defer kept.deinit(testing.allocator);
+    try modelNeutralize(testing.allocator, input, &sent);
+    try testing.expectEqual(modelPayload(sent.items), driver.promptPayloadLen(input, true));
+    try modelDelivered(testing.allocator, &kept, sent.items);
+    try testing.expect(!driver.isPromptTruncated(input, kept.items));
+    try modelDelivered(testing.allocator, &kept, input);
+    try testing.expect(!driver.isPromptTruncated(input, kept.items));
+    try testing.expect(!driver.isPromptTruncated(input, sent.items));
 }
 
 test "fuzz: isPromptTruncated(expected, received)" {
@@ -585,7 +683,105 @@ test "fuzz: isPromptTruncated(expected, received)" {
         "\x90" ++ "a" ** 65 ++ "a" ** 64,
         "\x90" ++ "a \n" ** 65 ++ "a\r\n" ** 64,
         "\x80" ++ " \t\r\n" ** 80,
+        "\xff" ++ "\x1b[1;31m" ++ long ++ "\x1b[0m" ++ long,
+        "\xff" ++ long[0..70] ++ paste_end ++ "12 hello" ++ long,
+        "\xff" ++ long ++ "\x1b]0;title\x07" ++ long ++ "\x1bPq\x1b\\" ++ "\x00\x7f\x1b",
+        "\x80" ++ long ++ paste_end ++ "~~" ++ long ++ "\x1b[201" ++ long,
     } });
+}
+
+/// Insert `count` decorations a terminal never delivers as text: SGR / cursor
+/// CSI sequences, OSC titles, and bare control bytes.
+fn decorate(a: std.mem.Allocator, out: *Bytes, r: Random, plain: []const u8, count: usize) !void {
+    const decorations = [_][]const u8{
+        "\x1b[0m",                 "\x1b[1;31m",             "\x1b[38;5;153m", "\x1b[2K", "\x1b[?25l", "\x1b[10;20H",
+        "\x1b]0;window title\x07", "\x1b]8;;http://x\x1b\\", "\x1bPq#0\x1b\\", "\x1b7",   "\x00",      "\x07",
+        "\x08",                    "\x7f",                   "\x0b",           "\x1f",
+    };
+    out.clearRetainingCapacity();
+    try out.appendSlice(a, plain);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        // Insert only at whole-codepoint, non-decoration positions of the
+        // original text by rebuilding from the front each time.
+        var at = r.uintAtMost(usize, out.items.len);
+        while (at > 0 and at < out.items.len and
+            (inDecoration(out.items, at) or (out.items[at] & 0xC0) == 0x80)) at -= 1;
+        try out.insertSlice(a, at, decorations[r.uintLessThan(usize, decorations.len)]);
+    }
+}
+
+/// True when `at` falls strictly inside an escape sequence of `s`.
+fn inDecoration(s: []const u8, at: usize) bool {
+    var i: usize = 0;
+    while (i < s.len and i < at) {
+        if (s[i] == 0x1b) {
+            const end = modelEscapeEnd(s, i);
+            if (at < end) return true;
+            i = end;
+        } else i += 1;
+    }
+    return false;
+}
+
+test "prop: ANSI codes, control bytes and ESC[201~ in a prompt never false-positive PromptTruncated" {
+    const a = testing.allocator;
+    var prng = Random.DefaultPrng.init(0x7c_0004);
+    const r = prng.random();
+    var plain: Bytes = .empty;
+    defer plain.deinit(a);
+    var typed: Bytes = .empty;
+    defer typed.deinit(a);
+    var sent: Bytes = .empty;
+    defer sent.deinit(a);
+    var kept: Bytes = .empty;
+    defer kept.deinit(a);
+
+    var flagged: usize = 0;
+    var trial: usize = 0;
+    while (trial < 3000) : (trial += 1) {
+        const non_ws = 65 + r.uintLessThan(usize, if (trial % 3 == 0) 8 else 1200);
+        try genPrompt(a, &plain, r, non_ws);
+        try decorate(a, &typed, r, plain.items, 1 + r.uintLessThan(usize, 12));
+
+        // Decorations add no payload: the typed prompt and the plain text agree.
+        try testing.expectEqual(non_ws, modelPayload(typed.items));
+        try testing.expectEqual(non_ws, driver.promptPayloadLen(typed.items, false));
+        // Claude reports the text with decorations stripped, kept, or half-kept.
+        try testing.expect(!driver.isPromptTruncated(typed.items, plain.items));
+        try testing.expect(!driver.isPromptTruncated(typed.items, typed.items));
+        try testing.expect(!driver.isPromptTruncated(plain.items, typed.items));
+        try modelDelivered(a, &kept, typed.items);
+        try testing.expect(!driver.isPromptTruncated(typed.items, kept.items));
+
+        // A genuine loss is still caught through the decorations.
+        const lost = 1 + r.uintLessThan(usize, plain.items.len);
+        const head = plain.items[0 .. plain.items.len - lost];
+        const dropped = non_ws - modelNonSpace(head);
+        try testing.expectEqual(dropped > 0, driver.isPromptTruncated(typed.items, head));
+        flagged += @intFromBool(dropped > 0);
+
+        // Embedded end-of-paste markers: the chunker cuts each to ESC[201 and
+        // the input parser swallows what follows as the rest of that CSI.
+        const markers = 1 + r.uintLessThan(usize, 4);
+        typed.clearRetainingCapacity();
+        try typed.appendSlice(a, plain.items);
+        var m: usize = 0;
+        while (m < markers) : (m += 1) {
+            var at = r.uintAtMost(usize, typed.items.len);
+            while (at > 0 and at < typed.items.len and (typed.items[at] & 0xC0) == 0x80) at -= 1;
+            try typed.insertSlice(a, at, paste_fragments[r.uintLessThan(usize, 7)]);
+        }
+        try modelNeutralize(a, typed.items, &sent);
+        try modelDelivered(a, &kept, sent.items);
+        try testing.expect(!driver.isPromptTruncated(typed.items, kept.items));
+        try testing.expect(!driver.isPromptTruncated(typed.items, sent.items));
+        try testing.expect(!driver.isPromptTruncated(typed.items, typed.items));
+        try modelDelivered(a, &kept, typed.items);
+        try testing.expect(!driver.isPromptTruncated(typed.items, kept.items));
+        try testing.expectEqual(try modelTruncated(typed.items, plain.items), driver.isPromptTruncated(typed.items, plain.items));
+    }
+    try testing.expect(flagged > 2500);
 }
 
 // ===========================================================================
@@ -746,7 +942,7 @@ fn checkChildEnv(scratch: std.mem.Allocator, map: *const std.process.EnvMap, fif
         try testing.expect(!modelStrip(name)); // no nesting marker leaks
     }
 
-    try testing.expectEqualStrings(fifo, seen.get("CLAUDE_P_FIFO").?);
+    try testing.expect(seen.get("CLAUDE_P_FIFO") == null);
     try testing.expectEqualStrings("xterm-256color", seen.get("TERM").?);
     try testing.expectEqualStrings(map.get(persistence_env) orelse "1", seen.get(persistence_env).?);
 
@@ -764,7 +960,7 @@ fn checkChildEnv(scratch: std.mem.Allocator, map: *const std.process.EnvMap, fif
         if (isAuthVar(name)) try testing.expectEqualStrings(e.value_ptr.*, seen.get(name).?);
     }
     const injected_persistence: usize = @intFromBool(map.get(persistence_env) == null);
-    try testing.expectEqual(kept + 2 + injected_persistence, list.items.len);
+    try testing.expectEqual(kept + 1 + injected_persistence, list.items.len);
 }
 
 fn childEnvAllocProbe(allocator: std.mem.Allocator, map: *const std.process.EnvMap, fifo: []const u8) !void {

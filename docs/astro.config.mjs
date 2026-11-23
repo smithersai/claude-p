@@ -9,7 +9,7 @@ export default defineConfig({
       title: 'claude-p',
       favicon: '/favicon.svg',
       description:
-        'A drop-in replacement for claude -p that drives the interactive claude UI inside an in-process zmux PTY session.',
+        'Emulates claude -p by driving the interactive claude UI inside an in-process zmux PTY session. text and json match claude -p; stream-json is filtered transcript JSONL plus a claude -p-shaped result.',
       social: [
         {
           icon: 'github',

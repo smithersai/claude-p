@@ -1,6 +1,6 @@
 ---
 title: Installation, Checksums, and Builds
-description: Supported platforms, SHA-256 release verification in scripts/install.js, Zig 0.15.2 source builds, and cross-compilation targets.
+description: Supported platforms, the checksums.json trust root in scripts/install.js, release publishing, Zig 0.15.2 source builds, and cross-compilation targets.
 sidebar:
   order: 4
 ---
@@ -18,15 +18,53 @@ Windows is not supported (no POSIX `forkpty`). `package.json` enforces `"os": ["
 
 ## npm shim and SHA-256 verification
 
-When you install via `npm` or `npx`:
+When you install via `npm` or `npx`, `scripts/install.js` (npm `postinstall`) downloads `claude-p-<platform>-<arch>.gz` from `https://github.com/smithersai/claude-p/releases/download/v<version>/` and verifies it before writing anything.
 
-1. `scripts/install.js` (npm `postinstall`) downloads `claude-p-<platform>-<arch>.gz` and `SHA256SUMS` from `https://github.com/smithersai/claude-p/releases/download/v<version>/`.
-2. **Checksum verification:**
-   - `SHA256SUMS` present and digest matches → gunzip to `prebuilt/<platform>-<arch>/claude-p` with mode `0755`.
-   - `SHA256SUMS` present and digest mismatches (or asset unlisted) → hard failure (`ChecksumError`), nothing written, exits `1`.
-   - `SHA256SUMS` returns HTTP 404 (pre-`v0.1.3` releases) → warns on stderr and installs unverified, **unless** `CLAUDE_P_REQUIRE_CHECKSUM=1`, which makes missing checksums a hard error.
-3. Network failure (non-checksum error) logs build-from-source instructions without failing `npm install`. Set `CLAUDE_P_SKIP_DOWNLOAD=1` to skip downloading entirely.
-4. At runtime, `bin/claude-p.js` spawns `prebuilt/<platform>-<arch>/claude-p` with `stdio: "inherit"` and forwards `SIGINT`, `SIGTERM`, and `SIGHUP`.
+### Trust root
+
+| Install source | Digest source | Outcome |
+| --- | --- | --- |
+| npm tarball | `checksums.json` bundled in the tarball by `scripts/publish.mjs` and covered by npm provenance. It is the only trust root; `SHA256SUMS` is not consulted. | Exact digest match installs. The manifest must record both `assets["claude-p-<platform>-<arch>.gz"]` and `binSha256["<platform>-<arch>"]`; a missing entry fails before any reuse check or download. A version mismatch or digest mismatch is also a `ChecksumError`. |
+| Source checkout (no `checksums.json`) | The release's `SHA256SUMS`. Required for `v0.1.3` and later; `CLAUDE_P_REQUIRE_CHECKSUM=1` requires it for older versions too. | Exact digest match installs. HTTP 404 for a required `SHA256SUMS`, a missing entry, or a mismatch is a `ChecksumError`. It never degrades to an unverified binary. |
+
+### Reusing an existing binary
+
+An existing `prebuilt/<platform>-<arch>/claude-p` is reused only when `checksums.json` records a `binSha256` digest for the platform and the file matches it exactly. The installer checks that the file is a regular, executable file within the 64 MiB cap before hashing it. On any mismatch it unlinks the rejected file before downloading, so a later offline exit `0` never leaves an unverified executable for `bin/claude-p.js` to run. It then downloads, verifies the compressed and decompressed digests, and atomically renames the new binary into place. A source checkout (no `checksums.json`) never reuses a binary and leaves an existing one in place until a verified download replaces it.
+
+### Download and staging hardening
+
+- `https` only, from `github.com` and `*.githubusercontent.com`, at most 5 redirects.
+- One overall 30 s deadline covers DNS, connect, every redirect, and the body, alongside the socket inactivity timeout.
+- Caps: 32 MiB compressed, 64 MiB decompressed.
+- The package root, `prebuilt/`, and `prebuilt/<platform>-<arch>/` must not be symlinks. The binary is written through an exclusively created, randomly named staging file with mode `0755`, then renamed into place. A symlink at the destination is refused.
+
+### Exit codes and environment
+
+| Condition | `npm install` result |
+| --- | --- |
+| Verified binary installed or reused | Exits `0`. |
+| `ChecksumError` (integrity failure) | Exits `1`. Always fatal. |
+| Unsafe install path, local filesystem error (`ENOSPC`, `EACCES`, `EPERM`, `EISDIR`, `EROFS`), or an oversize or off-host download | Exits `1`. Never softened. |
+| Connectivity failure (DNS, refused or reset connection, HTTP error, timeout, deadline) | Prints a warning naming `CLAUDE_P_SKIP_DOWNLOAD=1`, `CLAUDE_P_STRICT_INSTALL=1`, and `NODE_USE_ENV_PROXY=1`, then exits `0`. No binary is installed. |
+| Connectivity failure with `CLAUDE_P_STRICT_INSTALL=1` | Exits `1`. |
+| `CLAUDE_P_SKIP_DOWNLOAD=1` | Skips the download; exits `0`. |
+| Unsupported platform | Skips; exits `0`. |
+
+### Proxy-only networks
+
+The installer uses Node's built-in `https` module, which ignores `HTTPS_PROXY` by default. Behind a proxy, set `NODE_USE_ENV_PROXY=1` (Node `>= 22.21` or `>= 24`) alongside `HTTPS_PROXY` so Node routes the download through it:
+
+```bash
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://proxy.example:3128 npm install claude-p
+```
+
+On older Node, or when GitHub Releases is unreachable, set `CLAUDE_P_SKIP_DOWNLOAD=1` and place a binary you verified yourself at `prebuilt/<platform>-<arch>/claude-p`, or build from source.
+
+At runtime, `bin/claude-p.js` spawns `prebuilt/<platform>-<arch>/claude-p` with `stdio: "inherit"` and forwards `SIGINT`, `SIGTERM`, and `SIGHUP`.
+
+## Release publishing
+
+`scripts/publish.mjs` builds the four targets and writes `SHA256SUMS` and `checksums.json` into `release-assets/`. Before it creates or attaches anything to a tag, it checks that the local tag's peeled commit equals `HEAD`, and that the remote tag, if it exists, peels to the same commit. On reruns against an existing release it verifies every existing asset by digest against `SHA256SUMS` and `checksums.json` before reporting success, and uploads only missing assets. It stages the npm package in a private temporary directory with the generated `checksums.json`, checks that the packed tarball holds `checksums.json` with all four platforms at the `package.json` version, and runs `npm publish` from there. It never writes `checksums.json` into the repository root.
 
 ## Build from source (Zig 0.15.2)
 
@@ -42,16 +80,19 @@ zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -p out
 
 ## Running the test suites
 
+Test counts change with every release; print the current ones with `--summary all`.
+
 ```bash
-# 141 unit tests across src/*.zig (zero external dependencies)
-zig build test
+# Unit tests across src/*.zig (zero external dependencies)
+zig build test --summary all
 zig build test -Dtest-filter="daemon"
 
-# 8 end-to-end tests against the real `claude` binary on $PATH (no mocks)
-CLAUDE_P_E2E=1 zig build test-integration
+# End-to-end tests against the real `claude` binary on $PATH (no mocks)
+CLAUDE_P_E2E=1 zig build test-integration --summary all
 CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="resume"
 
 # CI hygiene checks (version lockstep across package.json, build.zig.zon, src/root.zig)
 node scripts/publish.mjs --check-versions
 node --check scripts/install.js && node --check scripts/publish.mjs
+node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
 ```

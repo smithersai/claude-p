@@ -27,6 +27,7 @@ In Claude Code 2.1, the workspace-trust modal **lists and preselects `"No, exit"
    - Sends `\r` **only** when `❯` is verified on an affirmative option (`Yes,Itrust`, `Yes,proceed`, `Yes,Iaccept`, `Iamusing`).
    - When `❯` is on a negative option (`No,exit`, `Exit`): sends the option digit on numbered menus (e.g. `'2'` for `2. Yes, I accept`), or falls back to Down (`\x1b[B`) / Up (`\x1b[A`) depending on whether the affirmative text appears below the cursor.
    - Waits for fresh repaint bytes before acting again. If zero fresh bytes arrive within `1500 ms` (`dialog_retry_ms`), retries the dropped key. Hard cap: `16` keys (`max_dialog_keys`).
+5. **Intent gate (`dialogConfirmAllowed`):** The workspace-trust dialog is always answered. The bypass-permissions dialog is answered only when this invocation passed `--dangerously-skip-permissions` or `--permission-mode bypassPermissions` (as a wrapper flag or in the forwarded arguments). The development-channels dialog is answered only when the forwarded arguments include `--dangerously-load-development-channels`. Any other dialog is never answered: no key is sent, and the run fails with `RunError.UnexpectedStartupDialog` (exit `2`; the daemon emits an `unexpected_startup_dialog` error frame and exits `2`). A dialog raised by settings files alone is not consent.
 
 ## 2. Paced bracketed paste and macOS `TTYHOG`
 

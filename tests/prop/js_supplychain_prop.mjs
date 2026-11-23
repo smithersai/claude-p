@@ -1,5 +1,7 @@
 // Property and fuzz tests for the npm supply-chain surface:
-//   scripts/install.js  (parseSha256Sums, verifyChecksum)
+//   scripts/install.js  (parseSha256Sums, verifyChecksum, checksums.json,
+//                        SHA256SUMS 404 policy, URL allowlist, redirects,
+//                        size caps, atomic install)
 //   bin/claude-p.js     (launcher: exit codes, argv, signals)
 //
 // Run:  node --test tests/prop/js_supplychain_prop.mjs
@@ -500,6 +502,20 @@ function withCapturedStderr(fn) {
   }
 }
 
+async function withCapturedStderrAsync(fn) {
+  const original = process.stderr.write;
+  process.stderr.write = () => true;
+  try {
+    return await fn();
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+function zlibGzip(buf) {
+  return require("node:zlib").gzipSync(buf);
+}
+
 function refSha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
@@ -749,14 +765,16 @@ test("verifyChecksum: error messages and the no-SHA256SUMS policy", () => {
   const name = "claude-p-darwin-arm64.gz";
   const digest = refSha256(payload);
   withCapturedStderr((logs) => {
-    // SHA256SUMS absent: warn and allow, unless checksums are required.
+    // SHA256SUMS absent: only an explicit `false` (pre-0.1.3 releases) warns
+    // and allows. `undefined` follows the version policy, which requires
+    // SHA256SUMS for this package (>= 0.1.3).
     for (const absent of [null, undefined]) {
       logs.length = 0;
       assert.doesNotThrow(() => verifyChecksum(payload, name, absent, false));
-      assert.doesNotThrow(() => verifyChecksum(payload, name, absent, undefined));
-      assert.equal(logs.length, 2);
+      assert.equal(logs.length, 1);
       assert.match(logs[0], /warning: SHA256SUMS not found/);
       assert.match(logs[0], /unverified/);
+      assertChecksumError(() => verifyChecksum(payload, name, absent, undefined), "default policy with no SHA256SUMS");
       assertChecksumError(() => verifyChecksum(payload, name, absent, true), "required checksum with no SHA256SUMS");
     }
     // An empty SHA256SUMS is present-but-empty: refused even when not required.
@@ -777,6 +795,700 @@ test("verifyChecksum: error messages and the no-SHA256SUMS policy", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// 2b. install(): bundled checksums.json, strict SHA256SUMS, download hardening
+// ---------------------------------------------------------------------------
+
+const PLAT = `${process.platform}-${process.arch}`;
+const ASSET = `claude-p-${PLAT}.gz`;
+const pkgVersion = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version;
+
+function withTempRoot(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-install-"));
+  return Promise.resolve()
+    .then(() => fn(dir))
+    .finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+}
+
+function writeManifest(dir, manifest) {
+  fs.writeFileSync(path.join(dir, "checksums.json"), JSON.stringify(manifest));
+}
+
+// A fake fetch that serves `files` by trailing path segment, else HTTP 404.
+function fakeFetch(files, calls = []) {
+  return async (url) => {
+    calls.push(String(url));
+    const name = String(url).split("/").pop();
+    if (Object.prototype.hasOwnProperty.call(files, name)) return files[name];
+    const err = new Error(`HTTP 404 for ${url}`);
+    err.statusCode = 404;
+    throw err;
+  };
+}
+
+async function rejectsChecksum(p, message) {
+  await assert.rejects(p, (err) => {
+    assert.ok(err instanceof ChecksumError, `${message}: expected ChecksumError, got ${err && err.message}`);
+    return true;
+  }, message);
+}
+
+test("checksumRequiredFor: SHA256SUMS is mandatory from 0.1.3 on", () => {
+  for (const v of ["0.1.3", "0.1.4", "0.1.10", "0.2.0", "1.0.0", "0.1.3-rc.1", pkgVersion, "garbage"]) {
+    assert.equal(inst.checksumRequiredFor(v), true, v);
+  }
+  for (const v of ["0.0.9", "0.1.0", "0.1.2"]) assert.equal(inst.checksumRequiredFor(v), false, v);
+});
+
+test("fetchSha256Sums: HTTP 404 is a ChecksumError for >= 0.1.3, never a silent downgrade", async () => {
+  const fetch = fakeFetch({});
+  await rejectsChecksum(inst.fetchSha256Sums({ version: "0.1.3", fetch }), "0.1.3 404");
+  await rejectsChecksum(inst.fetchSha256Sums({ version: "1.2.0", fetch }), "1.2.0 404");
+  assert.equal(await inst.fetchSha256Sums({ version: "0.1.2", required: false, fetch }), null);
+  await rejectsChecksum(inst.fetchSha256Sums({ version: "0.1.2", required: true, fetch }), "required 0.1.2 404");
+  const other = async () => {
+    const e = new Error("HTTP 500");
+    e.statusCode = 500;
+    throw e;
+  };
+  await assert.rejects(inst.fetchSha256Sums({ version: "0.1.3", fetch: other }), /HTTP 500/);
+});
+
+test("install: without checksums.json a 404 SHA256SUMS installs nothing", async () => {
+  await withTempRoot(async (dir) => {
+    const gz = zlibGzip(Buffer.from("#!/bin/sh\necho hi\n"));
+    await withCapturedStderrAsync(() =>
+      rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }), env: {} }), "404 SHA256SUMS"),
+    );
+    assert.equal(fs.existsSync(path.join(dir, "prebuilt", PLAT, "claude-p")), false);
+  });
+});
+
+test("install: without checksums.json a matching SHA256SUMS installs atomically with mode 0755", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho hi\n");
+    const gz = zlibGzip(bin);
+    const sums = Buffer.from(`${refSha256(gz)}  ${ASSET}\n`);
+    const dest = await withCapturedStderrAsync(() =>
+      inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz, SHA256SUMS: sums }), env: {} }),
+    );
+    assert.ok(fs.readFileSync(dest).equals(bin));
+    assert.equal(fs.statSync(dest).mode & 0o777, 0o755);
+    assert.deepEqual(fs.readdirSync(path.dirname(dest)), ["claude-p"], "no temp file left behind");
+  });
+});
+
+test("install: bundled checksums.json is the only trust root (200 randomized trials)", async () => {
+  const rng = new Rng("bundled");
+  for (let trial = 0; trial < 200; trial++) {
+    const ctx = rng.ctx(trial);
+    await withTempRoot(async (dir) => {
+      const bin = rng.bytes(rng.int(1, 4096));
+      const gz = zlibGzip(bin);
+      const good = refSha256(gz);
+      const calls = [];
+      // A SHA256SUMS that would accept a forged asset must never be consulted.
+      const forged = zlibGzip(Buffer.from("forged"));
+      const files = { [ASSET]: gz, SHA256SUMS: Buffer.from(`${refSha256(forged)}  ${ASSET}\n`) };
+      const mode = rng.int(0, 3);
+      if (mode === 0) {
+        writeManifest(dir, { version: pkgVersion, assets: { [ASSET]: good }, binSha256: { [PLAT]: refSha256(bin) } });
+        const dest = await withCapturedStderrAsync(() => inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch(files, calls) }));
+        assert.ok(fs.readFileSync(dest).equals(bin), `${ctx} installed bytes`);
+        assert.ok(!calls.some((u) => u.endsWith("/SHA256SUMS")), `${ctx} SHA256SUMS not fetched`);
+      } else if (mode === 1) {
+        writeManifest(dir, { version: pkgVersion, assets: { [ASSET]: good }, binSha256: { [PLAT]: refSha256(bin) } });
+        files[ASSET] = forged;
+        await withCapturedStderrAsync(() => rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch(files, calls) }), `${ctx} forged asset`));
+      } else if (mode === 2) {
+        writeManifest(dir, { version: pkgVersion, assets: { "claude-p-other-os.gz": good } });
+        await withCapturedStderrAsync(() => rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch(files, calls) }), `${ctx} missing entry`));
+      } else {
+        writeManifest(dir, { version: "0.0.1", assets: { [ASSET]: good } });
+        await withCapturedStderrAsync(() => rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch(files, calls) }), `${ctx} version skew`));
+      }
+      if (mode !== 0) {
+        assert.equal(fs.existsSync(path.join(dir, "prebuilt", PLAT, "claude-p")), false, `${ctx} nothing written`);
+      }
+    });
+  }
+});
+
+test("install: reuse only a verified regular file; never a symlink or a partial file", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho real\n");
+    const gz = zlibGzip(bin);
+    writeManifest(dir, { version: pkgVersion, assets: { [ASSET]: refSha256(gz) }, binSha256: { [PLAT]: refSha256(bin) } });
+    const dest = path.join(dir, "prebuilt", PLAT, "claude-p");
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+
+    // Truncated leftover: replaced by a verified download.
+    fs.writeFileSync(dest, bin.subarray(0, 5), { mode: 0o755 });
+    const calls = [];
+    await withCapturedStderrAsync(() => inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }, calls) }));
+    assert.ok(fs.readFileSync(dest).equals(bin));
+    assert.equal(calls.length, 1);
+
+    // Verified file: reused without a download.
+    calls.length = 0;
+    await withCapturedStderrAsync(() => inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }, calls) }));
+    assert.equal(calls.length, 0);
+
+    // Symlink destination: refused, target untouched.
+    const victim = path.join(dir, "victim");
+    fs.writeFileSync(victim, "keep");
+    fs.rmSync(dest);
+    fs.symlinkSync(victim, dest);
+    assert.equal(inst.existingInstallOk(dest, null), false);
+    await withCapturedStderrAsync(() =>
+      assert.rejects(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }) }), /not a regular file/),
+    );
+    assert.equal(fs.readFileSync(victim, "utf8"), "keep");
+  });
+});
+
+test("writeAtomic: a failed rename leaves no temp file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-atomic-"));
+  try {
+    const dest = path.join(dir, "claude-p");
+    fs.mkdirSync(path.join(dest, "child"), { recursive: true }); // a non-empty directory at dest
+    assert.throws(() => inst.writeAtomic(dest, Buffer.from("x")), /not a regular file/);
+    assert.deepEqual(fs.readdirSync(dir), ["claude-p"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("assertAllowedUrl: https to github.com and *.githubusercontent.com only", () => {
+  for (const ok of [
+    "https://github.com/smithersai/claude-p/releases/download/v0.1.3/x.gz",
+    "https://objects.githubusercontent.com/a/b",
+    "https://release-assets.githubusercontent.com/a",
+  ]) {
+    assert.doesNotThrow(() => inst.assertAllowedUrl(ok), ok);
+  }
+  for (const bad of [
+    "http://github.com/x",
+    "https://github.com.evil.example/x",
+    "https://evilgithubusercontent.com/x",
+    "https://githubusercontent.com.evil.example/x",
+    "file:///etc/passwd",
+    "https://example.com/x",
+  ]) {
+    assert.throws(() => inst.assertAllowedUrl(bad), /refusing/, bad);
+  }
+});
+
+// A fake `https.get` that replays scripted responses keyed by URL.
+function fakeRequest(routes, seen = []) {
+  const { EventEmitter } = require("node:events");
+  const { PassThrough } = require("node:stream");
+  return (url, _opts, cb) => {
+    const req = new EventEmitter();
+    req.destroy = (err) => err && req.emit("error", err);
+    seen.push(url.href);
+    const route = routes(url);
+    setImmediate(() => {
+      const res = new PassThrough();
+      res.statusCode = route.status;
+      res.headers = route.headers || {};
+      cb(res);
+      res.end(route.body || Buffer.alloc(0));
+    });
+    return req;
+  };
+}
+
+test("get: redirects resolve relative Locations, stop at 5, and never leave the allowlist", async () => {
+  const seen = [];
+  const relative = fakeRequest((u) =>
+    u.pathname === "/start"
+      ? { status: 302, headers: { location: "/final" } }
+      : { status: 200, body: Buffer.from("ok") },
+    seen,
+  );
+  assert.equal((await inst.get("https://github.com/start", { request: relative })).toString(), "ok");
+  assert.deepEqual(seen, ["https://github.com/start", "https://github.com/final"]);
+
+  let hops = 0;
+  const loop = fakeRequest(() => ({ status: 302, headers: { location: `/hop${++hops}` } }));
+  await assert.rejects(inst.get("https://github.com/hop0", { request: loop }), /too many redirects/);
+  assert.equal(hops, inst.MAX_REDIRECTS + 1);
+
+  const offsite = fakeRequest(() => ({ status: 302, headers: { location: "https://evil.example/x" } }));
+  await assert.rejects(inst.get("https://github.com/a", { request: offsite }), /refusing download host/);
+  const downgrade = fakeRequest(() => ({ status: 302, headers: { location: "http://github.com/x" } }));
+  await assert.rejects(inst.get("https://github.com/a", { request: downgrade }), /non-https/);
+});
+
+test("get: bodies over maxBytes are refused, by Content-Length or by streaming", async () => {
+  const declared = fakeRequest(() => ({ status: 200, headers: { "content-length": "999" }, body: Buffer.alloc(10) }));
+  await assert.rejects(inst.get("https://github.com/x", { request: declared, maxBytes: 100 }), /over the 100-byte limit/);
+  const streamed = fakeRequest(() => ({ status: 200, body: Buffer.alloc(101) }));
+  await assert.rejects(inst.get("https://github.com/x", { request: streamed, maxBytes: 100 }), /exceeded the 100-byte limit/);
+  const notFound = fakeRequest(() => ({ status: 404 }));
+  await assert.rejects(inst.get("https://github.com/x", { request: notFound }), (e) => e.statusCode === 404);
+});
+
+test("install: a gzip bomb over the 64 MiB binary cap is refused", async () => {
+  await withTempRoot(async (dir) => {
+    const gz = zlibGzip(Buffer.alloc(inst.MAX_BINARY_BYTES + 1));
+    writeManifest(dir, { version: pkgVersion, assets: { [ASSET]: refSha256(gz) } });
+    await withCapturedStderrAsync(() =>
+      rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }) }), "gzip bomb"),
+    );
+    assert.equal(fs.existsSync(path.join(dir, "prebuilt", PLAT, "claude-p")), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2c. install(): reuse, symlink-safe staging, deadline, staging cleanup, exit codes
+// ---------------------------------------------------------------------------
+
+const { UnsafePathError } = inst;
+
+function captureStderrLines() {
+  const original = process.stderr.write;
+  const lines = [];
+  process.stderr.write = (chunk) => {
+    lines.push(String(chunk));
+    return true;
+  };
+  return { lines, restore: () => (process.stderr.write = original) };
+}
+
+function fullManifest(gz, bin) {
+  return { version: pkgVersion, assets: { [ASSET]: refSha256(gz) }, binSha256: { [PLAT]: refSha256(bin) } };
+}
+
+test("H14 reuse: no checksums.json means no reuse, even for a valid executable", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho real\n");
+    const gz = zlibGzip(bin);
+    const dest = path.join(dir, "prebuilt", PLAT, "claude-p");
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.from("#!/bin/sh\necho stale\n"), { mode: 0o755 });
+    assert.equal(inst.existingInstallOk(dest, null), false);
+    const calls = [];
+    const sums = Buffer.from(`${refSha256(gz)}  ${ASSET}\n`);
+    await withCapturedStderrAsync(() =>
+      inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz, SHA256SUMS: sums }, calls), env: {} }),
+    );
+    assert.ok(fs.readFileSync(dest).equals(bin), "stale binary replaced");
+    assert.ok(calls.some((u) => u.endsWith(`/${ASSET}`)), "asset fetched");
+  });
+});
+
+test("H14 reuse: a manifest without binSha256 for this platform reuses nothing and refuses to install", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho real\n");
+    const gz = zlibGzip(bin);
+    const dest = path.join(dir, "prebuilt", PLAT, "claude-p");
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, bin, { mode: 0o755 });
+    for (const binSha256 of [undefined, {}, { "other-os": refSha256(bin) }, { [PLAT]: "nothex" }]) {
+      const manifest = { version: pkgVersion, assets: { [ASSET]: refSha256(gz) } };
+      if (binSha256) manifest.binSha256 = binSha256;
+      assert.equal(inst.existingInstallOk(dest, manifest), false, JSON.stringify(binSha256));
+      writeManifest(dir, manifest);
+      const calls = [];
+      await withCapturedStderrAsync(() =>
+        rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }, calls) }), "no binSha256"),
+      );
+      assert.equal(calls.length, 0, "incomplete manifest fails before any download");
+      assert.ok(fs.readFileSync(dest).equals(bin), "nothing is touched before the manifest is validated");
+    }
+  });
+});
+
+test("H14 reuse: only an exact-digest, executable, size-capped regular file is reused (100 trials)", async () => {
+  const rng = new Rng("reuse");
+  for (let trial = 0; trial < 100; trial++) {
+    const ctx = rng.ctx(trial);
+    await withTempRoot(async (dir) => {
+      const bin = rng.bytes(rng.int(1, 2048));
+      const gz = zlibGzip(bin);
+      writeManifest(dir, fullManifest(gz, bin));
+      const dest = path.join(dir, "prebuilt", PLAT, "claude-p");
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const mode = rng.int(0, 3);
+      let reuse = false;
+      if (mode === 0) {
+        fs.writeFileSync(dest, bin, { mode: 0o755 });
+        reuse = true;
+      } else if (mode === 1) {
+        const flipped = Buffer.from(bin);
+        flipped[rng.int(0, flipped.length - 1)] ^= 1 << rng.int(0, 7);
+        fs.writeFileSync(dest, flipped, { mode: 0o755 });
+      } else if (mode === 2) {
+        fs.writeFileSync(dest, bin, { mode: 0o644 }); // right digest, not executable
+        fs.chmodSync(dest, 0o644);
+      } else {
+        fs.writeFileSync(dest, Buffer.concat([bin, Buffer.from([0])]), { mode: 0o755 });
+      }
+      const calls = [];
+      await withCapturedStderrAsync(() => inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }, calls) }));
+      assert.equal(calls.length, reuse ? 0 : 1, `${ctx} mode ${mode} download count`);
+      assert.ok(fs.readFileSync(dest).equals(bin), `${ctx} final bytes`);
+      assert.equal(fs.statSync(dest).mode & 0o777, 0o755, `${ctx} final mode`);
+    });
+  }
+});
+
+test("H14 reuse: a file over the 64 MiB cap is rejected by size before hashing", async () => {
+  await withTempRoot(async (dir) => {
+    const dest = path.join(dir, "big");
+    const fd = fs.openSync(dest, "w", 0o755);
+    fs.ftruncateSync(fd, inst.MAX_BINARY_BYTES + 1); // sparse: no 64 MiB write
+    fs.closeSync(fd);
+    fs.chmodSync(dest, 0o755);
+    const manifest = { version: pkgVersion, assets: {}, binSha256: { [PLAT]: "0".repeat(64) } };
+    const t0 = Date.now();
+    assert.equal(inst.existingInstallOk(dest, manifest), false);
+    assert.ok(Date.now() - t0 < 1000, "size check short-circuits hashing");
+  });
+});
+
+test("H14 install: the decompressed binary must match binSha256 even when the gzip digest matches", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho real\n");
+    const gz = zlibGzip(bin);
+    writeManifest(dir, { version: pkgVersion, assets: { [ASSET]: refSha256(gz) }, binSha256: { [PLAT]: "a".repeat(64) } });
+    await withCapturedStderrAsync(() =>
+      rejectsChecksum(inst.install({ root: dir, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }) }), "binSha256 mismatch"),
+    );
+    assert.equal(fs.existsSync(path.join(dir, "prebuilt", PLAT, "claude-p")), false);
+  });
+});
+
+test("M23 staging: a symlinked root, prebuilt/, or prebuilt/<plat> is refused and its target untouched", async () => {
+  for (const where of ["root", "prebuilt", "plat"]) {
+    await withTempRoot(async (base) => {
+      const real = path.join(base, "pkg");
+      fs.mkdirSync(real);
+      const victim = path.join(base, "victim");
+      fs.mkdirSync(victim);
+      const bin = Buffer.from("#!/bin/sh\necho real\n");
+      const gz = zlibGzip(bin);
+      let root = real;
+      if (where === "root") {
+        root = path.join(base, "link");
+        fs.symlinkSync(real, root);
+      } else if (where === "prebuilt") {
+        fs.symlinkSync(victim, path.join(real, "prebuilt"));
+      } else {
+        fs.mkdirSync(path.join(real, "prebuilt"));
+        fs.symlinkSync(victim, path.join(real, "prebuilt", PLAT));
+      }
+      writeManifest(root, fullManifest(gz, bin));
+      const calls = [];
+      await withCapturedStderrAsync(() =>
+        assert.rejects(
+          inst.install({ root, version: pkgVersion, fetch: fakeFetch({ [ASSET]: gz }, calls) }),
+          (err) => err instanceof UnsafePathError && /symlink/.test(err.message),
+          where,
+        ),
+      );
+      assert.equal(calls.length, 0, `${where}: nothing downloaded`);
+      assert.deepEqual(fs.readdirSync(victim), [], `${where}: symlink target untouched`);
+    });
+  }
+});
+
+test("M23 staging: a regular file where prebuilt/ should be is refused", async () => {
+  await withTempRoot(async (dir) => {
+    fs.writeFileSync(path.join(dir, "prebuilt"), "not a dir");
+    assert.throws(() => inst.prepareInstallDir(dir), (e) => e instanceof UnsafePathError && /not a directory/.test(e.message));
+  });
+});
+
+// A request that never answers: only the overall deadline can end it.
+function hangingRequest(seen = []) {
+  const { EventEmitter } = require("node:events");
+  return (url, opts) => {
+    const req = new EventEmitter();
+    req.destroy = (err) => err && setImmediate(() => req.emit("error", err));
+    seen.push({ url: url.href, opts });
+    return req;
+  };
+}
+
+test("M24 get: one monotonic deadline ends a request that never answers, and an AbortSignal is passed", async () => {
+  const seen = [];
+  const t0 = inst.monotonicNow();
+  await assert.rejects(
+    inst.get("https://github.com/x", { request: hangingRequest(seen), deadline: t0 + 60 }),
+    /download deadline/,
+  );
+  const elapsed = inst.monotonicNow() - t0;
+  assert.ok(elapsed >= 40 && elapsed < 2000, `ended near the deadline (${elapsed} ms)`);
+  assert.ok(seen[0].opts.signal instanceof AbortSignal, "AbortSignal passed to the request");
+  assert.equal(seen[0].opts.signal.aborted, true, "signal aborted at the deadline");
+  assert.equal(seen[0].opts.timeout, inst.REQUEST_TIMEOUT_MS, "socket inactivity timeout kept");
+});
+
+test("M24 get: the deadline is shared across redirect hops, not reset per hop", async () => {
+  let clock = 0;
+  const now = () => clock;
+  let hops = 0;
+  const slow = fakeRequest(() => {
+    clock += 10_000; // each hop costs 10 s of the 30 s budget
+    return { status: 302, headers: { location: `/hop${++hops}` } };
+  });
+  await assert.rejects(inst.get("https://github.com/hop0", { request: slow, now }), /deadline exceeded/);
+  assert.equal(hops, 3, "stopped after 30 s of hops, before MAX_REDIRECTS");
+  assert.ok(hops < inst.MAX_REDIRECTS);
+});
+
+test("M24 get: an already-expired deadline fails before any request", async () => {
+  const seen = [];
+  await assert.rejects(inst.get("https://github.com/x", { request: hangingRequest(seen), deadline: inst.monotonicNow() - 1 }), /deadline exceeded/);
+  assert.equal(seen.length, 0);
+});
+
+test("M24 install: every fetch of one install shares a single absolute deadline", async () => {
+  await withTempRoot(async (dir) => {
+    const bin = Buffer.from("#!/bin/sh\necho hi\n");
+    const gz = zlibGzip(bin);
+    const sums = Buffer.from(`${refSha256(gz)}  ${ASSET}\n`);
+    const deadlines = [];
+    const files = { [ASSET]: gz, SHA256SUMS: sums };
+    const fetch = async (url, opts) => {
+      deadlines.push(opts.deadline);
+      return fakeFetch(files)(url);
+    };
+    await withCapturedStderrAsync(() => inst.install({ root: dir, version: pkgVersion, fetch, env: {}, now: () => 1000 }));
+    assert.deepEqual(deadlines, [1000 + inst.DOWNLOAD_DEADLINE_MS, 1000 + inst.DOWNLOAD_DEADLINE_MS]);
+  });
+});
+
+test("L03 writeAtomic: random exclusive staging, fd-based 0755, and a failed rename removes only its own file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-stage-"));
+  try {
+    const dest = path.join(dir, "claude-p");
+    const foreign = `${dest}.tmp.${process.pid}`;
+    fs.writeFileSync(foreign, "another installer's staging file");
+    const staged = [];
+    const failingRename = (from) => {
+      staged.push(from);
+      assert.equal(fs.statSync(from).mode & 0o777, 0o755, "staged file is 0755 before rename");
+      throw new Error("rename failed");
+    };
+    assert.throws(() => inst.writeAtomic(dest, Buffer.from("x"), { rename: failingRename }), /rename failed/);
+    assert.match(path.basename(staged[0]), /^claude-p\.tmp\.\d+\.[0-9a-f]{16}$/);
+    assert.equal(fs.existsSync(staged[0]), false, "own staging file removed");
+    assert.equal(fs.readFileSync(foreign, "utf8"), "another installer's staging file", "foreign file untouched");
+    assert.equal(fs.existsSync(dest), false);
+
+    inst.writeAtomic(dest, Buffer.from("ok"));
+    assert.equal(fs.readFileSync(dest, "utf8"), "ok");
+    assert.equal(fs.statSync(dest).mode & 0o777, 0o755);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["claude-p", "claude-p.tmp." + process.pid].sort());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("L03 writeAtomic: a symlinked parent directory is refused before staging", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-stage-"));
+  try {
+    const real = path.join(dir, "real");
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, path.join(dir, "link"));
+    assert.throws(() => inst.writeAtomic(path.join(dir, "link", "claude-p"), Buffer.from("x")), UnsafePathError);
+    assert.deepEqual(fs.readdirSync(real), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("L8 main: integrity failures exit 1; connectivity failures warn and exit 0 unless CLAUDE_P_STRICT_INSTALL=1", async () => {
+  const cases = [
+    { err: new ChecksumError("mismatch"), env: {}, code: 1, re: /checksum verification failed/ },
+    { err: new ChecksumError("mismatch"), env: { CLAUDE_P_STRICT_INSTALL: "0" }, code: 1, re: /refusing/ },
+    { err: new UnsafePathError("symlink"), env: {}, code: 1, re: /unsafe install path/ },
+    { err: Object.assign(new Error("getaddrinfo ENOTFOUND github.com"), { code: "ENOTFOUND" }), env: {}, code: 0, re: /warning/ },
+    { err: Object.assign(new Error("HTTP 503"), { statusCode: 503 }), env: {}, code: 0, re: /warning/ },
+    { err: new inst.NetworkError("download deadline exceeded"), env: { CLAUDE_P_STRICT_INSTALL: "1" }, code: 1, re: /error: could not download/ },
+    { err: new inst.NetworkError("download deadline exceeded"), env: {}, code: 0, re: /NODE_USE_ENV_PROXY=1/ },
+    { err: Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }), env: {}, code: 1, re: /not a connectivity failure/, local: true },
+    { err: Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }), env: {}, code: 1, re: /not a connectivity failure/, local: true },
+  ];
+  for (const c of cases) {
+    const cap = captureStderrLines();
+    let code;
+    try {
+      code = await inst.main({ env: c.env, supported: true, run: async () => { throw c.err; } });
+    } finally {
+      cap.restore();
+    }
+    const out = cap.lines.join("");
+    assert.equal(code, c.code, `${c.err.message} ${JSON.stringify(c.env)}`);
+    assert.match(out, c.re);
+    if (!(c.err instanceof ChecksumError) && !(c.err instanceof UnsafePathError) && !c.local) {
+      assert.match(out, /CLAUDE_P_SKIP_DOWNLOAD=1/);
+      assert.match(out, /CLAUDE_P_STRICT_INSTALL=1/);
+    }
+  }
+  let ran = false;
+  const cap = captureStderrLines();
+  try {
+    assert.equal(await inst.main({ env: { CLAUDE_P_SKIP_DOWNLOAD: "1" }, supported: true, run: async () => (ran = true) }), 0);
+    assert.equal(await inst.main({ env: {}, supported: false, run: async () => (ran = true) }), 0);
+    assert.equal(await inst.main({ env: {}, supported: true, run: async () => {} }), 0);
+  } finally {
+    cap.restore();
+  }
+  assert.equal(ran, false, "skip and unsupported never run the installer");
+});
+
+// ---------------------------------------------------------------------------
+// 2d. scripts/publish.mjs: tag identity, release digests, private npm staging
+// ---------------------------------------------------------------------------
+
+const pub = await import(path.join(repoRoot, "scripts", "publish.mjs"));
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+
+// Scripted `capture` for verifyTagRevision.
+function gitStub({ head = SHA_A, local = null, remote = "", remoteStatus = 0 }) {
+  return (cmd, argv) => {
+    assert.equal(cmd, "git");
+    if (argv[0] === "rev-parse" && argv.includes("HEAD^{commit}")) return { status: 0, stdout: `${head}\n`, stderr: "" };
+    if (argv[0] === "rev-parse") return local ? { status: 0, stdout: `${local}\n`, stderr: "" } : { status: 1, stdout: "", stderr: "" };
+    if (argv[0] === "ls-remote") return { status: remoteStatus, stdout: remote, stderr: remoteStatus ? "fatal: offline" : "" };
+    throw new Error(`unexpected git ${argv.join(" ")}`);
+  };
+}
+
+test("H15 parseLsRemoteTag: an annotated tag resolves to its peeled ^{} commit", () => {
+  const tagObj = "c".repeat(40);
+  assert.equal(pub.parseLsRemoteTag(`${tagObj}\trefs/tags/v1.0.0\n${SHA_A}\trefs/tags/v1.0.0^{}\n`, "v1.0.0"), SHA_A);
+  assert.equal(pub.parseLsRemoteTag(`${SHA_B}\trefs/tags/v1.0.0\n`, "v1.0.0"), SHA_B, "lightweight tag");
+  assert.equal(pub.parseLsRemoteTag("", "v1.0.0"), null);
+  assert.equal(pub.parseLsRemoteTag(`${SHA_A}\trefs/tags/v1.0.00^{}\n`, "v1.0.0"), null, "no prefix matches");
+});
+
+test("H15 verifyTagRevision: local and remote tags must peel to HEAD", () => {
+  const tag = "v9.9.9";
+  assert.deepEqual(pub.verifyTagRevision({ tag, capture: gitStub({}) }), { head: SHA_A, local: null, remote: null });
+  assert.doesNotThrow(() => pub.verifyTagRevision({ tag, capture: gitStub({ local: SHA_A, remote: `${"c".repeat(40)}\trefs/tags/${tag}\n${SHA_A}\trefs/tags/${tag}^{}\n` }) }));
+  assert.throws(() => pub.verifyTagRevision({ tag, capture: gitStub({ local: SHA_B }) }), /local tag v9\.9\.9 points at b+.*refusing/);
+  assert.throws(() => pub.verifyTagRevision({ tag, capture: gitStub({ remote: `${SHA_B}\trefs/tags/${tag}\n` }) }), /remote tag .*refusing/);
+  assert.throws(
+    () => pub.verifyTagRevision({ tag, capture: gitStub({ remote: `${SHA_A}\trefs/tags/${tag}\n${SHA_B}\trefs/tags/${tag}^{}\n` }) }),
+    /remote tag/,
+    "the peeled commit wins over the tag object",
+  );
+  assert.throws(() => pub.verifyTagRevision({ tag, capture: gitStub({ remoteStatus: 128 }) }), /cannot verify remote tag/);
+  assert.throws(
+    () => pub.verifyTagRevision({ tag, capture: gitStub({}), env: { GITHUB_ACTIONS: "true", GITHUB_SHA: SHA_B } }),
+    /GITHUB_SHA/,
+  );
+});
+
+test("M21 compareReleaseAssets: any digest mismatch is fatal; missing assets are listed (300 trials)", () => {
+  const rng = new Rng("release-assets");
+  const names = ["a.gz", "b.gz", "c.gz", "d.gz", "SHA256SUMS", "checksums.json"];
+  for (let trial = 0; trial < 300; trial++) {
+    const local = Object.fromEntries(names.map((n) => [n, randHex(rng, 64)]));
+    const remote = {};
+    const expectMissing = [];
+    let tamper = false;
+    for (const n of names) {
+      const k = rng.int(0, 5);
+      if (k === 0) expectMissing.push(n);
+      else if (k === 1) {
+        remote[n] = randHex(rng, 64);
+        tamper = true;
+      } else remote[n] = local[n];
+    }
+    if (tamper) {
+      assert.throws(() => pub.compareReleaseAssets(local, remote, { tag: "v1" }), /Releases are immutable/, rng.ctx(trial));
+    } else {
+      assert.deepEqual(pub.compareReleaseAssets(local, remote), expectMissing, rng.ctx(trial));
+      if (expectMissing.length) {
+        assert.throws(() => pub.compareReleaseAssets(local, remote, { requireAll: true }), /missing/, rng.ctx(trial));
+      } else {
+        assert.deepEqual(pub.compareReleaseAssets(local, remote, { requireAll: true }), []);
+      }
+    }
+  }
+});
+
+test("L04/M22 stageNpmPackage: a private dir holds the package and checksums.json; the repo root is untouched", () => {
+  const rootManifest = path.join(repoRoot, "checksums.json");
+  const before = fs.existsSync(rootManifest) ? fs.readFileSync(rootManifest) : null;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-stagetest-"));
+  try {
+    const manifestPath = path.join(tmp, "checksums.json");
+    const platforms = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
+    const manifest = {
+      version: pkgVersion,
+      assets: Object.fromEntries(platforms.map((p) => [`claude-p-${p}.gz`, "1".repeat(64)])),
+      binSha256: Object.fromEntries(platforms.map((p) => [p, "2".repeat(64)])),
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const stage = pub.stageNpmPackage({ srcRoot: repoRoot, manifestPath, tmp });
+    assert.ok(stage.startsWith(tmp), "staged under the private tmp dir");
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+    for (const rel of ["package.json", ...pkg.files]) assert.ok(fs.existsSync(path.join(stage, rel)), rel);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stage, "checksums.json"), "utf8")), manifest);
+    assert.equal(
+      fs.statSync(path.join(stage, "scripts/install.js")).mode & 0o777,
+      fs.statSync(path.join(repoRoot, "scripts/install.js")).mode & 0o777,
+    );
+    assert.doesNotThrow(() => pub.verifyStagedManifest(fs.readFileSync(path.join(stage, "checksums.json"), "utf8"), { version: pkgVersion }));
+    const after = fs.existsSync(rootManifest) ? fs.readFileSync(rootManifest) : null;
+    assert.deepEqual(after, before, "repo-root checksums.json neither created nor changed");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("L04/M22 verifyStagedManifest and verifyPackList refuse incomplete tarballs", () => {
+  const platforms = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
+  const good = {
+    version: pkgVersion,
+    assets: Object.fromEntries(platforms.map((p) => [`claude-p-${p}.gz`, "1".repeat(64)])),
+    binSha256: Object.fromEntries(platforms.map((p) => [p, "2".repeat(64)])),
+  };
+  assert.doesNotThrow(() => pub.verifyStagedManifest(JSON.stringify(good), { version: pkgVersion }));
+  assert.throws(() => pub.verifyStagedManifest(JSON.stringify({ ...good, version: "0.0.1" }), { version: pkgVersion }), /is for 0\.0\.1/);
+  for (const p of platforms) {
+    const noAsset = structuredClone(good);
+    delete noAsset.assets[`claude-p-${p}.gz`];
+    assert.throws(() => pub.verifyStagedManifest(JSON.stringify(noAsset), { version: pkgVersion }), /lacks a sha256/, p);
+    const noBin = structuredClone(good);
+    delete noBin.binSha256[p];
+    assert.throws(() => pub.verifyStagedManifest(JSON.stringify(noBin), { version: pkgVersion }), /lacks binSha256/, p);
+  }
+  const files = (paths) => JSON.stringify([{ files: paths.map((p) => ({ path: p })) }]);
+  assert.doesNotThrow(() => pub.verifyPackList(files(["package.json", "checksums.json", "scripts/install.js", "bin/claude-p.js"])));
+  assert.throws(() => pub.verifyPackList(files(["package.json", "scripts/install.js", "bin/claude-p.js"])), /checksums\.json/);
+  assert.throws(() => pub.verifyPackList("not json"), /invalid JSON/);
+});
+
+test("L04/M22 stageNpmPackage: the staged tarball really contains checksums.json (npm pack --dry-run)", { skip: spawnSyncOk("npm") ? false : "npm not on PATH" }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "claude-p-packtest-"));
+  try {
+    const manifestPath = path.join(tmp, "checksums.json");
+    fs.writeFileSync(manifestPath, "{}");
+    const stage = pub.stageNpmPackage({ srcRoot: repoRoot, manifestPath, tmp });
+    const r = require("node:child_process").spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: stage, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const listed = pub.verifyPackList(r.stdout);
+    assert.ok(listed.has("checksums.json"));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+function spawnSyncOk(cmd) {
+  const r = require("node:child_process").spawnSync(cmd, ["--version"], { encoding: "utf8" });
+  return r.status === 0;
+}
 
 // ---------------------------------------------------------------------------
 // 3. bin/claude-p.js launcher

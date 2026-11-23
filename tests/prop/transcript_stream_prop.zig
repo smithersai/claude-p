@@ -7,7 +7,7 @@ const alloc = testing.allocator;
 const negative = "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":-1}}}";
 const boundary = "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":9223372036854775808,\"output_tokens\":18446744073709551615,\"cache_read_input_tokens\":18446744073709551616,\"cache_creation_input_tokens\":-9223372036854775808}}}";
 const invalid_result = "{\"type\":\"result\",\"result\":\"\",\"num_turns\":4294967296,\"duration_api_ms\":-1}";
-const max_turns = "{\"type\":\"result\",\"num_turns\":4294967295}\n{\"type\":\"assistant\"}";
+const max_turns = "{\"type\":\"assistant\"}\n{\"type\":\"result\",\"num_turns\":4294967295}";
 
 fn expectReplay(bytes: []const u8, replay: []const u8) !void {
     var remaining = replay;
@@ -332,7 +332,7 @@ test "three assistant blocks share one turn and the latest usage snapshot" {
     var revisited = try transcript.parse(alloc, blocks ++ "\n" ++ later);
     defer revisited.deinit(alloc);
     try testing.expectEqual(3, revisited.num_turns);
-    try testing.expectEqual(transcript.Usage{ .input_tokens = 9 }, revisited.usage);
+    try testing.expectEqual(transcript.Usage{ .input_tokens = 9, .output_tokens = 100 }, revisited.usage);
     try testing.expectEqualStrings("updated", revisited.final_text);
 }
 
@@ -457,4 +457,20 @@ test "transcript file APIs reject invalid paths and reopenAt preserves state unt
     defer s.deinit(alloc);
     try testing.expectEqual(1, s.num_turns);
     try testing.expectEqualStrings("", s.jsonl_replay);
+}
+
+test "record UUIDs deduplicate text while partial usage and terminal overrides merge by field" {
+    const block =
+        \\{"uuid":"1","type":"assistant","message":{"id":"m","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":4,"cache_read_input_tokens":7}}}
+    ;
+    const tail =
+        \\{"uuid":"2","type":"assistant","message":{"id":"m","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":0,"output_tokens":5}}}
+        \\{"type":"result","usage":{"output_tokens":6,"cache_read_input_tokens":0},"permission_denials":[{"tool_name":"Bash"}]}
+    ;
+    var result = try transcript.parse(alloc, block ++ "\n" ++ block ++ "\n" ++ tail);
+    defer result.deinit(alloc);
+    try testing.expectEqualStrings("ab", result.final_text);
+    try testing.expectEqual(1, result.num_turns);
+    try testing.expectEqual(transcript.Usage{ .input_tokens = 4, .output_tokens = 6 }, result.usage);
+    try testing.expectEqualStrings("[{\"tool_name\":\"Bash\"}]", result.permission_denials.?);
 }

@@ -383,7 +383,7 @@ test "Stop text ignores edge whitespace and preserves interior bytes" {
 }
 
 test "resume detection respects whole argv tokens and explicit options" {
-    const decoys = [_][]const u8{ "", "--Resume", "--resume ", " --resume", "-cr", "--continue=x", "--resumed", "--no-resume", "--model=--resume", "-r=x", "-c\x00", "--resume-session" };
+    const decoys = [_][]const u8{ "", "--Resume", "--resume ", " --resume", "-cr", "--continues", "--continue ", "--resumed", "--fork", "--fork-sessions", "--from-prs", "--teleporter", "-teleport", "--no-teleport", "--no-resume", "--model=--resume", "-r=x", "-c\x00", "--resume-session" };
     var prng = std.Random.DefaultPrng.init(0xa269);
     const r = prng.random();
     for (0..2000) |_| {
@@ -403,11 +403,203 @@ test "resume detection respects whole argv tokens and explicit options" {
         const prefix = "--resume=";
         @memcpy(value[0..prefix.len], prefix);
         r.bytes(value[prefix.len..]);
-        const flags = [_][]const u8{ "--resume", "--continue", "-r", "-c", value[0..r.intRangeAtMost(usize, prefix.len, value.len)] };
+        const flags = [_][]const u8{
+            "--resume",       "--continue",      "-r",          "-c",                                                     "--fork-session",
+            "--from-pr",      "--teleport",      "--continue=", "--continue=abc",                                         "--fork-session=true",
+            "--from-pr=1234", "--teleport=sess", "--resume=",   value[0..r.intRangeAtMost(usize, prefix.len, value.len)],
+        };
         const i = r.uintLessThan(usize, args.len);
         for (flags) |flag| {
             args[i] = flag;
             try testing.expect(driver.isResumeRun(opts));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round 1 review fixes: caller-intent gating, failure screens, hook tracing
+// ---------------------------------------------------------------------------
+
+test "bypass and dev-channel dialogs are approved only by the caller's own flags" {
+    const decoys = [_][]const u8{
+        "",                                       "--verbose",                              "bypassPermissions",
+        "--permission-mode",                      "plan",                                   "acceptEdits",
+        "--permission-mode=plan",                 "--permission-mode=bypasspermissions",    "--Permission-Mode=bypassPermissions",
+        "--dangerously-skip-permission",          "--dangerously-skip-permissionsx",        "dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",   "--dangerously-load-development-channel", "--dangerously-load-development-channelsx",
+        "--model=--dangerously-skip-permissions", "--continue",                             "--dangerously-skip-permissions ",
+    };
+    var prng = std.Random.DefaultPrng.init(0x64_0001);
+    const r = prng.random();
+    for (0..3000) |_| {
+        var argv: [16][]const u8 = undefined;
+        const args = argv[0..r.intRangeAtMost(usize, 1, argv.len)];
+        for (args, 0..) |*arg, i| {
+            arg.* = decoys[r.uintLessThan(usize, decoys.len)];
+            // "--permission-mode bypassPermissions" as two tokens is real intent.
+            if (i > 0 and std.mem.eql(u8, args[i - 1], "--permission-mode") and std.mem.eql(u8, arg.*, "bypassPermissions")) arg.* = "plan";
+        }
+        var opts: driver.Options = .{
+            .prompt = "--dangerously-skip-permissions --dangerously-load-development-channels",
+            .extra_args = args,
+            .permission_mode = if (r.boolean()) null else "acceptEdits",
+            .system_prompt = "bypassPermissions",
+            .model = "--dangerously-skip-permissions",
+        };
+        // An ordinary run answers the trust dialog and nothing else.
+        try testing.expect(driver.dialogConfirmAllowed(opts, .trust));
+        try testing.expect(driver.dialogConfirmAllowed(opts, .none));
+        try testing.expect(!driver.dialogConfirmAllowed(opts, .bypass_permissions));
+        try testing.expect(!driver.dialogConfirmAllowed(opts, .dev_channels));
+
+        // Explicit intent in the final flags.
+        opts.extra_args = &.{};
+        switch (r.uintLessThan(u8, 4)) {
+            0 => opts.skip_permissions = true,
+            1 => opts.permission_mode = "bypassPermissions",
+            2 => opts.extra_args = &.{"--dangerously-skip-permissions"},
+            else => opts.extra_args = &.{ "--permission-mode", "bypassPermissions" },
+        }
+        try testing.expect(driver.dialogConfirmAllowed(opts, .bypass_permissions));
+        try testing.expect(!driver.dialogConfirmAllowed(opts, .dev_channels));
+
+        // The dev-channels flag unlocks dev channels only.
+        var dev: driver.Options = .{ .prompt = "x", .extra_args = &.{
+            "--verbose",
+            if (r.boolean()) "--dangerously-load-development-channels" else "--dangerously-load-development-channels=server:demo",
+        } };
+        try testing.expect(driver.dialogConfirmAllowed(dev, .dev_channels));
+        try testing.expect(!driver.dialogConfirmAllowed(dev, .bypass_permissions));
+        dev.extra_args = &.{};
+        try testing.expect(!driver.dialogConfirmAllowed(dev, .dev_channels));
+    }
+}
+
+fn checkFailureScreen(_: void, raw: []const u8) anyerror!void {
+    var out: [driver.failure_screen_max_bytes]u8 = undefined;
+    const screen = driver.formatFailureScreen(&out, raw);
+    try testing.expect(screen.len <= driver.failure_screen_max_bytes);
+    try testing.expect(std.mem.count(u8, screen, "\n") < driver.failure_screen_max_lines);
+    // Printable text only: no escape, no control byte, no blank line, no
+    // leading or trailing newline.
+    for (screen) |b| try testing.expect(b == '\n' or (b >= 0x20 and b != 0x7f));
+    try testing.expect(std.mem.indexOf(u8, screen, "\n\n") == null);
+    if (screen.len > 0) {
+        try testing.expect(screen[0] != '\n' and screen[screen.len - 1] != '\n');
+        try testing.expect((screen[0] & 0xC0) != 0x80 or !std.unicode.utf8ValidateSlice(raw));
+    }
+    var it = std.mem.splitScalar(u8, screen, '\n');
+    while (it.next()) |line| {
+        if (screen.len > 0) try testing.expect(std.mem.trim(u8, line, " ").len > 0);
+    }
+    // Deterministic.
+    var again: [driver.failure_screen_max_bytes]u8 = undefined;
+    try testing.expectEqualStrings(screen, driver.formatFailureScreen(&again, raw));
+}
+
+test "fuzz failure screens stay bounded, printable, and free of blank lines" {
+    try testing.fuzz({}, checkFailureScreen, .{ .corpus = &.{
+        "",
+        "\r\n\r\n",
+        "\x1b[31msh: claude: command not found\x1b[0m\r\n",
+        "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\n",
+        "\xe2\x9d\xaf No, exit\r\n  Yes, I trust this folder\r\n",
+        "\x1b]0;title\x07text\x1b[",
+        "\x1b",
+        "\xff\xfe\x80",
+    } });
+}
+
+test "failure screens over 3000 random PTY captures keep the last lines in order" {
+    var prng = std.Random.DefaultPrng.init(0xf5_0001);
+    const r = prng.random();
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(testing.allocator);
+    const noise = [_][]const u8{ "\x1b[1m", "\x1b[0m", "\x1b[2K", "\r", "\r\n", "\n\n", "\x07", "\x1b]0;t\x07", "   \r\n" };
+    for (0..3000) |_| {
+        raw.clearRetainingCapacity();
+        const lines = r.uintLessThan(usize, 60);
+        for (0..lines) |i| {
+            try raw.appendSlice(testing.allocator, noise[r.uintLessThan(usize, noise.len)]);
+            try raw.writer(testing.allocator).print("row{d}", .{i});
+            try raw.appendSlice(testing.allocator, noise[r.uintLessThan(usize, noise.len)]);
+            try raw.appendSlice(testing.allocator, "\r\n");
+        }
+        try checkFailureScreen({}, raw.items);
+        var out: [driver.failure_screen_max_bytes]u8 = undefined;
+        const screen = driver.formatFailureScreen(&out, raw.items);
+        if (lines == 0) {
+            try testing.expectEqualStrings("", screen);
+            continue;
+        }
+        // The last row is always present and rows appear in increasing order.
+        var last_buf: [16]u8 = undefined;
+        const last = try std.fmt.bufPrint(&last_buf, "row{d}", .{lines - 1});
+        try testing.expect(std.mem.endsWith(u8, screen, last));
+        var it = std.mem.splitScalar(u8, screen, '\n');
+        var prev: ?usize = null;
+        var shown: usize = 0;
+        while (it.next()) |line| {
+            const n = try std.fmt.parseInt(usize, line[3..], 10);
+            if (prev) |p| try testing.expectEqual(p + 1, n);
+            prev = n;
+            shown += 1;
+        }
+        try testing.expectEqual(@min(lines, driver.failure_screen_max_lines), shown);
+    }
+}
+
+test "hook traces carry the event name and payload size and nothing else" {
+    var prng = std.Random.DefaultPrng.init(0x11_0001);
+    const r = prng.random();
+    const events = std.enums.values(@typeInfo(@TypeOf(driver.formatHookTrace)).@"fn".params[1].type.?);
+    for (0..2000) |_| {
+        const event = events[r.uintLessThan(usize, events.len)];
+        const len = r.int(usize);
+        var buf: [96]u8 = undefined;
+        const line = driver.formatHookTrace(&buf, event, len);
+        var want_buf: [96]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "hook: {s} payload_bytes={d}", .{ @tagName(event), len });
+        try testing.expectEqualStrings(want, line);
+        for (line) |b| try testing.expect(b >= 0x20 and b < 0x7f);
+    }
+}
+
+test "the monotonic clock never steps backwards across threads" {
+    const Worker = struct {
+        fn run(ok: *std.atomic.Value(bool)) void {
+            var prev = driver.monotonicNs();
+            for (0..20_000) |_| {
+                const now = driver.monotonicNs();
+                if (now < prev) ok.store(false, .seq_cst);
+                prev = now;
+            }
+        }
+    };
+    var ok = std.atomic.Value(bool).init(true);
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{&ok});
+    for (threads) |t| t.join();
+    try testing.expect(ok.load(.seq_cst));
+    // Anchored to the wall clock at first use, so it fits i64 atomics.
+    const now = driver.monotonicNs();
+    try testing.expect(now > 0 and now < std.math.maxInt(i64));
+}
+
+test "dialog intent honors value boundaries, the end of options and the final permission mode" {
+    const flags = [_]struct { name: []const u8, kind: driver.DialogKind }{
+        .{ .name = "--dangerously-skip-permissions", .kind = .bypass_permissions },
+        .{ .name = "--permission-mode=bypassPermissions", .kind = .bypass_permissions },
+        .{ .name = "--dangerously-load-development-channels", .kind = .dev_channels },
+    };
+    for (flags) |f| {
+        for ([_][]const u8{ "--system-prompt", "--model", "--append-system-prompt", "--" }) |prefix| {
+            try testing.expect(!driver.dialogConfirmAllowed(.{ .prompt = "p", .extra_args = &.{ prefix, f.name } }, f.kind));
+        }
+    }
+    try testing.expect(!driver.dialogConfirmAllowed(.{
+        .prompt = "p",
+        .permission_mode = "bypassPermissions",
+        .extra_args = &.{ "--permission-mode=bypassPermissions", "--permission-mode", "default" },
+    }, .bypass_permissions));
 }

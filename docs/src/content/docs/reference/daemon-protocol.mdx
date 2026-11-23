@@ -7,13 +7,23 @@ sidebar:
 
 import DaemonProtocolDiagram from '../../../components/diagrams/DaemonProtocolDiagram.astro';
 
-`claude-p daemon [OPTIONS]` drives a single long-lived interactive `claude` session over newline-delimited JSON (NDJSON) on stdin and stdout. It shares the one-shot driver's child environment filtering (`buildChildEnv`), Claude Code 2.1 dialog engine (`maybeHandleStartupDialogs`), and paced bracketed paste (`typePrompt`).
+`claude-p daemon [OPTIONS]` drives a single long-lived interactive `claude` session over newline-delimited JSON (NDJSON) on stdin and stdout. It shares the one-shot driver's child environment filtering (`buildChildEnv`), Claude Code 2.1 dialog engine (`maybeHandleStartupDialogs`), and paced bracketed paste (`PasteChunker`). The daemon writes one paste chunk per event-loop tick instead of calling the blocking `typePrompt`, so `ping`, `interrupt`, and DEC replies stay responsive during a large paste.
 
 <DaemonProtocolDiagram />
 
 ## Stdin frames (client → daemon)
 
-One JSON object per `\n`-terminated line. Unknown types and malformed JSON lines are ignored.
+One JSON object per `\n`-terminated line, at most 16 MiB. A final line without `\n` is processed at EOF. Rejected lines get a `{"type":"error","error":"<reason>"}` protocol frame and the session continues (see [Protocol error frames](#protocol-error-frames-typeerror)).
+
+| Line | Daemon response |
+| --- | --- |
+| Blank or whitespace-only | Ignored silently; no frame. |
+| Valid JSON object with an unknown or missing `type`, or a non-object JSON value | `unsupported_frame_type` protocol error. |
+| Not valid JSON | `invalid_json` protocol error. |
+| `user` frame with no non-empty text content | `invalid_user_message` protocol error. |
+| `user` frame with a non-text content block | `unsupported_content_block` protocol error. |
+| `user` frame while the queue holds 64 prompts or the text would push it past 64 MiB | `queue_full` protocol error; the prompt is dropped. |
+| Line over 16 MiB | `stdin_line_too_large` protocol error; the rest of the line is discarded and later lines are read normally. |
 
 ### `user` — queue a prompt
 
@@ -31,7 +41,7 @@ Accepted shapes (checked in order):
 {"type":"user","content":"Shorthand top-level content."}
 ```
 
-When `content` is an array, all blocks with `"type":"text"` are concatenated in order. Frames are appended to `prompt_queue` and dispatched via `typePrompt()` whenever the daemon is `.idle`.
+When `content` is an array, all blocks with `"type":"text"` are concatenated in order; any other block type is rejected with `unsupported_content_block`. Frames are appended to `prompt_queue` (at most `64` prompts and `64 MiB` of text, including frames sent before `SessionStart`) and pasted incrementally (`PendingPaste`) whenever the daemon is `.idle`. An `interrupt` during the paste cancels it.
 
 ### `ping` — event-loop liveness probe
 
@@ -39,7 +49,7 @@ When `content` is an array, all blocks with `"type":"text"` are concatenated in 
 {"type":"ping"}
 ```
 
-Checked before `interrupt` and `user` parsing, and answered immediately in any state (`waiting_for_ready`, `idle`, or `busy`). Never enters `prompt_queue`.
+Answered with `pong` as soon as the main loop reads it, in any state (`waiting_for_ready`, `idle`, or `busy`). Never enters `prompt_queue`.
 
 ### `interrupt` — cancel a busy turn without killing the session
 
@@ -55,7 +65,22 @@ Checked before `interrupt` and `user` parsing, and answered immediately in any s
 
 ### `EOF` — graceful shutdown
 
-Closing stdin sets `stdin_eof = true`. The daemon finishes the active turn and drains `prompt_queue`, calls `session.terminate()`, drains final transcript bytes, and exits `0`.
+Closing stdin sets `stdin_eof = true`. The daemon finishes the active turn and drains `prompt_queue`, calls `session.terminate()`, drains final transcript bytes, and exits `0`. EOF before `SessionStart` with nothing queued also exits `0` without waiting for startup.
+
+### Startup failures
+
+Before `system/init`, a failure to find or start `claude` writes one `type:"result"` frame with `subtype: "error"`, a `stage` field naming the step, and exits `2`:
+
+| `error` | `stage` values |
+| --- | --- |
+| `claude_not_found` | `resolve_claude` |
+| `spawn_failed` | `cwd`, `hook_settings`, `hook_harness`, `shell_command`, `environment`, `fifo_open`, `pty_spawn` |
+
+```json
+{"type":"result","subtype":"error","error":"claude_not_found","stage":"resolve_claude","session_id":"","result":"","is_error":true,"duration_ms":0,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
+```
+
+Invalid options (`--max-turns`, `--fallback-model`, or another rejected print-only flag, and `--output-format text` or `json`) are refused before startup with exit `2` and no frame; library callers get `error.InvalidOptions`.
 
 ## Stdout frames (daemon → client)
 
@@ -73,7 +98,7 @@ Raw JSONL lines tailed from Claude's session transcript file via `stream.Tailer`
 
 ### Per-turn `result` envelope
 
-Emitted when `Stop` fires after a `20 × 20 ms` tailer drain. Summary fields (`result`, `usage`, `num_turns`, etc.) are computed from `[turn_start_pos..turn_end_pos)` covering only that turn, falling back to Stop's `last_assistant_message` if the slice cannot be parsed. Schema matches the [CLI JSON `result` schema](/claude-p/reference/cli/#json-result-schema).
+Emitted once `Stop` is confirmed: the daemon confirms immediately on `system`/`stop_hook_summary` (`preventedContinuation: false`), supersedes immediately on continuation or a later `Stop`, and otherwise waits a fallback confirmation window (`150 ms`, or `2000 ms` when `--extra-hook Stop=...` is set), then drains and parses the tailer for up to `30 × 25 ms` (exiting early on match). Prompt delivery pastes incrementally in the event loop so `ping`, `interrupt`, and DEC replies stay responsive during large prompts. Summary fields (`result`, `usage`, `num_turns`, etc.) are computed from `[turn_start_pos..turn_end_pos)` covering only that turn, falling back to Stop's `last_assistant_message` if the slice cannot be parsed. Schema matches the [CLI JSON `result` schema](/claude-p/reference/cli/#json-result-schema).
 
 ### `pong`
 
@@ -83,9 +108,27 @@ Emitted inline in reply to each `ping`:
 {"type":"pong","ts":1763859600123}
 ```
 
-### Interrupted and terminal watchdog `result` frames (`emitErrorResult`)
+### Protocol error frames (`type:"error"`)
 
-Same schema as the normal `result` frame plus `"error": "<reason>"` so callers parse all outcomes with one schema:
+A rejected stdin or hook-FIFO line produces one `writeProtocolError` frame. It ends no turn, and the daemon keeps its state:
+
+```json
+{"type":"error","error":"invalid_json"}
+```
+
+| `error` reason | Cause |
+| --- | --- |
+| `invalid_json` | Stdin line is not valid JSON. |
+| `unsupported_frame_type` | Valid JSON that is not an object, or has an unknown or missing `type`. |
+| `invalid_user_message` | `user` frame with no non-empty text. |
+| `unsupported_content_block` | `user` frame with a non-text content block. |
+| `stdin_line_too_large` | Stdin line over 16 MiB. |
+| `fifo_line_too_large` | Hook relay line over 16 MiB. |
+| `queue_full` | Prompt queue already holds 64 prompts or 64 MiB. |
+
+### Turn and session error frames (`emitErrorResult`)
+
+`type:"result"` is reserved for frames that end a turn or the session. Every non-success outcome of that kind uses the `result` envelope with an extra `"error": "<reason>"` field, `"result": ""`, and zeroed counters. Tell it from a successful turn result by the `error` field:
 
 ```json
 {"type":"result","subtype":"interrupted","error":"interrupted","session_id":"...","result":"","is_error":false,"duration_ms":1500,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
@@ -95,7 +138,22 @@ Same schema as the normal `result` frame plus `"error": "<reason>"` so callers p
 {"type":"result","subtype":"error","error":"transcript_stalled","session_id":"...","result":"","is_error":true,"duration_ms":600100,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
 ```
 
-`is_error` is `false` only for `subtype: "interrupted"`, and `true` for all timeout/error subtypes.
+```json
+{"type":"result","subtype":"error_during_execution","error":"permission_prompt_blocked","message":"Bash","session_id":"...","result":"","is_error":true,"duration_ms":2300,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
+```
+
+`is_error` is `false` only for `subtype: "interrupted"`, and `true` for every other subtype.
+
+| `error` reason | Kind | What happens next |
+| --- | --- | --- |
+| `prompt_not_accepted` | Turn failed: `claude` never acknowledged the prompt after 4 injections | Daemon returns to `idle`. |
+| `stop_failure` | Turn failed: `StopFailure` hook fired (API error). The frame keeps the transcript's `usage` and `num_turns`, has `is_error: true`, and `result` holds the hook's error text. | Daemon returns to `idle`. |
+| `result_unavailable` | Turn ended but no assistant text could be read | Daemon returns to `idle`. |
+| `interrupted` | Turn canceled by an `interrupt` frame | Daemon returns to `idle`. |
+| `permission_prompt_blocked` | `PermissionRequest` hook fired while busy; the daemon sent Escape. `subtype: "error_during_execution"`, tool name in `message`. | Daemon returns to `idle`. |
+| `claude_not_found`, `spawn_failed` | Startup failure (`stage` field) | Daemon exits `2`. |
+| `unexpected_startup_dialog`, `prompt_truncated`, `child_exited` | Session failure | Daemon exits `2`. |
+| `session_start_timeout`, `idle_timeout`, `transcript_stalled` | Watchdog | Daemon exits `124`. |
 
 ## Watchdogs and failure exits
 
@@ -103,7 +161,7 @@ Every watchdog timeout flushes any remaining transcript bytes, emits one structu
 
 | Watchdog | Flag / default | `"error"` reason | Exit code |
 | --- | --- | --- | --- |
-| Startup deadline | `--timeout <sec>` (`300`) | `session_start_timeout` | `2` |
+| Startup deadline | `--timeout <sec>` (`300`; `0` disables) | `session_start_timeout` | `124` |
 | Busy PTY silence | `--idle-timeout <sec>` (`180`; `0` disables) | `idle_timeout` | `124` |
 | Busy transcript stall (spinner-immune) | `--transcript-idle-timeout <sec>` (`600`; `0` disables) | `transcript_stalled` | `124` |
 
@@ -111,11 +169,11 @@ Both busy watchdogs reset on `idle → busy` and never trip while `.idle` or `.w
 
 ## Stderr `[pty-trace]` telemetry
 
-Controlled by `CLAUDE_P_PTY_TRACE` (default `60` s; `0`/`off`/`false`/`no` disables; positive integer sets seconds):
+Off by default. `--debug` turns it on every `60` s. `CLAUDE_P_PTY_TRACE=<seconds>` sets the interval (with or without `--debug`); `0`/`off`/`false`/`no` turns it off:
 
 ```text
 [pty-trace] state=busy pty_bytes=48210 pty_delta=1920 last_byte_age_ms=340 turn_age_ms=60012 transcript_pos=8192
 ```
 
 - `last_byte_age_ms` is `-1` before the first PTY byte arrives.
-- `turn_age_ms` is `-1` before the first turn is dispatched.
+- `turn_age_ms` is `0` unless the daemon is `busy`.

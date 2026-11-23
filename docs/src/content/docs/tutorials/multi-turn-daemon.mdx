@@ -42,13 +42,13 @@ Look closely at the order of lines on stdout:
 1. `{"type":"pong","ts":1763859600123}` — can arrive **even before** `system/init` because `ping` is answered inline by the main event loop in any state!
 2. `{"type":"system","subtype":"init","session_id":"..."}` — emitted once as soon as `SessionStart` fires.
 3. Raw transcript JSONL lines from Claude (`user`, `assistant`, tool events) as they flush.
-4. `{"type":"result","subtype":"success","session_id":"...","result":"OK",...}` — emitted when `Stop` fires for that turn.
-5. Because `printf` closed stdin (EOF), the daemon finishes the active turn, drains the queue, terminates `claude`, and exits `0`.
+4. `{"type":"result","subtype":"success","session_id":"...","result":"OK",...}` — emitted when `Stop` fires for that turn and stays unchallenged for a 150 ms confirmation window.
+5. Because `printf` closed stdin (EOF), the daemon finishes the active turn, drains the queue, terminates `claude`, and exits `0`. The `user` frame arrived before `SessionStart`, so it waited in the queue (up to 64 prompts / 64 MiB) until the session was ready.
 
 <Callout title="Mental check: why did pong arrive first?" kind="check">
-  In <code>src/daemon.zig</code>, every stdin line is checked with <code>isPingFrame()</code>
-  <strong>before</strong> <code>parseUserMessageContent()</code>. Pings bypass the prompt queue
-  completely—if you get a <code>pong</code> back, you know the daemon's main event loop is not
+  In <code>src/daemon.zig</code>, <code>readInputFrame()</code> classifies every stdin line as
+  <code>ping</code>, <code>interrupt</code>, or <code>user</code> as soon as it is read, in any
+  state. Pings bypass the prompt queue completely—if you get a <code>pong</code> back, you know the daemon's main event loop is not
   wedged, even while Claude is busy thinking.
 </Callout>
 
@@ -166,9 +166,11 @@ Look at how `claude-p daemon` protects a long-running controller from hanging:
 1. **`--idle-timeout 120`** sets the busy-turn PTY silence watchdog to 120 seconds (default `180 s`; `0` disables).
    - While **idle** (waiting for your next `user` frame), watchdogs **never trip**—your daemon can sit parked for hours.
    - The moment a prompt is dispatched (`idle → busy`), `claude-p` resets both watchdog baselines to `now` so a long idle period never causes an instant false timeout.
-2. **`--transcript-idle-timeout`** (default `600 s`; `0` disables) is the spinner-immune counterpart: even if Ink's spinner keeps writing PTY bytes, this watchdog fires `transcript_stalled` (exit `124`) if the transcript JSONL file stops growing while busy. Before exiting on *any* watchdog, the daemon flushes a structured error `result` frame to stdout so your reader never hits a mysterious silent EOF.
+2. **`--transcript-idle-timeout`** (default `600 s`; `0` disables) is the spinner-immune counterpart: even if Ink's spinner keeps writing PTY bytes, this watchdog fires `transcript_stalled` (exit `124`) if the transcript JSONL file stops growing while busy. Before exiting on *any* watchdog, the daemon flushes a structured error `result` frame to stdout so your reader never hits a mysterious silent EOF. One-shot mode honors the same flag while awaiting `Stop` (`TranscriptStalled`, exit `124`).
 3. **`{"type":"interrupt"}`** lets you cancel a runaway turn without restarting `claude`: send it on stdin while busy and the daemon sends Escape (`\x1b`), waits up to 1.5 s, emits a `result` with `subtype: "interrupted"` (`is_error: false`), and returns to `.idle` ready for the next turn.
-4. **`CLAUDE_P_PTY_TRACE: 'off'`** silences the daemon's periodic stderr trace. By default, `claude-p daemon` prints a `[pty-trace]` line every 60 seconds showing `pty_delta` and `transcript_pos`.
+4. **`CLAUDE_P_PTY_TRACE: 'off'`** keeps the periodic stderr trace off even if you later add `--debug`. The trace is off by default; `--debug` turns on a `[pty-trace]` line every 60 seconds showing `pty_delta` and `transcript_pos`.
+5. **A blocked permission prompt ends the turn, not the session.** If Claude Code fires `PermissionRequest` while busy, nobody can answer the prompt, so the daemon sends Escape, emits a `type:"result"` frame with `subtype: "error_during_execution"` and `error: "permission_prompt_blocked"`, and returns to `.idle`. The client above resolves its turn on that frame too; check `is_error`.
+6. **Every timeout exits `124`.** `session_start_timeout` (`--timeout`, default `300 s`), `idle_timeout`, and `transcript_stalled` each write one error `result` frame and exit `124`, the same code one-shot `StopTimeout` uses.
 
 <Callout title="Watch the bytes: how per-turn usage stays accurate" kind="bytes">
   Claude appends every turn to the same session <code>.jsonl</code> file.
@@ -178,11 +180,17 @@ Look at how `claude-p daemon` protects a long-running controller from hanging:
   reports Turn 2's text and token counts, not Turn 1's.
 </Callout>
 
-<Callout title="Trap: don't send malformed JSON without checking stdout" kind="trap">
-  In <code>src/daemon.zig</code>, non-<code>user</code> / non-<code>ping</code> /
-  non-<code>interrupt</code> or unparseable stdin lines are ignored rather than aborting the
-  daemon. Always serialize frames with <code>JSON.stringify</code> and end each line with
-  <code>\n</code>.
+<Callout title="Trap: bad stdin lines produce error frames, not silence" kind="trap">
+  In <code>src/daemon.zig</code>, a line that is not valid JSON gets a
+  <code>{"{\"type\":\"error\",\"error\":\"invalid_json\"}"}</code> protocol frame. An unknown
+  <code>type</code> gets <code>unsupported_frame_type</code>, a <code>user</code> frame with no
+  usable text gets <code>invalid_user_message</code>, a non-text block gets
+  <code>unsupported_content_block</code>, and a full prompt queue gets <code>queue_full</code>.
+  None of them ends the session or the active turn, and none uses <code>type:"result"</code>, which
+  is reserved for frames that end a turn or the session. A client waiting on
+  <code>type === 'result'</code> never mistakes a protocol rejection for a turn result, but it should
+  still log <code>type === 'error'</code> frames. Blank lines are ignored silently. Serialize frames
+  with <code>JSON.stringify</code> and end each line with <code>\n</code>.
 </Callout>
 
 ---
@@ -208,7 +216,7 @@ Look at how `claude-p daemon` protects a long-running controller from hanging:
 **A:** Ink draws an animated spinner while Claude waits on a hung tool or stalled network call. That spinner keeps writing ANSI frames to the PTY, which resets `--idle-timeout` (180 s) forever. `--transcript-idle-timeout` (600 s) watches actual byte growth in `transcript.jsonl`, so a ticking spinner can never mask a wedged turn.
 
 **Q: Why is `is_error` set to `false` on an `interrupted` result frame?**
-**A:** You asked for the interrupt. Setting `is_error: false` with `subtype: "interrupted"` lets a controller distinguish a caller-initiated cancellation from a fatal timeout (`is_error: true`, `subtype: "error"`).
+**A:** You asked for the interrupt. Setting `is_error: false` with `subtype: "interrupted"` lets a controller distinguish a caller-initiated cancellation from a fatal timeout (`is_error: true`, `subtype: "error"`, `error: "idle_timeout"` and similar).
 
 **Q: What if I close stdin while a turn is still running?**
 **A:** The daemon does not kill the in-flight turn. It sets `stdin_eof = true`, lets the active turn and any queued prompts finish, drains the tailer, terminates `claude`, and exits `0`.

@@ -2,12 +2,16 @@
 # Build all 4 prebuilt claude-p targets inside a Linux container and emit
 # gzipped assets and SHA256SUMS to release-assets/. Zig's bundled macOS
 # libSystem stub lets the darwin targets cross-compile without an SDK.
+# Afterwards, on the host, write checksums.json from these assets with:
+#   node scripts/publish.mjs --from-assets --local-only --skip-git
 set -e
 
 ZIG_VERSION=0.15.2
+# Official SHA-256 digests from https://ziglang.org/download/index.json
+# ("0.15.2" -> "<arch>-linux" -> "shasum").
 case "$(uname -m)" in
-  aarch64|arm64) ZARCH=aarch64 ;;
-  x86_64|amd64)  ZARCH=x86_64 ;;
+  aarch64|arm64) ZARCH=aarch64; ZIG_SHA256=958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f ;;
+  x86_64|amd64)  ZARCH=x86_64;  ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 ;;
   *) echo "unsupported container arch $(uname -m)"; exit 1 ;;
 esac
 
@@ -16,7 +20,8 @@ apk add --no-cache build-base curl tar xz git >/dev/null
 
 echo "=== fetching zig ${ZIG_VERSION} (${ZARCH}-linux) ==="
 mkdir -p /opt/zig
-curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+curl -fL --proto '=https' --tlsv1.2 "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - || { echo "zig tarball SHA-256 mismatch"; rm -f /tmp/zig.tar.xz; exit 1; }
 tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
 export PATH="/opt/zig:$PATH"
 zig version

@@ -3,8 +3,8 @@
   "flows": [
     {
       "id": "checks/review",
-      "description": "Review a claude-p change for PTY/Ink protocol safety, Zig memory ownership, claude -p wire parity, and packaging supply-chain integrity.",
-      "summary": "Review changes for PTY/Ink safety, Zig memory ownership, claude -p wire parity, and supply-chain integrity.",
+      "description": "Review a claude-p change for PTY/Ink protocol safety, Zig memory ownership, claude -p output contract, and packaging supply-chain integrity.",
+      "summary": "Review changes for PTY/Ink safety, Zig memory ownership, claude -p output contract, and supply-chain integrity.",
       "featured": true,
       "kind": "mdx",
       "path": ".smithers/flows/checks/review/flow.mdx",
@@ -43,9 +43,13 @@
       "capabilities": [
         "fs:read:**",
         "proc:spawn:rg *",
-        "proc:spawn:jj --no-pager *",
-        "proc:spawn:sh .smithers/run-zig.sh *",
-        "proc:spawn:node *"
+        "proc:spawn:jj --no-pager log *",
+        "proc:spawn:jj --no-pager status *",
+        "proc:spawn:jj --no-pager diff *",
+        "proc:spawn:sh .smithers/run-zig.sh build test *",
+        "proc:spawn:sh .smithers/run-zig.sh build test-integration *",
+        "proc:spawn:claude --version",
+        "proc:spawn:zig version"
       ],
       "model": "sol",
       "modelInvocable": true,
@@ -82,9 +86,16 @@
         "fs:read:**",
         "fs:write:**",
         "proc:spawn:rg *",
-        "proc:spawn:jj --no-pager *",
-        "proc:spawn:sh .smithers/run-zig.sh *",
-        "proc:spawn:node *"
+        "proc:spawn:jj --no-pager log *",
+        "proc:spawn:jj --no-pager status *",
+        "proc:spawn:jj --no-pager diff *",
+        "proc:spawn:jj --no-pager show *",
+        "proc:spawn:jj --no-pager describe *",
+        "proc:spawn:jj --no-pager commit *",
+        "proc:spawn:jj --no-pager new *",
+        "proc:spawn:sh .smithers/run-zig.sh build *",
+        "proc:spawn:node --test *",
+        "proc:spawn:node scripts/publish.mjs --check-versions *"
       ],
       "model": "sol",
       "modelInvocable": true,
@@ -119,8 +130,7 @@
       "path": ".smithers/flows/pr-triage/flow.mdx",
       "capabilities": [
         "fs:read:**",
-        "fs:write:.smithers/reports/pr-triage.json",
-        "proc:spawn:rg *"
+        "fs:write:.smithers/reports/pr-triage.json"
       ],
       "model": "sol",
       "modelInvocable": true,
@@ -148,16 +158,17 @@
     },
     {
       "id": "claude-compat-probe",
-      "description": "Probe the installed Claude Code CLI release for flag drift, hook suppression, Ink terminal probes, and startup dialog regressions.",
-      "summary": "Probe a Claude Code CLI release for flag drift, hook suppression, Ink probes, and startup dialog regressions.",
+      "description": "Probe the installed Claude Code CLI release for flag drift, hook suppression, and rejected-flag coverage using only read-only version and help output.",
+      "summary": "Inspect a Claude Code CLI release with read-only --version/--help for flag drift, hook-suppressing flags, and rejected-flag coverage.",
       "featured": true,
       "kind": "mdx",
       "path": ".smithers/flows/claude-compat-probe/flow.mdx",
       "capabilities": [
         "fs:read:**",
         "fs:write:.smithers/reports/claude-compat-probe.json",
-        "proc:spawn:claude *",
-        "proc:spawn:sh .smithers/run-zig.sh *",
+        "proc:spawn:claude --version",
+        "proc:spawn:claude --help",
+        "proc:spawn:npm view @anthropic-ai/claude-code version",
         "proc:spawn:rg *"
       ],
       "model": "sol",
@@ -201,8 +212,14 @@
       "src/hook.zig",
       "src/daemon.zig",
       "build.zig.zon",
+      "build.zig",
+      "package.json",
+      "bin/claude-p.js",
       "scripts/install.js",
-      "scripts/publish.mjs"
+      "scripts/publish.mjs",
+      "scripts/build-in-linux.sh",
+      ".github/workflows/**",
+      ".smithers/**"
     ],
     "maintainers": [
       "roninjin10"

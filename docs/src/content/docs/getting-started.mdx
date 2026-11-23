@@ -6,7 +6,7 @@ description: Install claude-p, verify your environment, and run text, JSON, stre
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import LifecyclePipelineDiagram from '../../components/diagrams/LifecyclePipelineDiagram.astro';
 
-`claude-p` is a drop-in replacement for `claude -p`. It spawns your installed `claude` binary inside an in-process [zmux](https://github.com/smithersai/zmux) PTY, drives the interactive UI, and emits `claude -p`-compatible stdout.
+`claude-p` emulates `claude -p`. It spawns your installed `claude` binary inside an in-process [zmux](https://github.com/smithersai/zmux) PTY, drives the interactive UI, and prints `claude -p`-shaped `text` and `json` results. `stream-json` emits Claude Code session-transcript lines plus a `claude -p`-shaped `result` envelope; see [Stream Live JSON Output](/claude-p/guides/streaming-json/) for how that differs from native `claude -p`.
 
 ## Prerequisites
 
@@ -38,7 +38,7 @@ import LifecyclePipelineDiagram from '../../components/diagrams/LifecyclePipelin
   </TabItem>
 </Tabs>
 
-On `npm install`, `scripts/install.js` fetches `claude-p-<platform>-<arch>.gz` and `SHA256SUMS` from GitHub Releases and verifies the SHA-256 digest before extracting the binary. A digest mismatch aborts installation with exit code `1`.
+On `npm install`, `scripts/install.js` fetches `claude-p-<platform>-<arch>.gz` from GitHub Releases and verifies its SHA-256 digest against the `checksums.json` bundled in the npm tarball before extracting the binary. A digest mismatch aborts installation with exit code `1`. A connectivity failure (DNS, offline, HTTP error, timeout) prints a warning and exits `0` unless `CLAUDE_P_STRICT_INSTALL=1`; local filesystem errors such as `ENOSPC` exit `1`. See [Installation, Checksums, and Builds](/claude-p/reference/installation-and-builds/).
 
 ## Three ways to run it
 

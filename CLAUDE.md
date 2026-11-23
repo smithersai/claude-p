@@ -10,7 +10,10 @@
 `claude-p` (`0.1.3`) — a Zig 0.15.2 library and CLI that emulates `claude -p`
 by driving the interactive `claude` binary inside an in-process
 [zmux][zmux] PTY session, reading lifecycle events over a per-run hook FIFO,
-and emitting `claude -p`-compatible output.
+and emitting `claude -p`-shaped `text`/`json` results. `stream-json` is
+filtered session-transcript JSONL plus a `claude -p`-shaped final `result`
+envelope, not native `claude -p` stream-json (transcript lines use
+`sessionId`, not `session_id`). Never call it wire-compatible or drop-in.
 
 [zmux]: https://github.com/smithersai/zmux
 
@@ -34,20 +37,21 @@ and emitting `claude -p`-compatible output.
 ## Build and test commands
 
 ```bash
-# Unit tests (141 tests, no external `claude` required; use Zig 0.15.2)
-zig build test
-zig build test -Dtest-filter="daemon"
+# Unit tests (no external `claude` required; use Zig 0.15.2).
+# Never hard-code test counts in docs; `--summary all` prints them.
+zig build test --summary all
 
 # Release build
 zig build -Doptimize=ReleaseSafe
 
 # Version & release script hygiene (same checks as CI)
-node scripts/publish.mjs --check-versions
-node --check scripts/install.js && node --check scripts/publish.mjs
+node scripts/publish.mjs --check-versions --expect-version=0.1.3
+node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
+sh -n scripts/build-in-linux.sh && sh -n .smithers/run-zig.sh
+node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
 
-# End-to-end tests against the real `claude` binary on $PATH (8 tests)
-CLAUDE_P_E2E=1 zig build test-integration
-CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="resume"
+# End-to-end tests against the real `claude` binary on $PATH
+CLAUDE_P_E2E=1 zig build test-integration --summary all
 
 # Documentation site (Starlight)
 cd docs && npm run build
@@ -57,19 +61,20 @@ cd docs && npm run build
 
 | Path | Role |
 | --- | --- |
-| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, exit codes (`0`, `1`, `2`, `124`). |
+| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, `<stdin>\n\n<PROMPT>` composition (3 s grace), signal handlers, exit-code mapping (`0`, `1`, `2`, `124`, `128 + sig`). |
 | `src/root.zig` | Public Zig library facade and `version`. |
-| `src/args.zig` | Argparse for Claude Code 2.1.330 flags, `--extra-hook`, `--setting-json`, `--transcript-idle-timeout`. |
-| `src/terminal.zig` | Stateless DEC/XTerm responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t`). |
-| `src/hook.zig` | Inline `--settings`, `extra_hooks`, `extra_settings_json`, FIFO, `hook.sh`. |
-| `src/driver.zig` | One-shot lifecycle + shared `buildChildEnv`, `maybeHandleStartupDialogs`, `typePrompt` / `PasteChunker`. |
-| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`, `interrupt`, `system/init`, `result`, watchdogs, `CLAUDE_P_PTY_TRACE`). |
-| `src/transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`. |
-| `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`. |
-| `src/emit.zig` | `text`, `json`, `stream-json`, and daemon `emitErrorResult` formatters. |
+| `src/args.zig` | Argparse (`--flag=value`, `-r`, `-c`), variadic flags, `rejected_flags`, boolean passthrough list, cross-flag rules. |
+| `src/terminal.zig` | Streaming `DecDecoder` DEC/XTerm responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t` with configured rows/cols). |
+| `src/hook.zig` | Inline `--settings` (5 relay hooks), `extra_hooks` (`--extra-hook`), `extra_settings_json` (`--setting-json`), FIFO, nonce-tagged `hook.sh`. |
+| `src/driver.zig` | One-shot lifecycle, env filter, intent-gated startup dialog state machine, `PasteChunker`, watchdog, `StopFailure`, `requestInterrupt`. |
+| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`/`pong`, `interrupt`, `system/init`, `result`, `type:"error"` protocol frames, 64-prompt / 64 MiB queue, idle + transcript watchdogs, `[pty-trace]` off unless `--debug` or `CLAUDE_P_PTY_TRACE`). |
+| `src/transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`; dedups records by `uuid` and usage by `message.id`. |
+| `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`; discards a partial line over 16 MiB. |
+| `src/emit.zig` | `text`, `json`, and `stream-json` formatters. |
 | `tests/integration.zig` | Real-`claude` end-to-end suite (`CLAUDE_P_E2E=1`). |
 | `bin/claude-p.js` | Node shim spawning `prebuilt/<platform>-<arch>/claude-p` and forwarding signals. |
-| `scripts/install.js` | Postinstall binary downloader with `SHA256SUMS` verification. |
+| `scripts/install.js` | Postinstall binary downloader; verifies against bundled `checksums.json`, else required `SHA256SUMS`; reuses a binary only on exact `binSha256` match and unlinks a mismatched one before downloading; only connectivity failures (`isConnectivityError`) warn and exit `0` unless `CLAUDE_P_STRICT_INSTALL=1`; filesystem errors exit `1`. |
+| `scripts/publish.mjs` | Release builder; checks tag peeled commit == `HEAD` (local and remote), writes `SHA256SUMS` + `checksums.json`, verifies existing release assets by digest, stages npm publish in a private temp dir (never writes repo-root `checksums.json`). |
 | `docs/` | Astro + Starlight documentation site. |
 
 ## Load-bearing invariants and gotchas
@@ -79,33 +84,87 @@ cd docs && npm run build
   `shared.pending_to_pty` under `shared.write_mutex` and flush from the main
   loop (`flushPendingToPty`).
 - **Ink hangs without DEC/XTerm replies.** Every `pane_output` chunk must pass
-  through `terminal.respondToDecQueries`.
+  through the session's stateful `terminal.DecDecoder.feed` (`shared.dec`),
+  which carries a query split across reads. Never use the one-shot
+  `respondToDecQueries` on a live stream; it drops split queries.
+- **Hook relay.** Five relay hooks (`SessionStart`, `UserPromptSubmit`,
+  `Stop`, `StopFailure`, `PermissionRequest`) always sit at index 0. `hook.sh`
+  embeds the FIFO path and a per-run nonce and writes
+  `<nonce>\t<event>\t<json>`; parse with `parseLineWithNonce`.
+  `CLAUDE_P_FIFO` is never exported and `buildChildEnv` drops an inherited one.
+- **`PermissionRequest` fails fast.** One-shot returns
+  `RunError.PermissionPromptBlocked` (exit `2`); the daemon sends ESC, emits a
+  `type:"result"` frame (`subtype:"error_during_execution"`,
+  `error:"permission_prompt_blocked"`), and returns to `.idle`.
+  `--setting-json` rejects `"disableAllHooks": true` and nesting past 128.
+- **Startup dialogs are intent-gated.** `dialogConfirmAllowed` answers
+  bypass-permissions or development-channels dialogs only when this
+  invocation's flags ask for them; otherwise fail with
+  `UnexpectedStartupDialog` and send no key.
 - **Open FIFO before spawn.** Open `events.fifo` with `O_RDONLY | O_NONBLOCK`
   before creating the `NativeSession` so `hook.sh` never blocks on write.
-- **Targeted env filtering (`shouldStripChildEnv`).** Shared by one-shot and
-  daemon. Strip only nested-session markers (`CLAUDECODE`, `AI_AGENT`,
-  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`,
-  `CLAUDE_CODE_SESSION_ID`, and prefixes `CLAUDE_CODE_SESSION_`,
-  `CLAUDE_CODE_PARENT_`, `CLAUDE_CODE_SUBAGENT_`). **Never** blanket-strip
-  `CLAUDE_CODE_*`—that breaks `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex, and
-  Foundry auth.
-- **Claude Code 2.1 trust dialog defaults to "No, exit".** Both modes use
-  `maybeHandleStartupDialogs`, which verifies `❯` sits on the affirmative
-  option on repaint before sending `\r`.
-- **macOS `TTYHOG` is 1024 bytes.** Both modes submit prompts through
+- **Targeted env filtering (`shouldStripChildEnv`).** Strip only nested-session
+  markers (`CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
+  and prefixes `CLAUDE_CODE_SESSION_`, `CLAUDE_CODE_PARENT_`,
+  `CLAUDE_CODE_SUBAGENT_`). **Never** blanket-strip `CLAUDE_CODE_*`—that breaks
+  `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex, and Foundry auth.
+- **Claude Code 2.1 trust dialog defaults to "No, exit".** `maybeHandleStartupDialogs`
+  must verify `❯` sits on the affirmative option on repaint before sending `\r`.
+- **macOS `TTYHOG` is 1024 bytes.** Always submit one-shot prompts through
   `typePrompt` (`PasteChunker`: `<= 512` B UTF-8-safe chunks, `8 ms` gaps,
   `\x1b[201~` neutralization, `120 ms` Enter debounce).
-- **Daemon stale-`Stop` guard after `interrupt`.** If an `interrupt` window
-  (`1500 ms`) expires without `Stop`, `after_interrupt` stays true so a late
-  `Stop` from the canceled turn is ignored until the next turn receives
-  `UserPromptSubmit` or transcript bytes.
+- **Provisional `Stop`.** Both modes confirm at once on a
+  `stop_hook_summary` record with `preventedContinuation: false`, else wait a
+  fallback window (`150 ms`, `2000 ms` with `--extra-hook Stop=`;
+  `stopConfirmationNs`) so a blocking Stop hook can continue the turn. A later
+  `Stop` (`stop_hook_active: true`), `preventedContinuation: true`, or new
+  transcript assistant activity supersedes it.
 - **Stop / transcript flush race.** `Stop` can fire before the final assistant
-  line hits disk. Retry `parseFileFromOffset` up to 20×50 ms (30× on
-  `last_assistant_message` mismatch), then fall back to Stop's
-  `last_assistant_message`.
+  line hits disk. One pump-and-parse loop retries up to `20 × 20 ms`
+  (one-shot) or `30 × 25 ms` (daemon), exits early on a match with Stop's
+  `last_assistant_message`, then falls back to that text.
+- **`StopFailure` keeps usage.** Both modes parse the transcript first, force
+  `is_error: true`, and use the hook's error text; the daemon adds
+  `"error":"stop_failure"`. `synthesizeStopFailureSummary` is only the
+  no-transcript fallback.
+- **Daemon paste is incremental.** `PendingPaste` writes one `PasteChunker`
+  chunk per loop tick so `ping`/`interrupt` stay responsive; never call the
+  blocking `typePrompt` from `daemon.zig`.
 - **Resume offset isolation.** On `--resume`/`--continue`, wait for restored UI
   quiescence (`400 ms`, cap `6000 ms`), snapshot `pre_prompt_transcript_offset`,
   and parse only appended bytes via `parseFileFromOffset`.
+- **Daemon shares driver startup code.** `src/daemon.zig` calls
+  `driver.maybeHandleStartupDialogs`, `driver.PasteChunker`, and
+  `driver.buildChildEnv`. Fix startup, paste, and env bugs once in
+  `src/driver.zig` and test both modes.
+- **Exit codes.** `0` success, `1` `is_error` (including `StopFailure`), `2`
+  usage or runtime error (including `InvalidCwd`, `UnexpectedStartupDialog`,
+  `PermissionPromptBlocked`, `InvalidOptions`, and `Interrupted` without a
+  caught signal), `124` every timeout in both modes including one-shot
+  `TranscriptStalled` (`exitCodeForRunError` in `src/main.zig`, `daemon.run`
+  for `session_start_timeout`/`idle_timeout`/`transcript_stalled`), `128 + sig`
+  set by the native binary after a signal (a duplicate signal within 2 s is
+  ignored so `bin/claude-p.js` process-group `SIGINT` still cleans up).
+- **Rejected print-only flags.** `--max-turns`, `--fallback-model`,
+  `--include-partial-messages`, `--forward-subagent-text`,
+  `--replay-user-messages`, `--verbose-thinking` exit `2` (`UnsupportedFlag`
+  in the CLI, `RunError.InvalidOptions` from `validateOptions`). Daemon mode
+  rejects `--output-format text`/`json`.
+- **Daemon frames.** Non-turn protocol rejections (`invalid_json`,
+  `unsupported_frame_type`, `invalid_user_message`,
+  `unsupported_content_block`, `stdin_line_too_large`, `fifo_line_too_large`,
+  `queue_full`) are `{"type":"error","error":"<reason>"}`. `type:"result"` is
+  reserved for turn-ending and session-ending frames (startup failures
+  `claude_not_found`/`spawn_failed` included). Blank stdin lines are ignored
+  silently. EOF before `SessionStart` with nothing queued exits `0`.
+- **Redacted failure diagnostics.** Default stderr shows stage, cause, status,
+  timings, and PTY bytes only; the screen excerpt needs `--debug` or
+  `CLAUDE_P_DEBUG_SCREEN=1`.
+- **Install trust root.** `checksums.json` (bundled by `publish.mjs`) wins over
+  `SHA256SUMS`; `SHA256SUMS` 404 is fatal for `>= 0.1.3`. Integrity failures
+  always exit `1`; only connectivity failures may exit `0`. Never add a silent
+  unverified fallback.
 
 ## Code conventions
 
