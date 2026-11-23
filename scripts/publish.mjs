@@ -146,14 +146,16 @@ function capture(cmd, argv, { cwd = root } = {}) {
 // Version agreement: package.json, build.zig.zon, src/root.zig
 // ---------------------------------------------------------------------------
 
-function readVersions() {
-  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+export function parseVersionsFromText({ packageJson, buildZigZon, rootZig }) {
+  const pkgParsed = JSON.parse(packageJson);
+  if (!pkgParsed || typeof pkgParsed.version !== "string" || pkgParsed.version.length === 0) {
+    throw new Error("package.json: no string `version` field found");
+  }
+  const pkg = pkgParsed.version;
 
-  const zon = readFileSync(join(root, "build.zig.zon"), "utf8");
-  const zonMatch = zon.match(/^\s*\.version\s*=\s*"([^"]+)"/m);
+  const zonMatch = buildZigZon.match(/^\s*\.version\s*=\s*"([^"]+)"/m);
   if (!zonMatch) throw new Error("build.zig.zon: no `.version = \"...\"` field found");
 
-  const rootZig = readFileSync(join(root, "src", "root.zig"), "utf8");
   const rootMatch = rootZig.match(
     /pub const version\s*:\s*std\.SemanticVersion\s*=\s*\.\{\s*\.major\s*=\s*(\d+)\s*,\s*\.minor\s*=\s*(\d+)\s*,\s*\.patch\s*=\s*(\d+)/,
   );
@@ -168,16 +170,30 @@ function readVersions() {
   };
 }
 
-function checkVersions(expected) {
-  const versions = readVersions();
+export function checkVersionAgreement(versions, expected) {
   const want = expected ?? versions["package.json"];
   const bad = Object.entries(versions).filter(([, v]) => v !== want);
-  for (const [file, v] of Object.entries(versions)) {
-    console.log(`  ${file.padEnd(14)} ${v}${v === want ? "" : `  ✗ (want ${want})`}`);
-  }
   if (bad.length) {
     throw new Error(`version mismatch: expected ${want} everywhere, got ` + bad.map(([f, v]) => `${f}=${v}`).join(", "));
   }
+  return want;
+}
+
+function readVersions() {
+  return parseVersionsFromText({
+    packageJson: readFileSync(join(root, "package.json"), "utf8"),
+    buildZigZon: readFileSync(join(root, "build.zig.zon"), "utf8"),
+    rootZig: readFileSync(join(root, "src", "root.zig"), "utf8"),
+  });
+}
+
+function checkVersions(expected) {
+  const versions = readVersions();
+  const want = expected ?? versions["package.json"];
+  for (const [file, v] of Object.entries(versions)) {
+    console.log(`  ${file.padEnd(14)} ${v}${v === want ? "" : `  ✗ (want ${want})`}`);
+  }
+  checkVersionAgreement(versions, expected);
   if (!SEMVER.test(want)) throw new Error(`version ${JSON.stringify(want)} is not strict semver`);
   if (!existsSync(join(root, "LICENSE"))) {
     throw new Error("LICENSE file is missing (package.json `files` ships it)");

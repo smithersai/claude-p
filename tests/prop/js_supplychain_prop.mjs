@@ -19,6 +19,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import {
+  parseVersionsFromText,
+  checkVersionAgreement,
+  parseArgs as parsePublishArgs,
+} from "../../scripts/publish.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1734,3 +1739,65 @@ const missingScenario = eager(() =>
   ),
 );
 test("launcher: missing binary exits 2 with install guidance", { skip }, () => missingScenario);
+
+// ---------------------------------------------------------------------------
+// 5. scripts/publish.mjs — version lockstep & CLI arg parser fuzzing
+// ---------------------------------------------------------------------------
+
+test("publish.mjs: parseVersionsFromText, checkVersionAgreement, and parsePublishArgs over 4000 fuzzed inputs", () => {
+  const rng = new Rng("publish-version-fuzz");
+  const nasty = "abc019 \t\r\n._-\"'=/{}[]()$?\\";
+
+  for (let trial = 0; trial < 4000; trial++) {
+    const maj = rng.int(0, 99);
+    const min = rng.int(0, 99);
+    const pat = rng.int(0, 99);
+    const ver = `${maj}.${min}.${pat}`;
+    const ctx = rng.ctx(trial);
+
+    const pkgJson = JSON.stringify({ name: "claude-p", version: ver });
+    const zon = `.{\n    .name = .claude_p,\n    .version = "${ver}",\n}\n`;
+    const rootZig = `pub const version: std.SemanticVersion = .{ .major = ${maj}, .minor = ${min}, .patch = ${pat} };\n`;
+
+    const parsed = parseVersionsFromText({
+      packageJson: pkgJson,
+      buildZigZon: zon,
+      rootZig,
+    });
+    assert.equal(parsed["package.json"], ver, ctx);
+    assert.equal(parsed["build.zig.zon"], ver, ctx);
+    assert.equal(parsed["src/root.zig"], ver, ctx);
+    assert.equal(checkVersionAgreement(parsed), ver, ctx);
+    assert.equal(checkVersionAgreement(parsed, ver), ver, ctx);
+
+    // Mismatch in ANY of the three sources or expected tag MUST throw.
+    const badVer = `${maj}.${min}.${pat + 1}`;
+    assert.throws(() => checkVersionAgreement(parsed, badVer), /version mismatch/, ctx);
+    const key = rng.pick(["package.json", "build.zig.zon", "src/root.zig"]);
+    assert.throws(() => checkVersionAgreement({ ...parsed, [key]: badVer }), /version mismatch/, ctx);
+
+    // Arbitrary malformed inputs must throw an Error cleanly (never return undefined or hang).
+    let garbage = "";
+    const glen = rng.int(0, 64);
+    for (let j = 0; j < glen; j++) garbage += nasty[rng.below(nasty.length)];
+    try {
+      const out = parseVersionsFromText({
+        packageJson: garbage,
+        buildZigZon: garbage,
+        rootZig: garbage,
+      });
+      for (const v of Object.values(out)) {
+        assert.equal(typeof v, "string", ctx);
+        assert.ok(v.length > 0, ctx);
+      }
+    } catch (err) {
+      assert.ok(err instanceof Error, ctx);
+    }
+
+    // parseArgs preserves '=' characters inside string values (e.g. --expect-tag=v1=2).
+    const flagVal = `v${rng.int(0, 99)}=${rng.int(0, 99)}`;
+    const flags = parsePublishArgs([`--expect-tag=${flagVal}`, "--dry-run"]);
+    assert.equal(flags["expect-tag"], flagVal, ctx);
+    assert.equal(flags["dry-run"], true, ctx);
+  }
+});

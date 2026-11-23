@@ -37,9 +37,23 @@ envelope, not native `claude -p` stream-json (transcript lines use
 ## Build and test commands
 
 ```bash
-# Unit tests (no external `claude` required; use Zig 0.15.2).
+# Unit, property, concurrency and fuzz-corpus tests (no external `claude`
+# required; use Zig 0.15.2). Includes everything in `test-prop`.
 # Never hard-code test counts in docs; `--summary all` prints them.
 zig build test --summary all
+zig build test -Dtest-filter="daemon"
+
+# Property + fuzz suites only (tests/prop_fuzz.zig -> tests/prop/*.zig).
+# On macOS this replays every fuzz corpus; it does not mutate inputs.
+zig build test-prop
+
+# Live coverage-guided fuzzing (Linux only in Zig 0.15.2). Runs every
+# std.testing.fuzz target in parallel; corpus persists in ~/.cache/claude-p-fuzz.
+ZIG_BIN=~/.local/zig-0.15.2/zig FUZZ_SECONDS=600 ./scripts/fuzz-linux.sh
+./scripts/fuzz-linux.sh "transcript"     # one area
+
+# Node supply-chain property/fuzz suite (install.js, publish.mjs, launcher)
+node --test tests/prop/js_supplychain_prop.mjs
 
 # Release build
 zig build -Doptimize=ReleaseSafe
@@ -72,6 +86,8 @@ cd docs && npm run build
 | `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`; discards a partial line over 16 MiB. |
 | `src/emit.zig` | `text`, `json`, and `stream-json` formatters. |
 | `tests/integration.zig` | Real-`claude` end-to-end suite (`CLAUDE_P_E2E=1`). |
+| `tests/prop_fuzz.zig`, `tests/prop/*.zig` | Property suites and `std.testing.fuzz` targets for every module, plus concurrency and mock-PTY end-to-end fuzzing. |
+| `scripts/fuzz-linux.sh` | Linux coverage-guided fuzz campaign runner (all targets, one instrumented binary). |
 | `bin/claude-p.js` | Node shim spawning `prebuilt/<platform>-<arch>/claude-p` and forwarding signals. |
 | `scripts/install.js` | Postinstall binary downloader; verifies against bundled `checksums.json`, else required `SHA256SUMS`; reuses a binary only on exact `binSha256` match and unlinks a mismatched one before downloading; only connectivity failures (`isConnectivityError`) warn and exit `0` unless `CLAUDE_P_STRICT_INSTALL=1`; filesystem errors exit `1`. |
 | `scripts/publish.mjs` | Release builder; checks tag peeled commit == `HEAD` (local and remote), writes `SHA256SUMS` + `checksums.json`, verifies existing release assets by digest, stages npm publish in a private temp dir (never writes repo-root `checksums.json`). |

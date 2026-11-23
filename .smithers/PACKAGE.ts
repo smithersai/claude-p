@@ -22,7 +22,8 @@ const jsSources = S.Filegroup({
     S.file("//bin/claude-p.js"),
     S.file("//scripts/install.js"),
     S.file("//scripts/publish.mjs"),
-    S.file("//scripts/build-in-linux.sh")
+    S.file("//scripts/build-in-linux.sh"),
+    S.file("//scripts/fuzz-linux.sh")
   ]
 })
 
@@ -75,7 +76,7 @@ const testJs = S.Shell.Test({
   args: [
     "-eu",
     "-c",
-    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && node --test .smithers/tests/install-checksum.test.mjs .smithers/tests/factory-projections.test.mjs tests/prop/js_supplychain_prop.mjs"
+    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh && node --test .smithers/tests/install-checksum.test.mjs .smithers/tests/factory-projections.test.mjs tests/prop/js_supplychain_prop.mjs"
   ],
   sandbox: "none",
   timeout: "2m",

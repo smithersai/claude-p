@@ -349,6 +349,8 @@ and `64 MiB` of text.
   (falling back to Stop's `last_assistant_message`). A `StopFailure` turn
   keeps the parsed usage, sets `is_error: true`, and carries
   `"error":"stop_failure"`.
+  `readFileRange` returns an exactly sized buffer when the file is shorter
+  than the requested range.
 - `{"type":"pong","ts":<unix_ms>}` — emitted in reply to `ping`.
 - Protocol errors (`emit.writeProtocolError`) —
   `{"type":"error","error":"<reason>"}`. They reject one input or FIFO line,
@@ -410,7 +412,7 @@ and `64 MiB` of text.
 | `--output-format` | Stdout |
 | --- | --- |
 | `text` (default) | Final assistant text + `\n` (avoids double trailing newline). |
-| `json` | Single JSON line: `{type:"result", subtype, session_id, result, is_error, duration_ms, duration_api_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}, permission_denials:[]}`. |
+| `json` | Single JSON line: `{type:"result", subtype, session_id, result, is_error, duration_ms, duration_api_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}, permission_denials:[]}`. `total_cost_usd` is always a finite number: a non-finite transcript value (e.g. `1e400`) is ignored. |
 | `stream-json` | Every JSON-object line appended to the session transcript during the run, except transcript `type:"result"` lines, streamed as flushed, then the `result` object above. Requires `--verbose` in one-shot mode. |
 
 `subtype` is `"success"` when `is_error` is false. When true it is the
@@ -598,7 +600,24 @@ Submodules re-exported: `args`, `transcript`, `emit`, `hook`, `terminal`,
 - **Version lockstep:** `package.json`, `build.zig.zon`, and `src/root.zig`
   must agree (verified in CI by `node scripts/publish.mjs --check-versions`).
 - **Unit tests:** `zig build test --summary all` runs every module test in
-  `src/` (zero external dependencies) and prints the current count.
+  `src/` (zero external dependencies), the CLI tests, and the whole
+  `test-prop` suite, and prints the current count (supports
+  `-Dtest-filter="<substring>"`).
+- **Property and fuzz tests:** `zig build test-prop` (`tests/prop_fuzz.zig`
+  importing `tests/prop/*.zig`). Every module has `std.testing.fuzz` targets
+  with model or round-trip oracles, plus allocation-failure sweeps, a
+  multi-threaded `onZmuxEvent`/`SharedState` test, a stateful daemon model, and
+  randomized end-to-end runs of `driver.run` through a real zmux PTY and FIFO
+  against a scripted `claude`. Without `--fuzz` each target replays its corpus.
+- **Coverage-guided fuzzing:** `scripts/fuzz-linux.sh` (Linux only; Zig 0.15.2
+  `--fuzz` uses LLVM SanCov, so the `test-prop` artifact sets `use_llvm`). It
+  builds one instrumented binary, fuzzes every target in parallel, reports
+  executions and PC coverage, keeps the corpus in `~/.cache/claude-p-fuzz`, and
+  exits 1 on any crash, failed check, leak, or error log. CI runs a short pass.
 - **Integration tests:** `CLAUDE_P_E2E=1 zig build test-integration --summary all`
   runs `tests/integration.zig` against the real `claude` binary. No mocks.
-- **JS supply-chain tests:** `node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs`.
+- **JS supply-chain tests:** `node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs`
+  fuzzes `parseSha256Sums`/`verifyChecksum`, the launcher, and the
+  `publish.mjs` version checks (`parseVersionsFromText`,
+  `checkVersionAgreement`, `parseArgs`, exported for testing; the CLI
+  only runs when executed).

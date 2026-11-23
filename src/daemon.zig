@@ -132,7 +132,7 @@ pub const interrupt_window_ms: u64 = 1500;
 /// for that turn's `Stop`, so a late one can arrive after the next prompt was
 /// typed. Only the new prompt acknowledgement distinguishes that Stop from
 /// residual transcript writes belonging to the interrupted turn.
-fn stopBelongsToTurn(state: State, prompt_acked: bool) bool {
+pub fn stopBelongsToTurn(state: State, prompt_acked: bool) bool {
     return state == .busy and prompt_acked;
 }
 
@@ -143,16 +143,19 @@ fn monotonicNs() i64 {
 pub const requestInterrupt = driver_mod.requestInterrupt;
 const interrupted = driver_mod.isInterrupted;
 
-/// Milliseconds from `start_ns` to `now_ns`, clamped at 0.
-fn elapsedMs(start_ns: i128, now_ns: i128) u64 {
+/// Milliseconds from `start_ns` to `now_ns`, clamped at 0 and saturated at
+/// `maxInt(u64)`. The difference is taken in u128 so no pair of i128 clock
+/// values can overflow.
+pub fn elapsedMs(start_ns: i128, now_ns: i128) u64 {
     if (now_ns <= start_ns) return 0;
-    return @intCast(@divTrunc(now_ns - start_ns, std.time.ns_per_ms));
+    const diff_ns: u128 = @as(u128, @bitCast(now_ns)) -% @as(u128, @bitCast(start_ns));
+    return std.math.cast(u64, diff_ns / std.time.ns_per_ms) orelse std.math.maxInt(u64);
 }
 
 /// Translate daemon Options to a driver.Options (which buildArgv takes).
 /// Prompt stays empty — buildArgv never reads it, and the daemon never
 /// passes a prompt on argv anyway.
-fn toDriverOptions(opts: Options) driver_mod.Options {
+pub fn toDriverOptions(opts: Options) driver_mod.Options {
     return .{
         .prompt = "",
         .output_format = .stream_json,
@@ -365,7 +368,7 @@ pub fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
 
 /// Read the byte range [start_pos..end_pos) from a file via pread. Caller
 /// owns the returned slice.
-fn readFileRange(allocator: std.mem.Allocator, file: std.fs.File, start_pos: u64, end_pos: u64) ![]u8 {
+pub fn readFileRange(allocator: std.mem.Allocator, file: std.fs.File, start_pos: u64, end_pos: u64) ![]u8 {
     const len = std.math.cast(usize, end_pos -| start_pos) orelse return error.OutOfMemory;
     const buf = try allocator.alloc(u8, len);
     errdefer allocator.free(buf);
@@ -662,7 +665,7 @@ fn writeError(allocator: std.mem.Allocator, writer: *std.Io.Writer, reason: []co
 /// Emit a minimal `claude -p stream-json` style `system:init` envelope.
 /// Used at startup so hubs can capture the session_id and treat the agent
 /// as alive without waiting for the first transcript flush.
-fn emitSystemInit(writer: *std.Io.Writer, session_id: []const u8) !void {
+pub fn emitSystemInit(writer: *std.Io.Writer, session_id: []const u8) !void {
     var jw = std.json.Stringify{ .writer = writer, .options = .{} };
     try jw.beginObject();
     try jw.objectField("type");
@@ -678,7 +681,7 @@ fn emitSystemInit(writer: *std.Io.Writer, session_id: []const u8) !void {
 /// Emit a `{"type":"pong","ts":<unix_ms>}` health-probe response. Produced by
 /// the main event loop in reply to a `ping` frame; its arrival proves the loop
 /// is not wedged (see SPEC §2.7).
-fn emitPong(writer: *std.Io.Writer) !void {
+pub fn emitPong(writer: *std.Io.Writer) !void {
     var jw = std.json.Stringify{ .writer = writer, .options = .{} };
     try jw.beginObject();
     try jw.objectField("type");
@@ -742,7 +745,7 @@ fn settleBeforePrompt(
     }
 }
 
-fn ptyTraceInterval(debug: bool, setting: ?[]const u8) ?i128 {
+pub fn ptyTraceInterval(debug: bool, setting: ?[]const u8) ?i128 {
     const default: ?i128 = if (debug) 60 * std.time.ns_per_s else null;
     const raw = std.mem.trim(u8, setting orelse return default, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(raw, "off") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) return null;
@@ -1402,6 +1405,9 @@ test "elapsedMs: clamps a start in the future to 0" {
     try testing.expectEqual(@as(u64, 1500), elapsedMs(0, 1500 * std.time.ns_per_ms));
     try testing.expectEqual(@as(u64, 0), elapsedMs(10, 5));
     try testing.expectEqual(@as(u64, 0), elapsedMs(7, 7));
+    // Regression: extreme clock values overflowed the i128 subtraction.
+    try testing.expectEqual(std.math.maxInt(u64), elapsedMs(std.math.minInt(i128), std.math.maxInt(i128)));
+    try testing.expectEqual(std.math.maxInt(u64), elapsedMs(0, std.math.maxInt(i128)));
 }
 
 test "Options: hardening defaults match the contract" {

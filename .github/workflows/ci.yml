@@ -30,7 +30,7 @@ jobs:
       - name: Release scripts parse & SHA256 installer tests
         run: |
           node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
-          sh -n scripts/build-in-linux.sh
+          sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh
           node --test .smithers/tests/install-checksum.test.mjs
           node --test tests/prop/js_supplychain_prop.mjs
 
@@ -60,6 +60,9 @@ jobs:
 
       - name: zig build test
         run: zig build test
+
+      - name: Coverage-guided Zig fuzz (all targets, 60s)
+        run: FUZZ_SECONDS=60 ./scripts/fuzz-linux.sh
 
   cross-compile:
     # Same targets and flags as scripts/publish.mjs, so a release tag never

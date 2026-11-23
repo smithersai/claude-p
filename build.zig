@@ -74,9 +74,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "claude_p", .module = claude_p },
+                .{ .name = "zmux", .module = zmux_mod },
             },
         }),
         .filters = test_filters,
+        // Zig 0.15.2 SanCov PC-guard instrumentation (`--fuzz`) requires the
+        // LLVM backend; x86_64-linux Debug defaults to self-hosted without it.
+        .use_llvm = true,
     });
     const run_prop_tests = b.addRunArtifact(prop_tests);
     const prop_step = b.step("test-prop", "Run property-based and fuzz tests (pass --fuzz for live coverage-guided fuzzing)");

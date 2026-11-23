@@ -64,7 +64,7 @@ pub fn emitJson(
     try jw.objectField("num_turns");
     try jw.write(s.num_turns);
     try jw.objectField("total_cost_usd");
-    try jw.write(s.total_cost_usd);
+    try jw.write(if (std.math.isFinite(s.total_cost_usd)) s.total_cost_usd else @as(f64, 0.0));
     try jw.objectField("usage");
     try jw.beginObject();
     try jw.objectField("input_tokens");

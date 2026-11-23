@@ -239,7 +239,8 @@ The Zig API (`claude_p.Options`) also exposes hook/settings composition via `ext
 git clone https://github.com/smithersai/claude-p
 cd claude-p
 zig build -Doptimize=ReleaseSafe   # requires Zig 0.15.2
-zig build test --summary all       # unit tests (no external claude needed)
+zig build test --summary all       # unit, property & fuzz-corpus tests (no external claude needed)
+./scripts/fuzz-linux.sh            # Linux: coverage-guided fuzzing of every target
 CLAUDE_P_E2E=1 zig build test-integration --summary all  # real-claude end-to-end tests
 node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
 ```

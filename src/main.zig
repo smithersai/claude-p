@@ -940,6 +940,26 @@ test "launcher: SIGINT to the process group unwinds claude-p, exits 130, and lea
     try t.expect(gone);
 }
 
+test "exhaustive: every driver.RunError and daemon.RunError maps to exit code 2 or 124" {
+    const t = std.testing;
+    const timeouts = [_][]const u8{ "SessionStartTimeout", "StopTimeout", "IdleTimeout", "TranscriptStalled" };
+    inline for (.{ claude_p.driver.RunError, claude_p.daemon.RunError }) |E| {
+        inline for (@typeInfo(E).error_set.?) |err_field| {
+            const err = @field(anyerror, err_field.name);
+            const code = exitCodeForRunError(err);
+            var is_timeout = false;
+            for (timeouts) |name| {
+                if (std.mem.eql(u8, err_field.name, name)) is_timeout = true;
+            }
+            if (is_timeout) {
+                try t.expectEqual(@as(u8, 124), code);
+                try t.expect(runErrorMessage(err) != null);
+            } else {
+                try t.expectEqual(@as(u8, 2), code);
+            }
+        }
+    }
+}
 // std.fs.File.stdout() / .stderr() return a File; we need a Writer to use the
 // std.Io.Writer interface.
 var stdout_buf: [4096]u8 = undefined;

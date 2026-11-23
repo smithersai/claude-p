@@ -278,7 +278,9 @@ fn parseRecords(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOpti
             }
             result_turns = unsignedField(u32, obj, "num_turns");
             if (obj.get("total_cost_usd")) |x| switch (x) {
-                .float => total_cost_usd = x.float,
+                .float => if (std.math.isFinite(x.float)) {
+                    total_cost_usd = x.float;
+                },
                 .integer => total_cost_usd = @floatFromInt(x.integer),
                 else => {},
             };
@@ -423,6 +425,17 @@ test "parse: result event wins for final text + flags" {
     try testing.expectEqual(@as(u32, 2), s.num_turns);
     try testing.expectApproxEqAbs(@as(f64, 0.0421), s.total_cost_usd, 1e-9);
     try testing.expectEqual(@as(u64, 9120), s.duration_api_ms);
+}
+
+test "parse: a non-finite total_cost_usd is ignored" {
+    // Regression: 1e400 parsed to inf, and emitJson then wrote invalid JSON.
+    const jsonl =
+        \\{"type":"result","subtype":"success","session_id":"r","result":"final","is_error":false,"total_cost_usd":1e400}
+        \\
+    ;
+    var s = try parse(testing.allocator, jsonl);
+    defer s.deinit(testing.allocator);
+    try testing.expectEqual(@as(f64, 0), s.total_cost_usd);
 }
 
 test "parse: error result event" {
