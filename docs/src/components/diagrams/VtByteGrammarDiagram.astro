@@ -1,0 +1,144 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'Byte-level wire grammar for all five queries answered by src/terminal.zig. Purple tiles mark escape introducers (ESC / CSI / DCS), blue tiles mark parameters, and green tiles mark final terminators.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 840 318" role="img" aria-label="VT escape sequence byte grammar for the five Ink startup queries">
+    <defs>
+      <marker id="vt-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
+      </marker>
+    </defs>
+
+    <!-- Column headers -->
+    <text x="16" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-muted)">PROBE</text>
+    <text x="116" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-muted)">INCOMING FROM INK (PTY OUT)</text>
+    <text x="412" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-muted)">REPLY FROM terminal.zig (PTY IN)</text>
+
+    <!-- Row 1: DA1 -->
+    <text x="16" y="64" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-text)">DA1</text>
+    <rect x="116" y="42" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="143" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="143" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="176" y="42" width="54" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" stroke-dasharray="3 2" />
+    <text x="203" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-blue)">[0]</text>
+    <text x="203" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">opt 30</text>
+    <rect x="236" y="42" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="258" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">c</text>
+    <text x="258" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">63</text>
+
+    <line x1="354" y1="59" x2="398" y2="59" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#vt-arr)" />
+
+    <rect x="412" y="42" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="439" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="439" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="472" y="42" width="76" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="510" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">? 1 ; 2</text>
+    <text x="510" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">VT100+AVO</text>
+    <rect x="554" y="42" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="576" y="57" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">c</text>
+    <text x="576" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">63</text>
+
+    <!-- Row 2: DA2 -->
+    <text x="16" y="118" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-text)">DA2</text>
+    <rect x="116" y="96" width="66" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="149" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [ &gt;</text>
+    <text x="149" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B 3E</text>
+    <rect x="188" y="96" width="54" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" stroke-dasharray="3 2" />
+    <text x="215" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-blue)">[0]</text>
+    <text x="215" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">opt 30</text>
+    <rect x="248" y="96" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="270" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">c</text>
+    <text x="270" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">63</text>
+
+    <line x1="354" y1="113" x2="398" y2="113" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#vt-arr)" />
+
+    <rect x="412" y="96" width="66" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="445" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [ &gt;</text>
+    <text x="445" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B 3E</text>
+    <rect x="484" y="96" width="84" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="526" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">0 ; 0 ; 0</text>
+    <text x="526" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">model/fw</text>
+    <rect x="574" y="96" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="596" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">c</text>
+    <text x="596" y="124" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">63</text>
+
+    <!-- Row 3: DSR -->
+    <text x="16" y="172" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-text)">DSR (CPR)</text>
+    <rect x="116" y="150" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="143" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="143" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="176" y="150" width="44" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="198" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">6</text>
+    <text x="198" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">36</text>
+    <rect x="226" y="150" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="248" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">n</text>
+    <text x="248" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">6E</text>
+
+    <line x1="354" y1="167" x2="398" y2="167" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#vt-arr)" />
+
+    <rect x="412" y="150" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="439" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="439" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="472" y="150" width="76" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="510" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">1 ; 1</text>
+    <text x="510" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">row 1 col 1</text>
+    <rect x="554" y="150" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="576" y="165" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">R</text>
+    <text x="576" y="178" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">52</text>
+
+    <!-- Row 4: XTVERSION -->
+    <text x="16" y="226" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-text)">XTVERSION</text>
+    <rect x="116" y="204" width="66" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="149" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [ &gt;</text>
+    <text x="149" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B 3E</text>
+    <rect x="188" y="204" width="54" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" stroke-dasharray="3 2" />
+    <text x="215" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-blue)">[0]</text>
+    <text x="215" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">opt 30</text>
+    <rect x="248" y="204" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="270" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">q</text>
+    <text x="270" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">71</text>
+
+    <line x1="354" y1="221" x2="398" y2="221" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#vt-arr)" />
+
+    <rect x="412" y="204" width="76" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="450" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC P &gt;|</text>
+    <text x="450" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">DCS header</text>
+    <rect x="494" y="204" width="94" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="541" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">claude-p</text>
+    <text x="541" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">ASCII name</text>
+    <rect x="594" y="204" width="60" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="624" y="219" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">ESC \</text>
+    <text x="624" y="232" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">ST 1B 5C</text>
+
+    <!-- Row 5: XTWINOPS 18t -->
+    <text x="16" y="280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-text)">XTWINOPS</text>
+    <rect x="116" y="258" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="143" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="143" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="176" y="258" width="52" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="202" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">18</text>
+    <text x="202" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">31 38</text>
+    <rect x="234" y="258" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="256" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">t</text>
+    <text x="256" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">74</text>
+
+    <line x1="354" y1="275" x2="398" y2="275" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#vt-arr)" />
+
+    <rect x="412" y="258" width="54" height="34" rx="5" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.2" />
+    <text x="439" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">ESC [</text>
+    <text x="439" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">1B 5B</text>
+    <rect x="472" y="258" width="112" height="34" rx="5" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.2" />
+    <text x="528" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">8 ; 40 ; 120</text>
+    <text x="528" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">40 rows × 120 cols</text>
+    <rect x="590" y="258" width="44" height="34" rx="5" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.2" />
+    <text x="612" y="273" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">t</text>
+    <text x="612" y="286" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" fill="var(--diag-muted)">74</text>
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

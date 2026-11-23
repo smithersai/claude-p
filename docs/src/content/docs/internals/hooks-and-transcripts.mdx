@@ -5,13 +5,14 @@ sidebar:
   order: 4
 ---
 
+import StopRaceTimelineDiagram from '../../../components/diagrams/StopRaceTimelineDiagram.astro';
 import ResumeOffsetDiagram from '../../../components/diagrams/ResumeOffsetDiagram.astro';
 
-`claude-p` treats Claude Code's own hook system and session JSONL log as the source of truth for lifecycle state and assistant output.
+`claude-p` treats Claude Code's hook events and session JSONL transcript as the source of truth for lifecycle state and assistant output.
 
 ## Per-run hook harness (`src/hook.zig`)
 
-Each invocation creates a private directory under `$TMPDIR` (falling back to `/tmp`):
+Each run creates a private directory under `$TMPDIR` (default `/tmp`):
 
 ```text
 $TMPDIR/claude-p-<pid>-<rand>/
@@ -19,7 +20,7 @@ $TMPDIR/claude-p-<pid>-<rand>/
 └── hook.sh       (mode 0700, POSIX /bin/sh relay)
 ```
 
-`hook.sh` reads the hook's JSON payload from stdin and appends one tab-delimited line to `$CLAUDE_P_FIFO`:
+`hook.sh` reads the hook JSON payload from stdin and appends one tab-delimited line to `$CLAUDE_P_FIFO`:
 
 ```sh
 #!/bin/sh
@@ -31,40 +32,38 @@ printf '%s\t%s\n' "$event" "$payload" >> "$fifo"
 exit 0
 ```
 
-`hook.createWithOptions()` serializes an inline `--settings` JSON object registering `hook.sh` at index `0` for `SessionStart`, `UserPromptSubmit`, and `Stop` (with matcher `"*"`). Paths containing spaces or shell metacharacters are single-quoted automatically.
+`hook.createWithOptions()` serializes an inline `--settings` JSON object registering `hook.sh` at index `0` for `SessionStart`, `UserPromptSubmit`, and `Stop` (matcher `"*"`). Any `--extra-hook` entries are appended after index `0`; any `--setting-json` top-level keys (except `"hooks"`) are merged at the root. Script paths with spaces or shell metacharacters are single-quoted automatically.
 
-When `HookHarness.deinit()` runs via `defer`, the FIFO, script, and temp directory are deleted. `~/.claude/` is never modified.
+`HookHarness.deinit()` runs via `defer` and deletes the FIFO, script, and temp directory. `~/.claude/` is never touched.
 
-### Why `events.fifo` opens before spawning `claude`
+### Why `events.fifo` opens before fork
 
-On POSIX systems, opening a FIFO for writing blocks until a reader has opened it. Both `driver.zig` and `daemon.zig` open `events.fifo` with `O_RDONLY | O_NONBLOCK` **before** calling `zmux.NativeSession.create()`. That guarantees a reader fd is present from millisecond zero so `hook.sh` never blocks.
+On POSIX systems, opening a FIFO for writing blocks until a reader has opened it. Both `driver.zig` and `daemon.zig` open `events.fifo` with `O_RDONLY | O_NONBLOCK` **before** calling `zmux.NativeSession.create()`, guaranteeing a reader descriptor exists from millisecond zero.
 
 ## Live `pread` tailing (`src/stream.zig`)
 
-In `stream-json` mode and daemon mode, `stream.Tailer` tails Claude's live session JSONL file:
-
-- Uses `std.posix.pread(fd, buf, self.pos)` instead of `read()` so it maintains its own cursor without disturbing file offsets.
-- Appends bytes into an internal `partial` buffer and writes to the caller's writer **only** up to complete `\n` boundaries—never emitting torn JSON lines.
-- Non-blocking: when no new bytes exist, `pump()` returns `0`.
+In `stream-json` mode and daemon mode, `stream.Tailer` follows Claude's live transcript file using `std.posix.pread(fd, buf, self.pos)`. Keeping its own cursor leaves the file offset untouched, and an internal `partial` buffer holds trailing fragments until `\n` arrives so downstream readers never see torn JSON.
 
 ## The `Stop`-vs-flush race and resume isolation
 
-Empirically, Claude Code can fire the `Stop` hook a few milliseconds before the final `assistant` JSONL line finishes flushing to disk.
+Claude Code can fire the `Stop` hook a few milliseconds before the final `assistant` JSONL line hits disk.
+
+<StopRaceTimelineDiagram />
+
+`driver.run()` handles both the flush race and `--resume` isolation with one byte offset:
 
 <ResumeOffsetDiagram />
 
-`driver.run()` handles both the flush race and `--resume` isolation with one mechanism:
-
-1. Before submitting the prompt, it records `pre_prompt_transcript_offset = stat(transcript_path).size`.
-2. If `Stop` reports a different `transcript_path` than `SessionStart` did (for example, a new session file created on first turn), the driver resets `pre_prompt_transcript_offset = 0` and reopens the tailer.
+1. Before submitting the prompt, `driver.run()` records `pre_prompt_transcript_offset = stat(transcript_path).size`.
+2. If `Stop` reports a different `transcript_path` than `SessionStart` did, the driver resets the offset to `0` and reopens the tailer.
 3. In `stream-json` mode, it drains the tailer for `20 × 20 ms` (400 ms).
-4. It calls `transcript.parseFileFromOffset(alloc, path, pre_prompt_transcript_offset)` up to `20` times at `50 ms` intervals—and up to `30` times total if a candidate parses but its `final_text` disagrees with Stop's `last_assistant_message`.
-5. If retries still find no assistant message on disk, it synthesizes a `Summary` directly from Stop's `last_assistant_message` and `session_id` fields. If neither exists, it returns `RunError.TranscriptUnavailable`.
+4. It calls `transcript.parseFileFromOffset()` up to `20` times at `50 ms` intervals—and up to `30` times if parsed text disagrees with Stop's `last_assistant_message`.
+5. If retries still find no assistant message on disk, it synthesizes a `Summary` from Stop's `last_assistant_message` and `session_id`; otherwise it returns `RunError.TranscriptUnavailable`.
 
-## Transcript parsing details (`src/transcript.zig`)
+## Transcript parsing rules (`src/transcript.zig`)
 
 - Accepts both `sessionId` (real Claude Code transcripts) and `session_id` (legacy stream-json).
-- Concatenates all `{"type":"text"}` blocks inside each `assistant` message's `message.content` array; the **last** assistant message wins for `final_text`.
-- Sums `input_tokens`, `output_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens` across every assistant entry in the parsed byte slice.
-- Skips malformed lines (including a torn leading fragment if an offset landed mid-line) without aborting the parse.
-- If a `{"type":"result"}` line is present in the slice, its `result`, `is_error`, `num_turns`, `total_cost_usd`, and `duration_api_ms` fields take precedence.
+- Concatenates all `{"type":"text"}` blocks in each `assistant` message's `message.content` array; the last assistant message wins for `final_text`.
+- Sums `input_tokens`, `output_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens` across all assistant entries in the parsed slice.
+- Skips malformed lines (including a torn leading fragment when an offset lands mid-line) without aborting.
+- When a `{"type":"result"}` line exists in the slice, its `result`, `is_error`, `num_turns`, `total_cost_usd`, and `duration_api_ms` fields override prior aggregates.

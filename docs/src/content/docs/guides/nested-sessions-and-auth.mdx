@@ -5,20 +5,22 @@ sidebar:
   order: 3
 ---
 
-Running `claude` inside an existing Claude Code session or agent harness normally triggers nested-session guards. One-shot `claude-p` strips those parent markers automatically without disturbing authentication or cloud-provider configuration.
+import ChildEnvFilterDiagram from '../../../components/diagrams/ChildEnvFilterDiagram.astro';
 
-## What `buildChildEnv` strips vs. preserves
+Spawning `claude` inside an existing Claude Code session or agent harness triggers nested-session guards. Both one-shot and daemon modes strip those parent markers through `driver.buildChildEnv()` while leaving authentication and cloud-provider variables untouched.
 
-In `src/driver.zig`, `shouldStripChildEnv()` strips **only** nested-session and parent-agent markers:
+<ChildEnvFilterDiagram />
+
+## Exact filter rules (`shouldStripChildEnv`)
 
 | Action | Environment variables |
 | --- | --- |
-| **Stripped (exact)** | `CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID` |
-| **Stripped (prefix)** | `CLAUDE_CODE_SESSION_*`, `CLAUDE_CODE_PARENT_*`, `CLAUDE_CODE_SUBAGENT_*` |
-| **Preserved** | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, and all other user env vars |
-| **Injected / defaulted** | `CLAUDE_P_FIFO=<per-run FIFO path>`, `TERM=xterm-256color`, and `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` (unless already set) |
+| Stripped (exact) | `CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID` |
+| Stripped (prefix) | `CLAUDE_CODE_SESSION_*`, `CLAUDE_CODE_PARENT_*`, `CLAUDE_CODE_SUBAGENT_*` |
+| Preserved | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, and all other caller variables |
+| Injected / defaulted | `CLAUDE_P_FIFO=<per-run FIFO path>`, `TERM=xterm-256color`, `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` (when unset) |
 
-Because `CLAUDE_CODE_*` is **not** blanket-stripped, Bedrock, Vertex, Foundry, and OAuth sessions work out of the box:
+Because `CLAUDE_CODE_*` is never blanket-stripped, OAuth, Bedrock, Vertex, and Foundry configurations work without wrapper-specific flags:
 
 ```bash
 CLAUDE_CODE_USE_VERTEX=1 \
@@ -29,11 +31,13 @@ ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project \
 
 ## Non-interactive permissions in CI
 
-`claude-p` does not proxy interactive tool-approval dialogs to your shell. For headless automation, choose one of:
+`claude-p` does not forward interactive tool-approval prompts to your terminal. For unattended runs, pick one permission policy:
 
-- `--dangerously-skip-permissions` — bypasses all tool permission prompts (and `claude-p` automatically accepts Claude Code's bypass-permissions confirmation modal).
-- `--permission-mode <mode>` — passes a permission mode such as `acceptEdits`, `plan`, or `dontAsk`.
-- `--allowedTools <list>` / `--disallowedTools <list>` — restricts which tools `claude` may run without prompting.
+| Flag | Effect |
+| --- | --- |
+| `--dangerously-skip-permissions` | Bypasses tool permission prompts; `claude-p` auto-accepts the startup confirmation modal. |
+| `--permission-mode <mode>` | Sets `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `default`, `dontAsk`, or `plan`. |
+| `--allowedTools` / `--disallowedTools` | Restricts which tools `claude` may run without prompting. |
 
 ```bash
 npx claude-p \
@@ -41,12 +45,4 @@ npx claude-p \
   --allowedTools "Read,Grep,Glob" \
   --output-format json \
   "Find all TODO comments in src/."
-```
-
-## Daemon mode note
-
-`src/daemon.zig` currently copies the parent process environment verbatim (appending `CLAUDE_P_FIFO` and `TERM=xterm-256color`) rather than calling `driver.buildChildEnv`. When launching `claude-p daemon` from inside another Claude Code session, unset `CLAUDECODE` and `AI_AGENT` in the caller:
-
-```bash
-env -u CLAUDECODE -u AI_AGENT npx claude-p daemon --dangerously-skip-permissions
 ```

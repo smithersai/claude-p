@@ -2,10 +2,12 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://smithersai.github.io/claude-p',
+  site: 'https://smithersai.github.io',
+  base: '/claude-p',
   integrations: [
     starlight({
       title: 'claude-p',
+      favicon: '/favicon.svg',
       description:
         'A drop-in replacement for claude -p that drives the interactive claude UI inside an in-process zmux PTY session.',
       social: [

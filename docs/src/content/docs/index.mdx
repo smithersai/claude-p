@@ -6,10 +6,10 @@ hero:
   tagline: A drop-in replacement for <code>claude -p</code> that drives the interactive <code>claude</code> UI inside an in-process zmux PTY session.
   actions:
     - text: Get Started
-      link: /getting-started/
+      link: /claude-p/getting-started/
       icon: right-arrow
     - text: How It Works
-      link: /internals/architecture/
+      link: /claude-p/internals/architecture/
       variant: minimal
       icon: open-book
 ---
@@ -42,28 +42,36 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig m
 
 <LifecyclePipelineDiagram />
 
+## Choose an interface
+
+| Mode | Entry point | Best for | Overhead |
+| --- | --- | --- | --- |
+| **One-shot CLI** | `claude-p [OPTIONS] [PROMPT]` | Shell scripts, git hooks, CI steps (`text`, `json`, `stream-json`). | 1 PTY boot per call (~50–200 ms) |
+| **Daemon CLI** | `claude-p daemon [OPTIONS]` | Multi-turn controllers, chat bridges, agent hubs over NDJSON (`user`, `ping`, `interrupt`). | 1 PTY boot across all turns |
+| **Zig library** | `claude_p.run()` / `claude_p.daemon.run()` | Native Zig 0.15.2 binaries with direct `std.Io.Writer` streaming. | In-process, zero subprocess shim |
+
 ## Pick your track
 
 <CardGrid>
   <LinkCard
     title="Tutorials (Head First style)"
-    description="Build a commit reviewer, drive a multi-turn daemon in Node.js, and embed claude-p in Zig—step by step with byte-level mental models."
-    href="/tutorials/first-automation/"
+    description="Build a commit reviewer, drive a multi-turn daemon in Node.js, and embed claude-p in Zig—with trace exercises and byte-level mental models."
+    href="/claude-p/tutorials/first-automation/"
   />
   <LinkCard
     title="How-to Guides"
-    description="Short, focused recipes for live stream-json, safe --resume isolation, nested CI auth, and --debug diagnostics."
-    href="/guides/streaming-json/"
+    description="Focused recipes for live stream-json, safe --resume offset isolation, nested CI auth, and --debug diagnostics."
+    href="/claude-p/guides/streaming-json/"
   />
   <LinkCard
     title="How It Works"
-    description="The machine model behind the wrapper: zmux PTY, 5 DEC/XTerm handshakes, Claude 2.1 dialog verification, and macOS TTYHOG chunked paste."
-    href="/internals/architecture/"
+    description="The machine model: zmux PTY, 5 DEC/XTerm byte handshakes, Claude 2.1 dialog verification, and macOS TTYHOG chunked paste."
+    href="/claude-p/internals/architecture/"
   />
   <LinkCard
     title="Reference"
     description="Exact CLI flags, exit codes, NDJSON daemon frames, Zig 0.15.2 API types, and SHA-256 release verification."
-    href="/reference/cli/"
+    href="/claude-p/reference/cli/"
   />
 </CardGrid>
 
@@ -78,9 +86,9 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig m
     <code>SessionStart</code>, <code>UserPromptSubmit</code>, and <code>Stop</code> drive the state
     machine. Output comes straight from Claude's session JSONL transcript.
   </Card>
-  <Card title="Real PTY, deterministic paste" icon="rocket">
+  <Card title="Real PTY, paced bracketed paste" icon="rocket">
     <code>zmux.NativeSession</code> runs a real <code>forkpty</code> session. Prompts stream in
-    ≤ 512 B UTF-8-safe bracketed-paste chunks so macOS <code>TTYHOG</code> never drops bytes.
+    ≤ 512 B UTF-8-safe chunks so macOS <code>TTYHOG</code> never drops bytes.
   </Card>
   <Card title="Verified prebuilt binaries" icon="seti:lock">
     <code>scripts/install.js</code> downloads platform binaries from GitHub Releases and checks

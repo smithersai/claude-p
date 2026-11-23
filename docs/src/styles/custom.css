@@ -50,11 +50,12 @@
 
 /* Diagram figure container */
 .cp-diagram {
-  margin: 1.5rem 0;
-  padding: 1.15rem 1.25rem 0.9rem;
+  margin: 1.65rem 0;
+  padding: 1.2rem 1.25rem 0.95rem;
   border: 1px solid var(--diag-border);
   border-radius: 10px;
   background: var(--diag-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 .cp-diagram svg {
@@ -65,12 +66,57 @@
 }
 
 .cp-diagram figcaption {
-  margin-top: 0.75rem;
-  padding-top: 0.6rem;
+  margin-top: 0.8rem;
+  padding-top: 0.65rem;
   border-top: 1px dashed var(--diag-border);
   font-size: 0.85rem;
   color: var(--diag-muted);
-  line-height: 1.45;
+  line-height: 1.5;
+}
+
+/* Head First-style interactive trace exercises */
+.hf-exercise {
+  margin: 1.6rem 0;
+  padding: 1.1rem 1.2rem;
+  border-radius: 10px;
+  border: 1px solid var(--diag-border);
+  border-top: 3px solid var(--diag-purple);
+  background: var(--diag-surface);
+}
+
+.hf-exercise-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--diag-purple);
+  margin-bottom: 0.55rem;
+}
+
+.hf-exercise-details {
+  margin-top: 0.85rem;
+  padding-top: 0.65rem;
+  border-top: 1px dashed var(--diag-border);
+}
+
+.hf-exercise-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--diag-accent);
+  user-select: none;
+}
+
+.hf-exercise-answer {
+  margin-top: 0.65rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 7px;
+  background: var(--diag-surface-alt);
+  font-size: 0.92rem;
+}
+
+.hf-exercise-answer > :last-child {
+  margin-bottom: 0;
 }
 
 /* Head First-style tutorial callout boxes */

@@ -34,8 +34,9 @@ and emitting `claude -p`-compatible output.
 ## Build and test commands
 
 ```bash
-# Unit tests (113 tests, no external `claude` required; use Zig 0.15.2)
+# Unit tests (141 tests, no external `claude` required; use Zig 0.15.2)
 zig build test
+zig build test -Dtest-filter="daemon"
 
 # Release build
 zig build -Doptimize=ReleaseSafe
@@ -44,8 +45,9 @@ zig build -Doptimize=ReleaseSafe
 node scripts/publish.mjs --check-versions
 node --check scripts/install.js && node --check scripts/publish.mjs
 
-# End-to-end tests against the real `claude` binary on $PATH
+# End-to-end tests against the real `claude` binary on $PATH (8 tests)
 CLAUDE_P_E2E=1 zig build test-integration
+CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="resume"
 
 # Documentation site (Starlight)
 cd docs && npm run build
@@ -55,16 +57,16 @@ cd docs && npm run build
 
 | Path | Role |
 | --- | --- |
-| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, exit-code mapping (`0`, `1`, `2`). |
+| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, exit codes (`0`, `1`, `2`, `124`). |
 | `src/root.zig` | Public Zig library facade and `version`. |
-| `src/args.zig` | Argparse, variadic flags, boolean passthrough list, cross-flag rules. |
+| `src/args.zig` | Argparse for Claude Code 2.1.330 flags, `--extra-hook`, `--setting-json`, `--transcript-idle-timeout`. |
 | `src/terminal.zig` | Stateless DEC/XTerm responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t`). |
 | `src/hook.zig` | Inline `--settings`, `extra_hooks`, `extra_settings_json`, FIFO, `hook.sh`. |
-| `src/driver.zig` | One-shot lifecycle, env filter, startup dialog state machine, `PasteChunker`, watchdog. |
-| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`/`pong`, `system/init`, `result`, idle watchdog, `CLAUDE_P_PTY_TRACE`). |
+| `src/driver.zig` | One-shot lifecycle + shared `buildChildEnv`, `maybeHandleStartupDialogs`, `typePrompt` / `PasteChunker`. |
+| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`, `interrupt`, `system/init`, `result`, watchdogs, `CLAUDE_P_PTY_TRACE`). |
 | `src/transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`. |
 | `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`. |
-| `src/emit.zig` | `text`, `json`, and `stream-json` formatters. |
+| `src/emit.zig` | `text`, `json`, `stream-json`, and daemon `emitErrorResult` formatters. |
 | `tests/integration.zig` | Real-`claude` end-to-end suite (`CLAUDE_P_E2E=1`). |
 | `bin/claude-p.js` | Node shim spawning `prebuilt/<platform>-<arch>/claude-p` and forwarding signals. |
 | `scripts/install.js` | Postinstall binary downloader with `SHA256SUMS` verification. |
@@ -80,17 +82,23 @@ cd docs && npm run build
   through `terminal.respondToDecQueries`.
 - **Open FIFO before spawn.** Open `events.fifo` with `O_RDONLY | O_NONBLOCK`
   before creating the `NativeSession` so `hook.sh` never blocks on write.
-- **Targeted env filtering (`shouldStripChildEnv`).** Strip only nested-session
-  markers (`CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`,
-  `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
-  and prefixes `CLAUDE_CODE_SESSION_`, `CLAUDE_CODE_PARENT_`,
-  `CLAUDE_CODE_SUBAGENT_`). **Never** blanket-strip `CLAUDE_CODE_*`—that breaks
-  `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex, and Foundry auth.
-- **Claude Code 2.1 trust dialog defaults to "No, exit".** `maybeHandleStartupDialogs`
-  must verify `❯` sits on the affirmative option on repaint before sending `\r`.
-- **macOS `TTYHOG` is 1024 bytes.** Always submit one-shot prompts through
+- **Targeted env filtering (`shouldStripChildEnv`).** Shared by one-shot and
+  daemon. Strip only nested-session markers (`CLAUDECODE`, `AI_AGENT`,
+  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`,
+  `CLAUDE_CODE_SESSION_ID`, and prefixes `CLAUDE_CODE_SESSION_`,
+  `CLAUDE_CODE_PARENT_`, `CLAUDE_CODE_SUBAGENT_`). **Never** blanket-strip
+  `CLAUDE_CODE_*`—that breaks `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex, and
+  Foundry auth.
+- **Claude Code 2.1 trust dialog defaults to "No, exit".** Both modes use
+  `maybeHandleStartupDialogs`, which verifies `❯` sits on the affirmative
+  option on repaint before sending `\r`.
+- **macOS `TTYHOG` is 1024 bytes.** Both modes submit prompts through
   `typePrompt` (`PasteChunker`: `<= 512` B UTF-8-safe chunks, `8 ms` gaps,
   `\x1b[201~` neutralization, `120 ms` Enter debounce).
+- **Daemon stale-`Stop` guard after `interrupt`.** If an `interrupt` window
+  (`1500 ms`) expires without `Stop`, `after_interrupt` stays true so a late
+  `Stop` from the canceled turn is ignored until the next turn receives
+  `UserPromptSubmit` or transcript bytes.
 - **Stop / transcript flush race.** `Stop` can fire before the final assistant
   line hits disk. Retry `parseFileFromOffset` up to 20×50 ms (30× on
   `last_assistant_message` mismatch), then fall back to Stop's
@@ -98,10 +106,6 @@ cd docs && npm run build
 - **Resume offset isolation.** On `--resume`/`--continue`, wait for restored UI
   quiescence (`400 ms`, cap `6000 ms`), snapshot `pre_prompt_transcript_offset`,
   and parse only appended bytes via `parseFileFromOffset`.
-- **Daemon parity caveat.** `src/daemon.zig` still has its own inline dialog
-  check, `session.send`, and full env copy rather than sharing
-  `driver.maybeHandleStartupDialogs`, `driver.typePrompt`, and
-  `driver.buildChildEnv`. Check both files when fixing startup or paste bugs.
 
 ## Code conventions
 

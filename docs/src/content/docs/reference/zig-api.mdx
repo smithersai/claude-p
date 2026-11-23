@@ -1,0 +1,154 @@
+---
+title: Zig Library API Reference
+description: Public Zig 0.15.2 types, functions, options, and error unions exported by src/root.zig.
+sidebar:
+  order: 3
+---
+
+Requires Zig **`0.15.2`** (matching `zmux`'s `comptime` version check). Every allocating API takes an explicit `std.mem.Allocator`.
+
+## Top-level exports (`src/root.zig`)
+
+```zig
+pub const version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 3 };
+
+pub const OutputFormat = args.OutputFormat; // enum { text, json, stream_json }
+pub const Options = driver.Options;
+pub const Result = driver.Result;
+pub const Usage = transcript.Usage;
+
+pub fn run(allocator: std.mem.Allocator, opts: Options) !Result;
+
+// Re-exported submodules
+pub const args = @import("args.zig");
+pub const transcript = @import("transcript.zig");
+pub const emit = @import("emit.zig");
+pub const hook = @import("hook.zig");
+pub const terminal = @import("terminal.zig");
+pub const driver = @import("driver.zig");
+pub const stream = @import("stream.zig");
+pub const daemon = @import("daemon.zig");
+```
+
+## One-shot API (`driver.Options`, `driver.Result`, `driver.RunError`)
+
+### `driver.Options`
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `prompt` | `[]const u8` | *(required)* | Prompt text; empty returns `RunError.NoPromptSupplied`. |
+| `output_format` | `OutputFormat` | `.text` | `.text`, `.json`, or `.stream_json`. |
+| `model` | `?[]const u8` | `null` | Passed to `--model`. |
+| `max_turns` | `?u32` | `null` | Passed to `--max-turns`. |
+| `allowed_tools` | `?[]const u8` | `null` | Passed to `--allowedTools`. |
+| `disallowed_tools` | `?[]const u8` | `null` | Passed to `--disallowedTools`. |
+| `skip_permissions` | `bool` | `false` | Adds `--dangerously-skip-permissions`. |
+| `permission_mode` | `?[]const u8` | `null` | Passed to `--permission-mode`. |
+| `system_prompt` | `?[]const u8` | `null` | Passed to `--system-prompt`. |
+| `append_system_prompt` | `?[]const u8` | `null` | Passed to `--append-system-prompt`. |
+| `fallback_model` | `?[]const u8` | `null` | Passed to `--fallback-model`. |
+| `setting_sources` | `?[]const u8` | `null` | Passed to `--setting-sources`. |
+| `add_dirs` | `[]const []const u8` | `&.{}` | Repeated `--add-dir` entries. |
+| `mcp_configs` | `[]const []const u8` | `&.{}` | Repeated `--mcp-config` entries. |
+| `resume_session` | `?[]const u8` | `null` | Passed to `--resume`; enables offset isolation. |
+| `cont` | `bool` | `false` | Adds `--continue`; enables offset isolation. |
+| `session_id` | `?[]const u8` | `null` | Passed to `--session-id`. |
+| `cwd` | `?[]const u8` | `null` | Child working directory. |
+| `extra_args` | `[]const []const u8` | `&.{}` | Appended verbatim to child argv. |
+| `extra_hooks` | `[]const hook.ExtraHook` | `&.{}` | Appended after relay hooks in inline `--settings`. |
+| `extra_settings_json` | `?[]const u8` | `null` | JSON object whose top-level keys (except `"hooks"`) merge into `--settings`. |
+| `verbose` | `bool` | `false` | Adds `--verbose`. |
+| `timeout_ms` | `u64` | `300_000` | Total wall-time cap in milliseconds. |
+| `claude_path` | `?[]const u8` | `null` | Overrides `"claude"` binary path (useful for testing). |
+| `cols` / `rows` | `u16` | `120` / `40` | PTY dimensions. |
+| `debug` | `bool` | `false` | Prints millisecond-stamped trace to stderr. |
+| `stream_writer` | `?*std.Io.Writer` | `null` | When set with `.stream_json`, streams transcript lines live and sets `Result.streamed = true`. |
+
+### `driver.Result`
+
+```zig
+pub const Result = struct {
+    summary: transcript.Summary,
+    duration_ms: u64,
+    streamed: bool = false,
+
+    pub fn deinit(self: *Result, allocator: std.mem.Allocator) void;
+    pub fn write(
+        self: *const Result,
+        allocator: std.mem.Allocator,
+        writer: *std.Io.Writer,
+        fmt: args.OutputFormat,
+    ) !void;
+    pub fn exitCode(self: *const Result) u8; // 0 if !is_error, 1 if is_error
+};
+```
+
+### `driver.RunError`
+
+```zig
+pub const RunError = error{
+    SessionStartTimeout,
+    StopTimeout,
+    PromptNotAccepted,
+    PromptTruncated,
+    TranscriptUnavailable,
+    SpawnFailed,
+    NoPromptSupplied,
+    InvalidExtraSettings,
+} || std.mem.Allocator.Error;
+```
+
+## Daemon API (`daemon.Options`, `daemon.run`)
+
+```zig
+pub fn run(allocator: std.mem.Allocator, opts: daemon.Options) !u8;
+```
+
+`daemon.Options` mirrors `driver.Options` (including `extra_hooks` and `extra_settings_json`), omits `prompt`, `output_format`, `max_turns`, and `stream_writer`, and replaces `timeout_ms` with:
+
+- `session_start_timeout_ms: u64 = 300_000`
+- `idle_progress_timeout_ms: u64 = 180_000` (`0` disables)
+- `transcript_idle_timeout_ms: u64 = 600_000` (`0` disables)
+
+`daemon.RunError`: `SessionStartTimeout`, `IdleTimeout`, `TranscriptStalled`, `InvalidExtraSettings`, `TranscriptUnavailable`, `SpawnFailed`, plus `std.mem.Allocator.Error`.
+
+## Hook, emit, and transcript types
+
+```zig
+// src/hook.zig
+pub const ExtraHook = struct {
+    event: []const u8,
+    command: []const u8,
+};
+
+// src/emit.zig
+pub fn emitErrorResult(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    subtype: []const u8,
+    error_reason: []const u8,
+    session_id: []const u8,
+    duration_ms: u64,
+) !void;
+
+// src/transcript.zig
+pub const Usage = struct {
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cache_read_input_tokens: u64 = 0,
+    cache_creation_input_tokens: u64 = 0,
+};
+
+pub const Summary = struct {
+    final_text: []u8,
+    session_id: []u8,
+    is_error: bool,
+    num_turns: u32,
+    total_cost_usd: f64,
+    duration_api_ms: u64,
+    usage: Usage,
+    jsonl_replay: []u8,
+
+    pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void;
+};
+```

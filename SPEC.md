@@ -43,7 +43,7 @@ flowchart TB
         Term -.->|"mutex queue pending_to_pty"| Driver
         Driver --> Tail["stream.zig<br/>pread line tailer"]
         Driver --> Parse["transcript.zig<br/>JSONL & offset parser"]
-        Parse --> Emit["emit.zig<br/>text · json · stream-json"]
+        Parse --> Emit["emit.zig<br/>text · json · stream-json · error result"]
     end
 
     Zmux <-->|"PTY master/slave"| Child["claude (Ink TUI)"]
@@ -58,15 +58,15 @@ flowchart TB
 
 | File | Responsibility |
 | --- | --- |
-| `main.zig` | CLI entry point; routes one-shot vs `daemon`; maps errors to exit codes. |
-| `args.zig` | Argparse for the `claude -p` flag surface, variadic flags, boolean passthrough table, and cross-flag checks. |
+| `main.zig` | CLI entry point; routes one-shot vs `daemon`; actionable stderr diagnostics; exit code mapping (`0`, `1`, `2`, `124`). |
+| `args.zig` | Argparse for the Claude Code 2.1.330 surface, `--extra-hook`, `--setting-json`, `--transcript-idle-timeout`, variadic flags, boolean passthrough table, and cross-flag checks. |
 | `terminal.zig` | Stateless ANSI/CSI scanner answering DA1, DA2, DSR, XTVERSION, and `18t`. |
 | `hook.zig` | Per-run temp dir, `mkfifo(0o600)`, `hook.sh` relay script, inline `--settings` builder (with `extra_hooks` and `extra_settings_json`), and payload extractors. |
-| `driver.zig` | One-shot lifecycle: env filtering, startup dialog state machine, paced bracketed paste, prompt-acceptance watchdog, live tailing, transcript race retry, teardown. |
-| `daemon.zig` | Multi-turn NDJSON daemon (`user`, `ping` → `system/init`, live transcript, per-turn `result`, `pong`), PTY idle watchdog, and `CLAUDE_P_PTY_TRACE`. |
+| `driver.zig` | One-shot lifecycle plus shared helpers: targeted env filtering (`buildChildEnv`), Claude 2.1 startup dialog FSM (`maybeHandleStartupDialogs`), paced bracketed paste (`typePrompt` / `PasteChunker`), prompt-acceptance watchdog, live tailing, transcript race retry, teardown. |
+| `daemon.zig` | Multi-turn NDJSON daemon (`user`, `ping`, `interrupt` → `system/init`, live transcript, per-turn `result`, `pong`, structured timeout/interrupt frames), PTY + transcript watchdogs, and `CLAUDE_P_PTY_TRACE`. |
 | `transcript.zig` | Session JSONL parser (`parse`, `parseFile`, `parseFileFromOffset`); extracts final assistant text, session ID, error flag, and summed token usage. |
 | `stream.zig` | Non-blocking `pread`-based JSONL line tailer (`Tailer`) that holds partial fragments until `\n`. |
-| `emit.zig` | Output formatters for `text`, `json`, and `stream-json`. |
+| `emit.zig` | Output formatters for `text`, `json`, `stream-json`, and daemon `emitErrorResult`. |
 | `root.zig` | Public Zig library facade and semantic version (`0.1.3`). |
 
 ### 2.2 zmux integration and threading
@@ -84,7 +84,7 @@ directly (re-entering zmux locks). Instead it:
    `shared.bytes_seen` and `shared.last_output_ns` under `shared.recent_mutex`.
 
 The main loop drains `pending_to_pty` via `flushPendingToPty` into
-`session.writeInput` on every iteration and inside every quiescence sleep.
+`session.writeInput` on every iteration and inside every quiescence wait.
 
 ---
 
@@ -116,7 +116,7 @@ Three hooks are always registered first (index 0) with matcher `"*"`:
 | Event | Line format on FIFO | Used for |
 | --- | --- | --- |
 | `SessionStart` | `SessionStart\t<json>\n` | Ready signal; extracts `transcript_path` and `session_id`. |
-| `UserPromptSubmit` | `UserPromptSubmit\t<json>\n` | Confirms delivery; extracts `prompt` for truncation check. |
+| `UserPromptSubmit` | `UserPromptSubmit\t<json>\n` | Confirms delivery; extracts `prompt` for truncation check (one-shot) and marks active turn live after interrupt (daemon). |
 | `Stop` | `Stop\t<json>\n` | Turn complete; extracts `transcript_path`, `last_assistant_message`, `session_id`. |
 
 `events.fifo` is opened `O_RDONLY | O_NONBLOCK` **before** spawning `claude`
@@ -124,9 +124,9 @@ so a hook script writing `>> "$CLAUDE_P_FIFO"` never blocks waiting for a
 reader. If `script_path` contains characters outside `[A-Za-z0-9/._-]`, the
 command string is single-quoted for `/bin/sh`.
 
-### 4.2 Library-level settings composition
+### 4.2 Custom hooks and settings composition
 
-`hook.CreateOptions` (exposed via `driver.Options`, not yet via CLI flags):
+Supported in both CLI (`--extra-hook`, `--setting-json`) and Zig API (`driver.Options`, `daemon.Options`, `hook.CreateOptions`):
 
 - `extra_hooks: []const ExtraHook`: appended after relay hooks for matching
   events or grouped under custom event names. Empty event or command returns
@@ -138,11 +138,12 @@ command string is single-quoted for `/bin/sh`.
 
 ---
 
-## 5. One-shot driver (`src/driver.zig`)
+## 5. Shared startup, paste, and one-shot driver (`src/driver.zig`)
 
 ### 5.1 Child environment filtering (`buildChildEnv`)
 
-`shouldStripChildEnv` strips only nested-session / parent-agent markers:
+Used by both one-shot and daemon modes. `shouldStripChildEnv` strips only
+nested-session / parent-agent markers:
 
 - Exact names: `CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`,
   `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`,
@@ -155,15 +156,14 @@ All other `CLAUDE_CODE_*` and auth/provider variables are **preserved intact**
 `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`,
 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE`).
 
-`buildChildEnv` replaces `CLAUDE_P_FIFO=<fifo_path>` and
-`TERM=xterm-256color`, and defaults `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`
-if unset.
+`buildChildEnv` sets `CLAUDE_P_FIFO=<fifo_path>` and `TERM=xterm-256color`, and
+defaults `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` if unset.
 
 ### 5.2 Startup dialog state machine (`maybeHandleStartupDialogs`)
 
-Before `SessionStart`, the driver monitors the CSI-stripped 8192-byte recent
-buffer once PTY output has been quiet for `80 ms` (`dialog_quiescence_ms`).
-CSI/OSC/DCS stripping uses stack buffers (zero heap allocation).
+Used by both one-shot and daemon modes before `SessionStart`. Runs once PTY
+output has been quiet for `80 ms` (`dialog_quiescence_ms`). CSI/OSC/DCS
+stripping uses stack buffers (zero heap allocation).
 
 Three modals are recognized (`classifyDialog`, latest marker wins; suppressed
 if the main prompt footer `"for shortcuts"` painted after the modal):
@@ -181,13 +181,14 @@ below the cursor.
 
 Rules enforced by `chooseDialogAction` / `decideDialog`:
 - **Never send Enter (`\r`) unless `❯` is verified on the affirmative option.**
-  (Claude Code 2.1 preselects `"No, exit"` above `"Yes, I trust"` without
-  option numbers.)
+  (Claude Code 2.1.330 lists and preselects `"No, exit"` above `"Yes, I trust"`
+  with no option numbers.)
 - If on negative: send `<digit>` on numbered menus (falling back to arrow keys
   if a digit did not move the cursor), otherwise send Down (`\x1b[B`) if
   affirmative is below or Up (`\x1b[A`) if above.
-- Wait for repaint; retry dropped keys after `1500 ms` (`dialog_retry_ms`) if
-  zero fresh bytes arrived. Hard cap: `16` keys (`max_dialog_keys`).
+- Wait for fresh repaint bytes; retry dropped keys after `1500 ms`
+  (`dialog_retry_ms`) if zero fresh bytes arrived. Hard cap: `16` keys
+  (`max_dialog_keys`).
 
 ### 5.3 Quiescence, paced bracketed paste, and delivery watchdog
 
@@ -197,14 +198,14 @@ Rules enforced by `chooseDialogAction` / `decideDialog`:
    - Resume run (`--resume`, `-r`, `--continue`, `-c`): wait for `400 ms`
      silence (max `6000 ms`) while Ink repaints the restored transcript.
 2. **Snapshot offset:** record `pre_prompt_transcript_offset = stat(transcript_path).size`.
-3. **Paced bracketed paste (`typePrompt` / `PasteChunker`):**
+3. **Paced bracketed paste (`typePrompt` / `PasteChunker`, shared by both modes):**
    - Write `\x1b[200~`.
    - Split prompt into chunks of at most `512` bytes (half of macOS's 1024-byte
      `TTYHOG`), never splitting a multi-byte UTF-8 sequence, neutralizing any
      embedded `\x1b[201~` by dropping its trailing `~`.
    - Sleep `8 ms` between chunks.
    - Write `\x1b[201~`, sleep `120 ms` (`ink_enter_debounce_ms`), write `\r`.
-4. **Acceptance & truncation watchdog:**
+4. **Acceptance & truncation watchdog (one-shot mode):**
    - Prompt is accepted when `UserPromptSubmit` arrives or transcript file size
      exceeds `pre_prompt_transcript_offset`.
    - On `UserPromptSubmit`, if the prompt has more than `64` non-whitespace
@@ -236,8 +237,8 @@ On `Stop`:
 ## 6. Daemon mode (`src/daemon.zig`)
 
 `claude-p daemon [OPTIONS]` maintains one interactive `claude` session across
-turns. Its state machine has three states: `waiting_for_ready`, `idle`, and
-`busy`.
+turns using the shared `buildChildEnv`, `maybeHandleStartupDialogs`, and
+`typePrompt` helpers. States: `waiting_for_ready`, `idle`, `busy`.
 
 ### 6.1 Wire protocol (NDJSON)
 
@@ -246,40 +247,49 @@ turns. Its state machine has three states: `waiting_for_ready`, `idle`, and
   `prompt_queue`. Also accepts an array of `{"type":"text","text":"…"}` blocks
   or top-level `{"type":"user","content":"…"}`.
 - `{"type":"ping"}` — answered immediately by the main loop in any state.
+- `{"type":"interrupt"}` — while `.busy` (and not already interrupting), sends
+  Escape (`\x1b`) and opens a `1500 ms` (`interrupt_window_ms`) window waiting
+  for `Stop`. If `Stop` arrives in time, ends normally; otherwise emits
+  `emitErrorResult(subtype="interrupted", error="interrupted", is_error=false)`,
+  sets `after_interrupt = true`, and returns to `.idle` with the session open.
+  On the next turn, stale `Stop` hooks from the interrupted turn are ignored
+  (`stopBelongsToTurn`) until `UserPromptSubmit` or transcript growth occurs,
+  and `Ctrl-U` clears any residual input before `typePrompt`.
 
 **Stdout (daemon → client):**
 - `{"type":"system","subtype":"init","session_id":"…"}` — emitted once on
   `SessionStart`.
 - Raw transcript JSONL lines — tailed live via `stream.Tailer`. On `--resume`
-  or `--continue`, the tailer seeks to existing EOF on open so historical turns
-  are not re-emitted.
-- Per-turn `result` envelope (same schema as `emit.emitJson`) — emitted on
-  `Stop` after a `20 × 20 ms` tailer drain, computed from the transcript byte
-  range `[turn_start_pos..turn_end_pos)` (falling back to Stop's
+  or `--continue`, the tailer seeks to existing EOF on open.
+- Per-turn `result` envelope — emitted on `Stop` after a `20 × 20 ms` tailer
+  drain, computed from `[turn_start_pos..turn_end_pos)` (falling back to Stop's
   `last_assistant_message`).
 - `{"type":"pong","ts":<unix_ms>}` — emitted in reply to `ping`.
+- Interrupted `result` — `subtype: "interrupted"`, `error: "interrupted"`,
+  `is_error: false`.
+- Terminal timeout `result` (`exitWithErrorFrame`) — `subtype: "error"`,
+  `is_error: true`, `error: "session_start_timeout" | "idle_timeout" | "transcript_stalled"`,
+  flushed before terminating the child so callers never see a silent dead pipe.
 
-### 6.2 Watchdogs, telemetry, and current implementation notes
+### 6.2 Watchdogs and telemetry
 
-- **Startup timeout (`--timeout`, default `300 s`):** returns
-  `RunError.SessionStartTimeout` if `SessionStart` does not arrive before the
-  deadline.
-- **Idle-progress watchdog (`--idle-timeout`, default `180 s`, `0` disables):**
-  while `.busy`, returns `RunError.IdleTimeout` if no PTY bytes arrived for
-  longer than the threshold. Resets `last_output_ns` on `idle → busy` and never
-  trips while `.idle` or `.waiting_for_ready`.
-- **PTY byte-rate trace (`CLAUDE_P_PTY_TRACE`):** writes
-  `[pty-trace] state=… pty_bytes=… pty_delta=… last_byte_age_ms=… turn_age_ms=… transcript_pos=…`
-  to stderr every `60 s` by default. Set to `0`/`off`/`false`/`no` to disable,
-  or a positive integer for interval seconds.
-- **Shutdown:** on stdin EOF, finishes any active turn and queued prompts,
-  calls `session.terminate()`, drains remaining transcript bytes, and returns
-  exit code `0`.
-- **Implementation delta vs one-shot driver:** `daemon.zig` currently runs its
-  own inline pre-SessionStart dialog check, sends prompts via
-  `session.send(content, false)` + `120 ms` debounce + `session.send("", true)`,
-  and inherits the full parent environment (plus `CLAUDE_P_FIFO` and `TERM`)
-  rather than calling `driver.buildChildEnv` or `driver.typePrompt`.
+| Watchdog | Flag / default | Error reason | Exit code |
+| --- | --- | --- | --- |
+| Startup timeout | `--timeout <sec>` (`300`) | `session_start_timeout` | `2` |
+| Busy PTY silence | `--idle-timeout <sec>` (`180`; `0` disables) | `idle_timeout` | `124` |
+| Busy transcript stall | `--transcript-idle-timeout <sec>` (`600`; `0` disables) | `transcript_stalled` | `124` |
+
+Both busy-turn watchdogs reset on `idle → busy` and never trip while `.idle` or
+`.waiting_for_ready`. A ticking Ink spinner resets `idle_timeout` but does
+**not** reset `transcript_stalled` (which requires `tailer.pos` to advance).
+
+**PTY byte-rate trace (`CLAUDE_P_PTY_TRACE`):** writes
+`[pty-trace] state=… pty_bytes=… pty_delta=… last_byte_age_ms=… turn_age_ms=… transcript_pos=…`
+to stderr every `60 s` by default (`0`/`off`/`false`/`no` disables; positive
+integer sets interval seconds).
+
+**Shutdown:** on stdin EOF, finishes any active turn and queued prompts, calls
+`session.terminate()`, drains remaining transcript bytes, and exits `0`.
 
 ---
 
@@ -293,18 +303,18 @@ turns. Its state machine has three states: `waiting_for_ready`, `idle`, and
 | `json` | Single JSON line: `{type:"result", subtype:"success"\|"error", session_id, result, is_error, duration_ms, duration_api_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}, permission_denials:[]}`. |
 | `stream-json` | Live JSONL transcript lines streamed as flushed, terminated by the `result` object above. Requires `--verbose` in one-shot mode. |
 
-`transcript.zig` accepts both `sessionId` (real Claude Code transcripts) and
-`session_id` (legacy stream-json), summing `message.usage` across all assistant
-entries in the parsed slice.
+Daemon `emitErrorResult` writes the same schema plus `"error": "<reason>"`;
+`is_error` is `false` only when `subtype == "interrupted"`.
 
-### 7.2 Exit codes (`src/main.zig` + `bin/claude-p.js`)
+### 7.2 Exit codes (`src/main.zig` + `src/daemon.zig` + `bin/claude-p.js`)
 
-| Code | Source | Meaning |
-| --- | --- | --- |
-| `0` | `Result.exitCode()` / `daemon.run` | `is_error == false`, or clean daemon EOF/exit. |
-| `1` | `Result.exitCode()` | Assistant returned `is_error == true`. |
-| `2` | `main.zig` / `bin/claude-p.js` | Bad arguments, empty prompt, missing binary, or any `driver.RunError` / `daemon.RunError`. |
-| `128 + sig` | `bin/claude-p.js` | Child terminated by forwarded signal (e.g. `130` for `SIGINT`). |
+| Code | Meaning |
+| --- | --- |
+| `0` | `is_error == false`, `--help`/`--version`, or clean daemon EOF/child exit. |
+| `1` | Assistant returned `is_error == true`. |
+| `2` | Bad CLI args, empty prompt, missing binary, `PromptNotAccepted`, `PromptTruncated`, `InvalidExtraSettings`, `SpawnFailed`, `TranscriptUnavailable`, or daemon `session_start_timeout`. |
+| `124` | One-shot `SessionStartTimeout` / `StopTimeout`, or daemon `idle_timeout` / `transcript_stalled`. |
+| `128 + sig` | Child terminated by forwarded signal via `bin/claude-p.js` (e.g. `130` for `SIGINT`). |
 
 ---
 
@@ -320,21 +330,17 @@ Explicitly parsed flags: `--output-format`, `--model`, `--fallback-model`,
 `--disallowed-tools`, `--permission-mode`, `--dangerously-skip-permissions`,
 `--system-prompt`, `--append-system-prompt`, `--add-dir` (repeatable,
 variadic), `--mcp-config` (repeatable, variadic), `--setting-sources`,
+`--extra-hook <Event>=<cmd>` (repeatable), `--setting-json <json>`,
 `--resume`, `--continue` / `-c`, `--session-id`, `--cwd`, `--input-file`,
-`--verbose`, `--timeout`, `--idle-timeout`, `--debug`, `--`, `-h`/`--help`,
-`-v`/`--version`.
+`--verbose`, `--timeout`, `--idle-timeout`, `--transcript-idle-timeout`,
+`--debug`, `--`, `-h`/`--help`, `-v`/`--version`.
 
-- **Rejected (`ParseError.UnsupportedFlag`):** `-p`, `--print`, `--settings`.
+- **Rejected (`ParseError.UnsupportedFlag`):** `-p`, `--print`, `--settings`,
+  `--bare`, `--safe-mode` (including `--bare=...` and `--safe-mode=...`).
 - **Cross-flag rule (`ParseError.StreamJsonRequiresVerbose`):** one-shot
   `--output-format stream-json` without `--verbose`.
-- **Passthrough:** unknown flags are forwarded verbatim. Seventeen known
-  boolean long flags (`--bare`, `--brief`, `--chrome`, `--no-chrome`,
-  `--allow-dangerously-skip-permissions`, `--dangerously-skip-permissions`,
-  `--disable-slash-commands`, `--exclude-dynamic-system-prompt-sections`,
-  `--fork-session`, `--ide`, `--include-hook-events`,
-  `--include-partial-messages`, `--mcp-debug`, `--no-session-persistence`,
-  `--replay-user-messages`, `--strict-mcp-config`, `--tmux`) do not consume the
-  following argument.
+- **Passthrough:** unknown flags are forwarded verbatim. Twenty-four known
+  boolean long flags do not consume the following argument.
 
 ---
 
@@ -368,8 +374,9 @@ Submodules re-exported: `args`, `transcript`, `emit`, `hook`, `terminal`,
   `SHA256SUMS` from GitHub Releases and verifies SHA-256 before writing.
 - **Version lockstep:** `package.json`, `build.zig.zon`, and `src/root.zig`
   must agree (verified in CI by `node scripts/publish.mjs --check-versions`).
-- **Unit tests:** `zig build test` — **113 tests** across all modules in `src/`
-  (zero external dependencies).
-- **Integration tests:** `CLAUDE_P_E2E=1 zig build test-integration` — **4
-  real-claude tests** in `tests/integration.zig` (text, JSON round-trip, exit
-  code 0, live stream-json). No mocks.
+- **Unit tests:** `zig build test` — **141 tests** (139 module + 2 CLI tests;
+  supports `-Dtest-filter="<substring>"`).
+- **Integration tests:** `CLAUDE_P_E2E=1 zig build test-integration` — **8
+  real-claude tests** in `tests/integration.zig` (text, JSON, exit code 0,
+  stream-json, 5 KB prompt, `--resume`, nested env, daemon; supports
+  `-Dtest-filter="<substring>"`). No mocks.

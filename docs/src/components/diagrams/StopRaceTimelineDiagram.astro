@@ -1,0 +1,61 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'Stop can arrive before Claude flushes the last assistant JSONL line. driver.run() retries parseFileFromOffset() up to 20×50 ms (30× if text mismatches Stop) before falling back to last_assistant_message.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 840 248" role="img" aria-label="Stop hook versus transcript disk flush race timeline">
+    <defs>
+      <marker id="race-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
+      </marker>
+    </defs>
+
+    <!-- Time axis -->
+    <line x1="150" y1="36" x2="808" y2="36" stroke="var(--diag-border-strong)" stroke-width="1.5" marker-end="url(#race-arr)" />
+    <text x="150" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">t = 0 ms</text>
+    <text x="310" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+35 ms</text>
+    <text x="450" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+50 ms</text>
+    <text x="640" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">+1000 ms (20×)</text>
+
+    <!-- Track labels -->
+    <text x="16" y="84" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-purple)">Hook FIFO</text>
+    <text x="16" y="144" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-blue)">transcript.jsonl</text>
+    <text x="16" y="204" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-green)">driver.run()</text>
+
+    <!-- Track baselines -->
+    <line x1="150" y1="80" x2="808" y2="80" stroke="var(--diag-border)" stroke-width="1" stroke-dasharray="4 4" />
+    <line x1="150" y1="140" x2="808" y2="140" stroke="var(--diag-border)" stroke-width="1" stroke-dasharray="4 4" />
+    <line x1="150" y1="200" x2="808" y2="200" stroke="var(--diag-border)" stroke-width="1" stroke-dasharray="4 4" />
+
+    <!-- Event 1: Stop arrives -->
+    <rect x="150" y="58" width="166" height="44" rx="7" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.5" />
+    <text x="233" y="77" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">Stop arrives</text>
+    <text x="233" y="93" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">carries last_assistant_message</text>
+
+    <!-- Event 2: Transcript flush lands late -->
+    <rect x="308" y="118" width="168" height="44" rx="7" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.5" />
+    <text x="392" y="137" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-blue)">assistant line hits disk</text>
+    <text x="392" y="153" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">+ usage tokens &amp; turn count</text>
+
+    <!-- Driver retry attempt 1 (miss) -->
+    <rect x="150" y="178" width="136" height="44" rx="7" fill="var(--diag-rose-fill)" stroke="var(--diag-rose)" stroke-width="1.25" />
+    <text x="218" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="var(--diag-rose)">try #1: miss</text>
+    <text x="218" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">sleep 50 ms</text>
+
+    <!-- Driver retry attempt 2 (hit) -->
+    <rect x="446" y="178" width="174" height="44" rx="7" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="533" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="var(--diag-green)">try #2: parsed &amp; matched</text>
+    <text x="533" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">emit result → terminate</text>
+
+    <!-- Fallback box -->
+    <rect x="640" y="178" width="174" height="44" rx="7" fill="var(--diag-accent-fill)" stroke="var(--diag-accent)" stroke-width="1.25" stroke-dasharray="3 2" />
+    <text x="727" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="var(--diag-accent)">fallback (if exhausted)</text>
+    <text x="727" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9.5" fill="var(--diag-muted)">synthesize from Stop payload</text>
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

@@ -1,0 +1,121 @@
+---
+title: Daemon Protocol Reference
+description: Exact NDJSON wire format, state machine transitions, interrupt handling, dual watchdogs, and PTY trace diagnostics for claude-p daemon.
+sidebar:
+  order: 2
+---
+
+import DaemonProtocolDiagram from '../../../components/diagrams/DaemonProtocolDiagram.astro';
+
+`claude-p daemon [OPTIONS]` drives a single long-lived interactive `claude` session over newline-delimited JSON (NDJSON) on stdin and stdout. It shares the one-shot driver's child environment filtering (`buildChildEnv`), Claude Code 2.1 dialog engine (`maybeHandleStartupDialogs`), and paced bracketed paste (`typePrompt`).
+
+<DaemonProtocolDiagram />
+
+## Stdin frames (client → daemon)
+
+One JSON object per `\n`-terminated line. Unknown types and malformed JSON lines are ignored.
+
+### `user` — queue a prompt
+
+Accepted shapes (checked in order):
+
+```json
+{"type":"user","message":{"role":"user","content":"Summarize src/main.zig."}}
+```
+
+```json
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Part 1. "},{"type":"text","text":"Part 2."}]}}
+```
+
+```json
+{"type":"user","content":"Shorthand top-level content."}
+```
+
+When `content` is an array, all blocks with `"type":"text"` are concatenated in order. Frames are appended to `prompt_queue` and dispatched via `typePrompt()` whenever the daemon is `.idle`.
+
+### `ping` — event-loop liveness probe
+
+```json
+{"type":"ping"}
+```
+
+Checked before `interrupt` and `user` parsing, and answered immediately in any state (`waiting_for_ready`, `idle`, or `busy`). Never enters `prompt_queue`.
+
+### `interrupt` — cancel a busy turn without killing the session
+
+```json
+{"type":"interrupt"}
+```
+
+- When `.busy` (and not already waiting on an interrupt): writes Escape (`\x1b`) to the PTY and starts a `1500 ms` (`interrupt_window_ms`) window waiting for `Stop`.
+- If `Stop` arrives within `1500 ms`, the turn finishes normally with a standard `result` frame.
+- If `1500 ms` elapses without `Stop`, the daemon emits a structured interrupted `result` frame (`subtype: "interrupted"`, `error: "interrupted"`, `is_error: false`), advances `turn_start_pos`, sets `after_interrupt = true`, and returns to `.idle` with the session open.
+- On the next turn after an interrupt, any stale `Stop` from the canceled turn is ignored (`stopBelongsToTurn`) until the new turn shows life (`UserPromptSubmit` or transcript growth), and `Ctrl-U` (`\x15`) clears any restored input before pasting the next prompt.
+- Ignored when not `.busy`.
+
+### `EOF` — graceful shutdown
+
+Closing stdin sets `stdin_eof = true`. The daemon finishes the active turn and drains `prompt_queue`, calls `session.terminate()`, drains final transcript bytes, and exits `0`.
+
+## Stdout frames (daemon → client)
+
+### `system / init`
+
+Emitted once when `SessionStart` fires:
+
+```json
+{"type":"system","subtype":"init","session_id":"550e8400-e29b-41d4-a716-446655440000"}
+```
+
+### Live transcript lines
+
+Raw JSONL lines tailed from Claude's session transcript file via `stream.Tailer` as `claude` flushes them. When launched with `--resume` or `--continue`, the tailer seeks to existing EOF on first open so historical turns are skipped.
+
+### Per-turn `result` envelope
+
+Emitted when `Stop` fires after a `20 × 20 ms` tailer drain. Summary fields (`result`, `usage`, `num_turns`, etc.) are computed from `[turn_start_pos..turn_end_pos)` covering only that turn, falling back to Stop's `last_assistant_message` if the slice cannot be parsed. Schema matches the [CLI JSON `result` schema](/claude-p/reference/cli/#json-result-schema).
+
+### `pong`
+
+Emitted inline in reply to each `ping`:
+
+```json
+{"type":"pong","ts":1763859600123}
+```
+
+### Interrupted and terminal watchdog `result` frames (`emitErrorResult`)
+
+Same schema as the normal `result` frame plus `"error": "<reason>"` so callers parse all outcomes with one schema:
+
+```json
+{"type":"result","subtype":"interrupted","error":"interrupted","session_id":"...","result":"","is_error":false,"duration_ms":1500,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
+```
+
+```json
+{"type":"result","subtype":"error","error":"transcript_stalled","session_id":"...","result":"","is_error":true,"duration_ms":600100,"duration_api_ms":0,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
+```
+
+`is_error` is `false` only for `subtype: "interrupted"`, and `true` for all timeout/error subtypes.
+
+## Watchdogs and failure exits
+
+Every watchdog timeout flushes any remaining transcript bytes, emits one structured error `result` frame to stdout, and terminates the child so callers never see a silent dead pipe:
+
+| Watchdog | Flag / default | `"error"` reason | Exit code |
+| --- | --- | --- | --- |
+| Startup deadline | `--timeout <sec>` (`300`) | `session_start_timeout` | `2` |
+| Busy PTY silence | `--idle-timeout <sec>` (`180`; `0` disables) | `idle_timeout` | `124` |
+| Busy transcript stall (spinner-immune) | `--transcript-idle-timeout <sec>` (`600`; `0` disables) | `transcript_stalled` | `124` |
+
+Both busy watchdogs reset on `idle → busy` and never trip while `.idle` or `.waiting_for_ready`. A ticking Ink spinner resets `idle_timeout` but does **not** reset `transcript_stalled`, which requires `tailer.pos` to advance.
+
+## Stderr `[pty-trace]` telemetry
+
+Controlled by `CLAUDE_P_PTY_TRACE` (default `60` s; `0`/`off`/`false`/`no` disables; positive integer sets seconds):
+
+```text
+[pty-trace] state=busy pty_bytes=48210 pty_delta=1920 last_byte_age_ms=340 turn_age_ms=60012 transcript_pos=8192
+```
+
+- `last_byte_age_ms` is `-1` before the first PTY byte arrives.
+- `turn_age_ms` is `-1` before the first turn is dispatched.

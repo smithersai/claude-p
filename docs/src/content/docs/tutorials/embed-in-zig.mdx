@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Callout from '../../../components/Callout.astro';
+import Exercise from '../../../components/Exercise.astro';
 
 **Goal:** Add `claude_p` to a Zig **0.15.2** executable, run a one-shot prompt, stream live JSONL lines to a custom writer, and merge library-level `extra_hooks` and `extra_settings_json` without touching `~/.claude/`.
 
@@ -106,7 +107,7 @@ Notice the ownership contract: `claude_p.run` takes an explicit `std.mem.Allocat
 
 ## Step 3: Stream live lines + attach custom hooks
 
-Here is something the Zig API gives you that the CLI flags don't expose yet: **inline hook and settings merging** (`extra_hooks` and `extra_settings_json`), plus a direct **`stream_writer`** hook into the live transcript tailer.
+You can combine **`stream_writer`** (live per-message streaming straight into any `std.Io.Writer`) with inline hook and settings merging (**`extra_hooks`** and **`extra_settings_json`**, also available on the CLI via `--extra-hook` and `--setting-json`) without touching `~/.claude/`.
 
 Update `src/main.zig`:
 
@@ -162,9 +163,28 @@ pub fn main() !void {
   emit path for all three formats.
 </Callout>
 
-## Checkpoint & next steps
+---
 
-You wired `claude_p` into a Zig 0.15.2 build, ran a prompt, streamed live JSONL through `stream_writer`, and merged custom hooks and settings cleanly.
+<Exercise title="Sharpen your pencil: spot the settings bug">
+  What happens if you pass this option to <code>claude_p.run</code>?
+  <pre><code>{'.extra_settings_json = "{\\"hooks\\":{\\"Stop\\":[]},\\"cleanupPeriodDays\\":7}"'}</code></pre>
+  <Fragment slot="answer">
+    <strong><code>claude_p</code> silently ignores the <code>"hooks"</code> key and keeps its own relay hooks intact.</strong>
+    <code>cleanupPeriodDays: 7</code> is merged into the generated <code>--settings</code> object.
+    Only malformed JSON, a non-object root (like <code>"[]"</code> or <code>"42"</code>), or an
+    empty <code>ExtraHook.event</code>/<code>command</code> returns <code>error.InvalidExtraSettings</code>.
+  </Fragment>
+</Exercise>
 
-- **Need every struct field and error variant?** Open the [Zig Library API Reference](/reference/zig-api/).
-- **Curious how `Tailer` reads a file while Claude appends to it?** See [Hooks and Transcripts](/internals/hooks-and-transcripts/).
+## There are no dumb questions
+
+**Q: Why does `build.zig` fail if I run Zig 0.16 or 0.17?**
+**A:** `zmux` checks the compiler version at `comptime` and pins Zig **`0.15.2`**. Use `zvm use 0.15.2` (or point your CI action at `0.15.2`) when building or embedding `claude_p`.
+
+**Q: Who frees `result.summary.final_text`, `session_id`, and `jsonl_replay`?**
+**A:** Your allocator. Every public function in `claude_p` follows allocator-per-function ownership; calling `defer result.deinit(alloc);` frees all three heap buffers.
+
+## Next steps
+
+- **Need every struct field and error variant?** Open the [Zig Library API Reference](/claude-p/reference/zig-api/).
+- **Curious how `Tailer` reads a file while Claude appends to it?** See [Hooks and Transcripts](/claude-p/internals/hooks-and-transcripts/).

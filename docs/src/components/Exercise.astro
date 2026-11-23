@@ -1,0 +1,21 @@
+---
+interface Props {
+  title: string;
+  answerLabel?: string;
+}
+
+const { title, answerLabel = 'Check your answer' } = Astro.props;
+---
+
+<section class="hf-exercise">
+  <div class="hf-exercise-title">{title}</div>
+  <div class="hf-exercise-prompt">
+    <slot />
+  </div>
+  <details class="hf-exercise-details">
+    <summary>{answerLabel}</summary>
+    <div class="hf-exercise-answer">
+      <slot name="answer" />
+    </div>
+  </details>
+</section>

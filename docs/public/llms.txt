@@ -1,0 +1,44 @@
+# claude-p
+
+> A drop-in replacement for `claude -p` that drives the interactive `claude` UI inside an in-process zmux PTY session. Version 0.1.3, Zig 0.15.2, macOS and Linux (arm64/x64).
+
+## Quick facts
+
+- One-shot CLI: `claude-p [OPTIONS] [PROMPT]` (stdin or `--input-file` up to 16 MiB).
+- Output formats: `text` (default), `json`, `stream-json` (requires `--verbose` in one-shot mode).
+- Daemon CLI: `claude-p daemon [OPTIONS]` speaks NDJSON on stdin (`user`, `ping`, `interrupt`) and stdout (`system/init`, live transcript lines, per-turn `result`, `pong`, structured `interrupted` / watchdog error `result` frames).
+- Rejected CLI flags: `-p`, `--print`, `--settings` (use `--extra-hook` or `--setting-json`), `--bare`, `--safe-mode`.
+- Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error or daemon `session_start_timeout`, `124` one-shot timeout or daemon `idle_timeout`/`transcript_stalled`, `128+sig` via npm shim.
+- Never mutates `~/.claude/`; uses per-run `$TMPDIR/claude-p-<pid>-<rand>/` FIFO + relay script.
+
+## Start here
+
+- [Overview](https://smithersai.github.io/claude-p/): Splash page, quick commands, mode comparison, and design principles.
+- [Getting Started](https://smithersai.github.io/claude-p/getting-started/): Prerequisites, install with SHA-256 verification, and first text/json/stream-json runs.
+
+## Tutorials
+
+- [Build a Commit Reviewer](https://smithersai.github.io/claude-p/tutorials/first-automation/): Hands-on shell script using stdin/`--input-file`, JSON output, and exit codes.
+- [Drive a Multi-Turn Daemon](https://smithersai.github.io/claude-p/tutorials/multi-turn-daemon/): Node.js controller speaking NDJSON (`user`, `ping`, `interrupt`) to `claude-p daemon`.
+- [Embed claude-p in a Zig Program](https://smithersai.github.io/claude-p/tutorials/embed-in-zig/): Fetching `claude_p` in Zig 0.15.2, `claude_p.run`, `stream_writer`, `extra_hooks`, and `extra_settings_json`.
+
+## How-to guides
+
+- [Stream Live JSON Output](https://smithersai.github.io/claude-p/guides/streaming-json/): Live per-message transcript streaming with `--output-format stream-json --verbose` and `jq`.
+- [Resume and Continue Sessions](https://smithersai.github.io/claude-p/guides/resuming-sessions/): Using `--resume`, `--continue`, and `--session-id` with byte-offset isolation.
+- [Nested Sessions and Auth](https://smithersai.github.io/claude-p/guides/nested-sessions-and-auth/): Running inside Claude Code or CI while preserving OAuth, Bedrock, Vertex, and Foundry env vars.
+- [Debugging and Diagnostics](https://smithersai.github.io/claude-p/guides/debugging-and-diagnostics/): `--debug` traces, `CLAUDE_P_PTY_TRACE`, and error diagnosis table.
+
+## How it works
+
+- [Architecture](https://smithersai.github.io/claude-p/internals/architecture/): `zmux.NativeSession`, reader thread vs main loop, hook FIFO, and module map.
+- [PTY and DEC Terminal Queries](https://smithersai.github.io/claude-p/internals/pty-and-dec-queries/): Exact byte grammar for DA1, DA2, DSR, XTVERSION, and XTWINOPS 18t in `src/terminal.zig`.
+- [Startup Dialogs and Paced Paste](https://smithersai.github.io/claude-p/internals/startup-dialogs-and-paste/): Claude Code 2.1 dialog FSM (`❯` verification), macOS 1024 B `TTYHOG` chunked bracketed paste (`PasteChunker`), and 4 s acceptance watchdog.
+- [Hooks and Transcripts](https://smithersai.github.io/claude-p/internals/hooks-and-transcripts/): Inline `--settings`, opening `events.fifo` before fork, `Stop`-vs-flush retry loop, and `pread` tailing.
+
+## Reference
+
+- [CLI Reference](https://smithersai.github.io/claude-p/reference/cli/): All flags, defaults, passthrough rules, JSON result schema, environment variables, and exit codes.
+- [Daemon Protocol Reference](https://smithersai.github.io/claude-p/reference/daemon-protocol/): Stdin/stdout NDJSON frames, interrupt handling, dual watchdogs, and `[pty-trace]`.
+- [Zig Library API Reference](https://smithersai.github.io/claude-p/reference/zig-api/): `root.zig`, `driver.Options`, `driver.Result`, `driver.RunError`, `daemon.Options`, `hook.ExtraHook`, `emitErrorResult`, `transcript.Summary`.
+- [Installation, Checksums, and Builds](https://smithersai.github.io/claude-p/reference/installation-and-builds/): Platform matrix, `SHA256SUMS` verification, Zig 0.15.2 source/cross-compile builds, and test suites.

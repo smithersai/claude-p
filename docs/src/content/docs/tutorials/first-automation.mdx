@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Callout from '../../../components/Callout.astro';
+import Exercise from '../../../components/Exercise.astro';
 import LifecyclePipelineDiagram from '../../../components/diagrams/LifecyclePipelineDiagram.astro';
 
 **Goal:** Build a 20-line shell script that pipes a diff into `claude-p`, extracts structured review text and token usage from `--output-format json`, and distinguishes model errors from wrapper failures using exit codes.
@@ -131,7 +132,8 @@ Notice the last line is always `{"type":"result","subtype":"success"}`—the exa
 | --- | --- | --- |
 | `0` | Nothing (`is_error: false`) | Parse stdout and continue. |
 | `1` | Assistant returned `is_error: true` | Surface `.result` to the caller; do not retry blindly. |
-| `2` | Bad flags, empty prompt, timeout, `PromptNotAccepted`, `PromptTruncated`, or spawn error | Read stderr (or rerun with `--debug`). |
+| `2` | Bad flags, empty prompt, `PromptNotAccepted`, `PromptTruncated`, `InvalidExtraSettings`, or spawn error | Read stderr (or rerun with `--debug`). |
+| `124` | Timed out (`SessionStartTimeout` or `StopTimeout`) | Raise `--timeout` or retry with a smaller prompt. |
 | `130` | Interrupted via `SIGINT` (npm shim) | Stop cleanly. |
 
 <Callout title="Watch out for variadic flags before PROMPT!" kind="trap">
@@ -198,9 +200,36 @@ esac
 
 Notice we used `--input-file "$TMP_PROMPT"` instead of passing `$DIFF` as a CLI argument—that avoids shell quoting hazards and kernel `ARG_MAX` caps on large diffs.
 
-## Checkpoint & next steps
+---
 
-You now know how to pass prompts via stdin or `--input-file`, parse `--output-format json`, stream live JSONL with `--verbose`, and branch on exit codes `0`, `1`, and `2`.
+<Exercise title="Sharpen your pencil: predict the exit code">
+  What happens when you run these three commands? Predict the exit code before expanding the answer.
+  <ol>
+    <li><code>npx claude-p --output-format stream-json "Reply OK."</code></li>
+    <li><code>npx claude-p --bare "Reply OK."</code></li>
+    <li><code>npx claude-p --timeout 1 "Write a 5,000-word essay."</code></li>
+  </ol>
+  <Fragment slot="answer">
+    <ol>
+      <li><strong>Exit <code>2</code></strong> (<code>StreamJsonRequiresVerbose</code>): one-shot <code>stream-json</code> requires <code>--verbose</code>.</li>
+      <li><strong>Exit <code>2</code></strong> (<code>UnsupportedFlag</code>): Claude Code 2.1 skips <code>--settings</code> hooks under <code>--bare</code> and <code>--safe-mode</code>, so <code>claude-p</code> rejects both up front.</li>
+      <li><strong>Exit <code>124</code></strong> (<code>SessionStartTimeout</code> or <code>StopTimeout</code>): every one-shot timeout maps to <code>124</code>, matching GNU <code>timeout(1)</code>.</li>
+    </ol>
+  </Fragment>
+</Exercise>
 
-- **Running many turns in a row?** Don't pay PTY boot overhead on every turn—continue to [Drive a Multi-Turn Daemon](/tutorials/multi-turn-daemon/).
-- **Want the full byte story?** Read [Startup Dialogs and Paced Paste](/internals/startup-dialogs-and-paste/).
+## There are no dumb questions
+
+**Q: Why doesn't `claude-p` just pass my prompt as a CLI argument to `claude "hello"`?**
+**A:** Passing a prompt on argv bypasses `SessionStart`, leaves you exposed to shell quoting and `ARG_MAX` limits on large diffs, and can race with Claude Code 2.1 startup modals (trust / bypass-permissions). Waiting for `SessionStart` and pasting through the PTY lets `claude-p` dismiss modals first and verify exact delivery via `UserPromptSubmit`.
+
+**Q: Does `claude-p` edit my `~/.claude/settings.json` to install hooks?**
+**A:** No. Every run passes inline `--settings '<json>'` on the child argv and places `hook.sh` and `events.fifo` inside `$TMPDIR/claude-p-<pid>-<rand>/`, which is removed when the process exits.
+
+**Q: Can I still attach my own hooks if `--settings` is reserved?**
+**A:** Yes. Pass `--extra-hook 'PreToolUse=my-check.sh'` (repeatable) or `--setting-json '{"cleanupPeriodDays":7}'`. `claude-p` merges them into the generated `--settings` while keeping its own relay hooks at index `0`.
+
+## Next steps
+
+- **Running many turns in a row?** Don't pay PTY boot overhead on every turn—continue to [Drive a Multi-Turn Daemon](/claude-p/tutorials/multi-turn-daemon/).
+- **Want the full byte story?** Read [Startup Dialogs and Paced Paste](/claude-p/internals/startup-dialogs-and-paste/).

@@ -1,0 +1,57 @@
+---
+title: Installation, Checksums, and Builds
+description: Supported platforms, SHA-256 release verification in scripts/install.js, Zig 0.15.2 source builds, and cross-compilation targets.
+sidebar:
+  order: 4
+---
+
+## Supported platforms
+
+| Platform | Architecture | npm prebuilt asset | Zig cross-compile target |
+| --- | --- | --- | --- |
+| macOS | Apple Silicon (`arm64`) | `claude-p-darwin-arm64.gz` | `aarch64-macos` |
+| macOS | Intel (`x64`) | `claude-p-darwin-x64.gz` | `x86_64-macos` |
+| Linux | `x64` | `claude-p-linux-x64.gz` | `x86_64-linux-musl` |
+| Linux | `arm64` | `claude-p-linux-arm64.gz` | `aarch64-linux-musl` |
+
+Windows is not supported (no POSIX `forkpty`). `package.json` enforces `"os": ["darwin", "linux"]`, `"cpu": ["x64", "arm64"]`, and `"engines": { "node": ">=18" }`.
+
+## npm shim and SHA-256 verification
+
+When you install via `npm` or `npx`:
+
+1. `scripts/install.js` (npm `postinstall`) downloads `claude-p-<platform>-<arch>.gz` and `SHA256SUMS` from `https://github.com/smithersai/claude-p/releases/download/v<version>/`.
+2. **Checksum verification:**
+   - `SHA256SUMS` present and digest matches → gunzip to `prebuilt/<platform>-<arch>/claude-p` with mode `0755`.
+   - `SHA256SUMS` present and digest mismatches (or asset unlisted) → hard failure (`ChecksumError`), nothing written, exits `1`.
+   - `SHA256SUMS` returns HTTP 404 (pre-`v0.1.3` releases) → warns on stderr and installs unverified, **unless** `CLAUDE_P_REQUIRE_CHECKSUM=1`, which makes missing checksums a hard error.
+3. Network failure (non-checksum error) logs build-from-source instructions without failing `npm install`. Set `CLAUDE_P_SKIP_DOWNLOAD=1` to skip downloading entirely.
+4. At runtime, `bin/claude-p.js` spawns `prebuilt/<platform>-<arch>/claude-p` with `stdio: "inherit"` and forwards `SIGINT`, `SIGTERM`, and `SIGHUP`.
+
+## Build from source (Zig 0.15.2)
+
+`build.zig.zon` pins `minimum_zig_version = "0.15.2"` (required by `zmux`).
+
+```bash
+# Release binary → ./zig-out/bin/claude-p
+zig build -Doptimize=ReleaseSafe
+
+# Cross-compile for any supported target (e.g. Linux musl from macOS)
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -p out
+```
+
+## Running the test suites
+
+```bash
+# 141 unit tests across src/*.zig (zero external dependencies)
+zig build test
+zig build test -Dtest-filter="daemon"
+
+# 8 end-to-end tests against the real `claude` binary on $PATH (no mocks)
+CLAUDE_P_E2E=1 zig build test-integration
+CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="resume"
+
+# CI hygiene checks (version lockstep across package.json, build.zig.zon, src/root.zig)
+node scripts/publish.mjs --check-versions
+node --check scripts/install.js && node --check scripts/publish.mjs
+```

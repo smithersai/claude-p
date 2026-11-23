@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Callout from '../../../components/Callout.astro';
+import Exercise from '../../../components/Exercise.astro';
 import DaemonProtocolDiagram from '../../../components/diagrams/DaemonProtocolDiagram.astro';
 
 **Goal:** Spawn `claude-p daemon` once from Node.js, verify liveness with `ping`/`pong`, run two back-to-back conversational turns in the same Claude Code session, and shut down cleanly on stdin EOF.
@@ -158,14 +159,16 @@ Daemon exited with code: 0
 
 ---
 
-## Step 3: Understand the two timers you just configured
+## Step 3: Understand the watchdogs and `interrupt`
 
-Look at two lines in `daemon-client.mjs` that quietly prevented common production bugs:
+Look at how `claude-p daemon` protects a long-running controller from hanging:
 
-1. **`--idle-timeout 120`** sets the busy-turn PTY silence watchdog to 120 seconds (default is 180 s; `0` disables it).
-   - While **idle** (waiting for your next `user` frame), this timer **never trips**—your daemon can sit parked for hours.
-   - The moment a prompt is dispatched (`idle → busy`), `claude-p` resets `last_output_ns` to `now` so a long idle period never causes an instant false timeout on the next turn.
-2. **`CLAUDE_P_PTY_TRACE: 'off'`** silences the daemon's periodic stderr trace. By default, `claude-p daemon` prints a `[pty-trace]` line every 60 seconds showing `pty_delta` and `transcript_pos` so you can tell a live spinner apart from a truly wedged process.
+1. **`--idle-timeout 120`** sets the busy-turn PTY silence watchdog to 120 seconds (default `180 s`; `0` disables).
+   - While **idle** (waiting for your next `user` frame), watchdogs **never trip**—your daemon can sit parked for hours.
+   - The moment a prompt is dispatched (`idle → busy`), `claude-p` resets both watchdog baselines to `now` so a long idle period never causes an instant false timeout.
+2. **`--transcript-idle-timeout`** (default `600 s`; `0` disables) is the spinner-immune counterpart: even if Ink's spinner keeps writing PTY bytes, this watchdog fires `transcript_stalled` (exit `124`) if the transcript JSONL file stops growing while busy. Before exiting on *any* watchdog, the daemon flushes a structured error `result` frame to stdout so your reader never hits a mysterious silent EOF.
+3. **`{"type":"interrupt"}`** lets you cancel a runaway turn without restarting `claude`: send it on stdin while busy and the daemon sends Escape (`\x1b`), waits up to 1.5 s, emits a `result` with `subtype: "interrupted"` (`is_error: false`), and returns to `.idle` ready for the next turn.
+4. **`CLAUDE_P_PTY_TRACE: 'off'`** silences the daemon's periodic stderr trace. By default, `claude-p daemon` prints a `[pty-trace]` line every 60 seconds showing `pty_delta` and `transcript_pos`.
 
 <Callout title="Watch the bytes: how per-turn usage stays accurate" kind="bytes">
   Claude appends every turn to the same session <code>.jsonl</code> file.
@@ -176,14 +179,41 @@ Look at two lines in `daemon-client.mjs` that quietly prevented common productio
 </Callout>
 
 <Callout title="Trap: don't send malformed JSON without checking stdout" kind="trap">
-  In <code>src/daemon.zig</code>, non-<code>user</code> / non-<code>ping</code> or unparseable
-  stdin lines are silently ignored rather than aborting the daemon. Always serialize frames with
-  <code>JSON.stringify</code> and terminate each frame with <code>\n</code>.
+  In <code>src/daemon.zig</code>, non-<code>user</code> / non-<code>ping</code> /
+  non-<code>interrupt</code> or unparseable stdin lines are ignored rather than aborting the
+  daemon. Always serialize frames with <code>JSON.stringify</code> and end each line with
+  <code>\n</code>.
 </Callout>
 
-## Checkpoint & next steps
+---
 
-You built a stateful NDJSON controller over a single `claude-p daemon` process with liveness probes, isolated per-turn result envelopes, and graceful EOF shutdown.
+<Exercise title="Trace the state machine: what happens after an interrupt?">
+  Your controller sends <code>{"{\"type\":\"interrupt\"}"}</code> while Turn 1 is busy.
+  Escape stops Claude, 1.5 s pass without a <code>Stop</code> hook, and the daemon emits
+  <code>subtype: "interrupted"</code> and returns to <code>idle</code>. You immediately send Turn 2,
+  and 100 ms later a delayed <code>Stop</code> from Turn 1 finally arrives on the FIFO.
+  <p>Does that late <code>Stop</code> prematurely end Turn 2?</p>
+  <Fragment slot="answer">
+    <strong>No.</strong> After an interrupt window elapses, <code>daemon.zig</code> sets
+    <code>after_interrupt = true</code>. On Turn 2, <code>stopBelongsToTurn()</code> ignores any
+    <code>Stop</code> hook until Turn 2 proves it is live via <code>UserPromptSubmit</code> or new
+    transcript bytes. Before pasting Turn 2, the daemon also pumps stray transcript bytes,
+    advances <code>turn_start_pos</code>, and sends <code>Ctrl-U</code> to clear any restored input.
+  </Fragment>
+</Exercise>
 
-- **Need exact frame schemas and edge cases?** Read the [Daemon Protocol Reference](/reference/daemon-protocol/).
-- **Debugging a slow or stuck turn?** See [Debugging and Diagnostics](/guides/debugging-and-diagnostics/).
+## There are no dumb questions
+
+**Q: Why do we need TWO busy watchdogs (`--idle-timeout` and `--transcript-idle-timeout`)?**
+**A:** Ink draws an animated spinner while Claude waits on a hung tool or stalled network call. That spinner keeps writing ANSI frames to the PTY, which resets `--idle-timeout` (180 s) forever. `--transcript-idle-timeout` (600 s) watches actual byte growth in `transcript.jsonl`, so a ticking spinner can never mask a wedged turn.
+
+**Q: Why is `is_error` set to `false` on an `interrupted` result frame?**
+**A:** You asked for the interrupt. Setting `is_error: false` with `subtype: "interrupted"` lets a controller distinguish a caller-initiated cancellation from a fatal timeout (`is_error: true`, `subtype: "error"`).
+
+**Q: What if I close stdin while a turn is still running?**
+**A:** The daemon does not kill the in-flight turn. It sets `stdin_eof = true`, lets the active turn and any queued prompts finish, drains the tailer, terminates `claude`, and exits `0`.
+
+## Next steps
+
+- **Need exact frame schemas and edge cases?** Read the [Daemon Protocol Reference](/claude-p/reference/daemon-protocol/).
+- **Debugging a slow or stuck turn?** See [Debugging and Diagnostics](/claude-p/guides/debugging-and-diagnostics/).

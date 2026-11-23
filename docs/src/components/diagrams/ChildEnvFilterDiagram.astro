@@ -1,0 +1,66 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'driver.buildChildEnv() strips only nested-session markers. Auth and cloud backend variables pass straight through to the child claude process.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 840 278" role="img" aria-label="Child environment variable filtering diagram">
+    <defs>
+      <marker id="env-arr-r" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-rose)" />
+      </marker>
+      <marker id="env-arr-g" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-green)" />
+      </marker>
+      <marker id="env-arr-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-accent)" />
+      </marker>
+    </defs>
+
+    <!-- Parent env -->
+    <rect x="16" y="76" width="160" height="122" rx="10" fill="var(--diag-surface)" stroke="var(--diag-border-strong)" stroke-width="1.5" />
+    <text x="96" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-text)">Parent env</text>
+    <text x="96" y="128" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-muted)">buildChildEnv()</text>
+    <text x="96" y="148" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">shared by one-shot</text>
+    <text x="96" y="164" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">and daemon modes</text>
+
+    <!-- Lane 1: Stripped -->
+    <rect x="228" y="18" width="406" height="72" rx="8" fill="var(--diag-rose-fill)" stroke="var(--diag-rose)" stroke-width="1.5" />
+    <text x="242" y="40" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-rose)">STRIPPED (nested-session markers only)</text>
+    <text x="242" y="59" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-text)">CLAUDECODE · AI_AGENT · CLAUDE_CODE_ENTRYPOINT · SSE_PORT</text>
+    <text x="242" y="76" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-muted)">CLAUDE_CODE_CHILD_SESSION · SESSION_* · PARENT_* · SUBAGENT_*</text>
+
+    <!-- Lane 2: Preserved -->
+    <rect x="228" y="102" width="406" height="72" rx="8" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="242" y="124" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-green)">PRESERVED (auth, cloud backends, user env)</text>
+    <text x="242" y="143" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-text)">CLAUDE_CODE_OAUTH_TOKEN · CLAUDE_CONFIG_DIR · ANTHROPIC_API_KEY</text>
+    <text x="242" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-muted)">CLAUDE_CODE_USE_BEDROCK · USE_VERTEX · USE_FOUNDRY · PATH</text>
+
+    <!-- Lane 3: Injected -->
+    <rect x="228" y="186" width="406" height="72" rx="8" fill="var(--diag-accent-fill)" stroke="var(--diag-accent)" stroke-width="1.5" />
+    <text x="242" y="208" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="var(--diag-accent)">INJECTED / DEFAULTED</text>
+    <text x="242" y="227" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-text)">CLAUDE_P_FIFO=&lt;fifo&gt; · TERM=xterm-256color</text>
+    <text x="242" y="244" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="var(--diag-muted)">CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 (if unset)</text>
+
+    <!-- Child claude -->
+    <rect x="680" y="102" width="144" height="156" rx="10" fill="var(--diag-surface)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="752" y="148" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-text)">child `claude`</text>
+    <text x="752" y="170" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">receives clean</text>
+    <text x="752" y="186" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">env without</text>
+    <text x="752" y="202" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">nested-session</text>
+    <text x="752" y="218" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">rejection</text>
+
+    <!-- Connectors -->
+    <path d="M 176 112 L 200 112 L 200 54 L 225 54" fill="none" stroke="var(--diag-rose)" stroke-width="1.6" marker-end="url(#env-arr-r)" />
+    <line x1="176" y1="138" x2="225" y2="138" stroke="var(--diag-green)" stroke-width="1.6" marker-end="url(#env-arr-g)" />
+    <path d="M 176 164 L 200 164 L 200 222 L 225 222" fill="none" stroke="var(--diag-accent)" stroke-width="1.6" marker-end="url(#env-arr-a)" />
+
+    <line x1="634" y1="138" x2="677" y2="138" stroke="var(--diag-green)" stroke-width="1.6" marker-end="url(#env-arr-g)" />
+    <line x1="634" y1="222" x2="677" y2="222" stroke="var(--diag-accent)" stroke-width="1.6" marker-end="url(#env-arr-a)" />
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

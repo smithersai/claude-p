@@ -53,10 +53,10 @@ Configure the trace interval via `CLAUDE_P_PTY_TRACE`:
 | Error / symptom | Cause | Fix |
 | --- | --- | --- |
 | `Error: --output-format=stream-json requires --verbose` | `stream-json` passed without `--verbose` in one-shot mode. | Add `--verbose`. |
-| `Error: unsupported flag` | Passed `-p`, `--print`, or `--settings`. | Remove `-p`/`--print` (already emulated); for custom settings/hooks use the Zig API (`extra_hooks`, `extra_settings_json`). |
-| `SessionStartTimeout` | Ink hung before `SessionStart` fired (unhandled modal, new terminal probe, or `claude` auth prompt). | Re-run with `--debug`; verify `claude` works interactively in `--cwd`; raise `--timeout`. |
+| `Error: unsupported flag` | Passed `-p`/`--print`, `--settings`, or `--bare`/`--safe-mode`. | Remove `-p`/`--print` (already emulated); replace `--settings` with `--extra-hook` or `--setting-json`; remove `--bare`/`--safe-mode` (they suppress `--settings` hooks). |
+| `SessionStartTimeout` | Ink hung before `SessionStart` fired (unhandled modal, new terminal probe, or `claude` auth prompt). Exits `124` (one-shot) or `2` with `session_start_timeout` frame (daemon). | Re-run with `--debug`; verify `claude` works interactively in `--cwd`; raise `--timeout`. |
 | `PromptNotAccepted` | Four prompt injections went unacknowledged by `UserPromptSubmit` or transcript growth. | Check `--debug` for a lingering modal or non-responsive TUI; ensure `--setting-sources` didn't block inline hooks. |
 | `PromptTruncated` | `UserPromptSubmit` reported fewer non-whitespace bytes than sent (for prompts > 64 non-space bytes). | Inspect `--debug` byte counts; pass large prompts via `--input-file` or stdin. |
 | `TranscriptUnavailable` | `Stop` fired (or child exited) with neither a parseable assistant message nor `last_assistant_message`. | Check `claude` stderr/auth state; verify `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE` is not set to `0`. |
-| `IdleTimeout` (daemon) | No PTY bytes arrived for `--idle-timeout` seconds while `.busy`. | Inspect `[pty-trace]` or raise/disable `--idle-timeout 0`. |
+| `idle_timeout` / `transcript_stalled` (daemon, exit `124`) | No PTY bytes for `--idle-timeout` or no transcript growth for `--transcript-idle-timeout` while `.busy`. | Inspect `[pty-trace]` (spinner ticking with flat `transcript_pos` means wedged turn) or raise/disable with `0`. |
 | Missing binary (`ENOENT` from `bin/claude-p.js`) | Postinstall download failed or `CLAUDE_P_SKIP_DOWNLOAD=1` was set. | Re-run `npm install claude-p` or build from source with Zig 0.15.2. |
