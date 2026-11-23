@@ -78,9 +78,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
             allocator,
             line,
             .{ .ignore_unknown_fields = true },
-        ) catch {
-            // Skip malformed lines but don't fail the whole parse.
-            continue;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Skip malformed lines without aborting the whole parse.
+            else => continue,
         };
         defer parsed.deinit();
 
@@ -182,9 +183,13 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
         return ParseError.NoAssistantMessage;
     }
 
+    const final_text = try final_text_buf.toOwnedSlice(allocator);
+    errdefer allocator.free(final_text);
+    const session_id = try session_id_buf.toOwnedSlice(allocator);
+    errdefer allocator.free(session_id);
     return Summary{
-        .final_text = try final_text_buf.toOwnedSlice(allocator),
-        .session_id = try session_id_buf.toOwnedSlice(allocator),
+        .final_text = final_text,
+        .session_id = session_id,
         .is_error = is_error,
         .num_turns = num_turns,
         .total_cost_usd = total_cost_usd,
@@ -196,10 +201,25 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
 
 /// Convenience: parse from a file path.
 pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !Summary {
+    return parseFileFromOffset(allocator, path, 0);
+}
+
+/// Parse only the bytes in `[start_offset..EOF]` of a transcript file.
+///
+/// Used for `--resume` / `--continue` isolation: the driver snapshots the
+/// transcript file size just before typing our prompt and passes it here so
+/// earlier turns are never returned as this turn's answer. Returns
+/// `ParseError.NoAssistantMessage` when the file size is `<= start_offset`
+/// or when no assistant/result record exists in the appended slice.
+pub fn parseFileFromOffset(allocator: std.mem.Allocator, path: []const u8, start_offset: u64) !Summary {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
+    const size = try file.getEndPos();
+    if (size <= start_offset) return ParseError.NoAssistantMessage;
+    try file.seekTo(start_offset);
     const bytes = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(bytes);
+    if (bytes.len == 0) return ParseError.NoAssistantMessage;
     return parse(allocator, bytes);
 }
 
@@ -234,7 +254,6 @@ test "parse: multiple turns — last assistant wins" {
     defer s.deinit(testing.allocator);
     try testing.expectEqualStrings("final answer", s.final_text);
     try testing.expectEqualStrings("xyz", s.session_id);
-    // Usage accumulates across both assistant messages.
     try testing.expectEqual(@as(u64, 12), s.usage.input_tokens);
     try testing.expectEqual(@as(u64, 6), s.usage.output_tokens);
 }
@@ -293,7 +312,6 @@ test "parse: replay preserves lines verbatim" {
     ;
     var s = try parse(testing.allocator, jsonl);
     defer s.deinit(testing.allocator);
-    // jsonl_replay should be the input with each non-empty line followed by \n.
     try testing.expect(std.mem.indexOf(u8, s.jsonl_replay, "\"subtype\":\"init\"") != null);
     try testing.expect(std.mem.indexOf(u8, s.jsonl_replay, "\"text\":\"hi\"") != null);
 }
@@ -306,4 +324,101 @@ test "parse: multi-block text concatenation" {
     var s = try parse(testing.allocator, jsonl);
     defer s.deinit(testing.allocator);
     try testing.expectEqualStrings("part1 part2", s.final_text);
+}
+
+const offset_turn1 =
+    \\{"type":"user","sessionId":"s1","message":{"content":"first question"}}
+    \\{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"old answer"}],"usage":{"input_tokens":5,"output_tokens":2}}}
+    \\
+;
+const offset_turn2 =
+    \\{"type":"user","sessionId":"s1","message":{"content":"second question"}}
+    \\{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"new answer"}],"usage":{"input_tokens":7,"output_tokens":4}}}
+    \\
+;
+
+fn writeOffsetFixture(tmp: *std.testing.TmpDir, parts: []const []const u8) ![]u8 {
+    var f = try tmp.dir.createFile("t.jsonl", .{});
+    defer f.close();
+    for (parts) |p| try f.writeAll(p);
+    return try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
+}
+
+test "parseFileFromOffset: offset 0 equals parseFile" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeOffsetFixture(&tmp, &.{ offset_turn1, offset_turn2 });
+    defer testing.allocator.free(path);
+
+    var a = try parseFileFromOffset(testing.allocator, path, 0);
+    defer a.deinit(testing.allocator);
+    var b = try parseFile(testing.allocator, path);
+    defer b.deinit(testing.allocator);
+    try testing.expectEqualStrings("new answer", a.final_text);
+    try testing.expectEqualStrings(b.final_text, a.final_text);
+    try testing.expectEqualStrings(b.jsonl_replay, a.jsonl_replay);
+    try testing.expectEqual(@as(u32, 2), a.num_turns);
+    try testing.expectEqual(@as(u64, 12), a.usage.input_tokens);
+}
+
+test "parseFileFromOffset: mid-file offset returns only the new turn" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeOffsetFixture(&tmp, &.{ offset_turn1, offset_turn2 });
+    defer testing.allocator.free(path);
+
+    var s = try parseFileFromOffset(testing.allocator, path, offset_turn1.len);
+    defer s.deinit(testing.allocator);
+    try testing.expectEqualStrings("new answer", s.final_text);
+    try testing.expectEqualStrings("s1", s.session_id);
+    try testing.expectEqual(@as(u32, 1), s.num_turns);
+    try testing.expectEqual(@as(u64, 7), s.usage.input_tokens);
+    try testing.expectEqual(@as(u64, 4), s.usage.output_tokens);
+    try testing.expect(std.mem.indexOf(u8, s.jsonl_replay, "old answer") == null);
+    try testing.expectEqualStrings(offset_turn2, s.jsonl_replay);
+}
+
+test "parseFileFromOffset: appended user-only slice never yields old answer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const user_only = offset_turn2[0 .. std.mem.indexOfScalar(u8, offset_turn2, '\n').? + 1];
+    const path = try writeOffsetFixture(&tmp, &.{ offset_turn1, user_only });
+    defer testing.allocator.free(path);
+    try testing.expectError(
+        ParseError.NoAssistantMessage,
+        parseFileFromOffset(testing.allocator, path, offset_turn1.len),
+    );
+}
+
+test "parseFileFromOffset: offset at or past EOF returns NoAssistantMessage" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeOffsetFixture(&tmp, &.{offset_turn1});
+    defer testing.allocator.free(path);
+    try testing.expectError(
+        ParseError.NoAssistantMessage,
+        parseFileFromOffset(testing.allocator, path, offset_turn1.len),
+    );
+    try testing.expectError(
+        ParseError.NoAssistantMessage,
+        parseFileFromOffset(testing.allocator, path, offset_turn1.len + 1000),
+    );
+}
+
+test "parseFileFromOffset: offset inside a line skips torn fragment" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeOffsetFixture(&tmp, &.{ offset_turn1, offset_turn2 });
+    defer testing.allocator.free(path);
+    var s = try parseFileFromOffset(testing.allocator, path, offset_turn1.len - 20);
+    defer s.deinit(testing.allocator);
+    try testing.expectEqualStrings("new answer", s.final_text);
+    try testing.expectEqual(@as(u32, 1), s.num_turns);
+}
+
+test "parseFileFromOffset: missing file returns FileNotFound" {
+    try testing.expectError(
+        error.FileNotFound,
+        parseFileFromOffset(testing.allocator, "/nonexistent/claude-p/t.jsonl", 0),
+    );
 }

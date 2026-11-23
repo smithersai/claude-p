@@ -1,0 +1,143 @@
+/* Crisp, K&R-meets-systems-manual visual palette and diagram styling */
+:root {
+  --sl-color-accent-low: #172536;
+  --sl-color-accent: #d97706;
+  --sl-color-accent-high: #fde68a;
+
+  /* Theme-aware SVG diagram tokens (dark mode default) */
+  --diag-bg: #11161f;
+  --diag-surface: #18202c;
+  --diag-surface-alt: #1d2736;
+  --diag-border: #334155;
+  --diag-border-strong: #64748b;
+  --diag-text: #e2e8f0;
+  --diag-muted: #94a3b8;
+  --diag-accent: #f59e0b;
+  --diag-accent-fill: rgba(245, 158, 11, 0.14);
+  --diag-blue: #38bdf8;
+  --diag-blue-fill: rgba(56, 189, 248, 0.13);
+  --diag-green: #34d399;
+  --diag-green-fill: rgba(52, 211, 153, 0.13);
+  --diag-rose: #fb7185;
+  --diag-rose-fill: rgba(251, 113, 133, 0.13);
+  --diag-purple: #c084fc;
+  --diag-purple-fill: rgba(192, 132, 252, 0.13);
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #fef3c7;
+  --sl-color-accent: #b45309;
+  --sl-color-accent-high: #78350f;
+
+  --diag-bg: #f8fafc;
+  --diag-surface: #ffffff;
+  --diag-surface-alt: #f1f5f9;
+  --diag-border: #cbd5e1;
+  --diag-border-strong: #64748b;
+  --diag-text: #0f172a;
+  --diag-muted: #475569;
+  --diag-accent: #b45309;
+  --diag-accent-fill: rgba(217, 119, 6, 0.11);
+  --diag-blue: #0284c7;
+  --diag-blue-fill: rgba(2, 132, 199, 0.10);
+  --diag-green: #059669;
+  --diag-green-fill: rgba(5, 150, 105, 0.10);
+  --diag-rose: #e11d48;
+  --diag-rose-fill: rgba(225, 29, 72, 0.10);
+  --diag-purple: #7c3aed;
+  --diag-purple-fill: rgba(124, 58, 237, 0.10);
+}
+
+/* Diagram figure container */
+.cp-diagram {
+  margin: 1.5rem 0;
+  padding: 1.15rem 1.25rem 0.9rem;
+  border: 1px solid var(--diag-border);
+  border-radius: 10px;
+  background: var(--diag-bg);
+}
+
+.cp-diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.cp-diagram figcaption {
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--diag-border);
+  font-size: 0.85rem;
+  color: var(--diag-muted);
+  line-height: 1.45;
+}
+
+/* Head First-style tutorial callout boxes */
+.hf-box {
+  margin: 1.4rem 0;
+  padding: 1rem 1.15rem;
+  border-radius: 10px;
+  border: 1px solid var(--diag-border);
+  border-left: 4px solid var(--diag-accent);
+  background: var(--diag-surface);
+}
+
+.hf-box.hf-bytes {
+  border-left-color: var(--diag-blue);
+}
+
+.hf-box.hf-check {
+  border-left-color: var(--diag-green);
+}
+
+.hf-box.hf-trap {
+  border-left-color: var(--diag-rose);
+}
+
+.hf-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 0.45rem;
+  color: var(--diag-accent);
+}
+
+.hf-box.hf-bytes .hf-title {
+  color: var(--diag-blue);
+}
+
+.hf-box.hf-check .hf-title {
+  color: var(--diag-green);
+}
+
+.hf-box.hf-trap .hf-title {
+  color: var(--diag-rose);
+}
+
+.hf-box > p:last-child,
+.hf-box > ul:last-child {
+  margin-bottom: 0;
+}
+
+/* Crisp compact tables */
+.sl-markdown-content table {
+  font-size: 0.9rem;
+}
+
+.sl-markdown-content code {
+  font-size: 0.875em;
+}
+
+/* Splash page notice banner */
+.cp-disclaimer {
+  margin: 0 auto 2rem;
+  padding: 0.9rem 1.15rem;
+  border: 1px solid var(--diag-border);
+  border-left: 4px solid var(--diag-accent);
+  border-radius: 8px;
+  background: var(--diag-surface);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}

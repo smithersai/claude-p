@@ -1,99 +1,112 @@
-# CLAUDE.md — agent instructions for this repo
+# CLAUDE.md — repository instructions for agents
 
-> **READ THIS BEFORE TOUCHING CODE.** If you joined the session mid-flight
-> (via context compaction, resume, or a fresh invocation), the first thing you
-> do is re-read **[SPEC.md](./SPEC.md)** and **[README.md](./README.md)** so the
-> architecture and end-user contract are in front of you. They are the source
-> of truth — this conversation is not.
+> **Start here on every session or after compaction.** Re-read
+> [SPEC.md](./SPEC.md) and [README.md](./README.md) before modifying code. The
+> source tree and `SPEC.md` are authoritative—never assume prior conversation
+> notes match HEAD.
 
 ## Project
 
-`claude-p` — a Zig CLI/library that emulates `claude -p` by driving the
-interactive `claude` binary inside an in-process [zmux] PTY session,
-capturing the final assistant message via a `Stop` hook, and emitting it in
-`claude -p` wire-compatible format.
+`claude-p` (`0.1.3`) — a Zig 0.15.2 library and CLI that emulates `claude -p`
+by driving the interactive `claude` binary inside an in-process
+[zmux][zmux] PTY session, reading lifecycle events over a per-run hook FIFO,
+and emitting `claude -p`-compatible output.
 
 [zmux]: https://github.com/smithersai/zmux
 
-## How to work in this repo
+## Working rules
 
-1. **Spec first, code second.** Any non-trivial change starts in `SPEC.md`.
-   If you find yourself making a load-bearing decision the spec doesn't
-   cover, update the spec in the same change.
-2. **TDD.** Write the failing test, then the code. The test order documented
-   in §6 of `SPEC.md` is the implementation order. Don't skip ahead — each
-   layer is consumed by the next.
-3. **Output is a contract.** `claude-p` output for a given prompt must be
-   byte-for-byte equal to `claude -p`'s output for the same prompt. Golden
-   files live in `tests/fixtures/`. If you change a formatter, regenerate
-   goldens with `zig build update-fixtures` and review the diff carefully.
-4. **No global state mutation.** Never write to `~/.claude/`. All hook
-   scripts, settings, FIFOs live under `$TMPDIR/claude-p-<pid>/` and are
-   cleaned up on exit (including via signal-safe cleanup paths).
-5. **Vendored zmux.** `zmux` is pulled in via `zig fetch` and the
-   resolved SHA is pinned in `build.zig.zon`. Do not bump casually — bump
-   only with a passing real-claude integration run
-   (`CLAUDE_P_E2E=1 zig build test-integration`).
+1. **Spec and code stay in sync.** Update `SPEC.md`, `README.md`, and `docs/`
+   in the same change as any behavioral, flag, protocol, or error change. Never
+   document unimplemented flags or protocol frames as shipped.
+2. **TDD first.** Write a failing unit test in the owning module (`src/*.zig`)
+   before implementing behavior. Keep `tests/integration.zig` mock-free—it tests
+   against the real `claude` binary.
+3. **Never mutate `~/.claude/`.** Every hook script, FIFO, and temporary
+   directory lives under `$TMPDIR/claude-p-<pid>-<rand>/` and is removed in
+   `HookHarness.deinit()`.
+4. **Zig 0.15.2 pin.** `zmux` enforces `0.15.2` at comptime. Do not bump the
+   `zmux` SHA in `build.zig.zon` without passing `CLAUDE_P_E2E=1 zig build test-integration`.
+5. **Version lockstep.** Keep `0.1.3` identical across `package.json`,
+   `build.zig.zon`, and `src/root.zig`. Verify with
+   `node scripts/publish.mjs --check-versions`.
 
-## Build & test
+## Build and test commands
 
 ```bash
-# Unit tests (no external deps).
+# Unit tests (113 tests, no external `claude` required; use Zig 0.15.2)
 zig build test
 
-# End-to-end against the real `claude` binary (must be on $PATH).
+# Release build
+zig build -Doptimize=ReleaseSafe
+
+# Version & release script hygiene (same checks as CI)
+node scripts/publish.mjs --check-versions
+node --check scripts/install.js && node --check scripts/publish.mjs
+
+# End-to-end tests against the real `claude` binary on $PATH
 CLAUDE_P_E2E=1 zig build test-integration
+
+# Documentation site (Starlight)
+cd docs && npm run build
 ```
 
-We don't use mocks for end-to-end testing — `tests/integration.zig`
-runs the real `claude` binary.
+## Module map
 
-## Files of note
+| Path | Role |
+| --- | --- |
+| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, exit-code mapping (`0`, `1`, `2`). |
+| `src/root.zig` | Public Zig library facade and `version`. |
+| `src/args.zig` | Argparse, variadic flags, boolean passthrough list, cross-flag rules. |
+| `src/terminal.zig` | Stateless DEC/XTerm responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t`). |
+| `src/hook.zig` | Inline `--settings`, `extra_hooks`, `extra_settings_json`, FIFO, `hook.sh`. |
+| `src/driver.zig` | One-shot lifecycle, env filter, startup dialog state machine, `PasteChunker`, watchdog. |
+| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`/`pong`, `system/init`, `result`, idle watchdog, `CLAUDE_P_PTY_TRACE`). |
+| `src/transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`. |
+| `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`. |
+| `src/emit.zig` | `text`, `json`, and `stream-json` formatters. |
+| `tests/integration.zig` | Real-`claude` end-to-end suite (`CLAUDE_P_E2E=1`). |
+| `bin/claude-p.js` | Node shim spawning `prebuilt/<platform>-<arch>/claude-p` and forwarding signals. |
+| `scripts/install.js` | Postinstall binary downloader with `SHA256SUMS` verification. |
+| `docs/` | Astro + Starlight documentation site. |
 
-| Path | Purpose |
-| ---- | ------- |
-| `SPEC.md` | Architecture, API, formats, exit codes, test plan. |
-| `README.md` | End-user CLI/library contract. |
-| `src/main.zig` | CLI entry point. |
-| `src/root.zig` | Public Zig library API. |
-| `src/args.zig` | Argparse. |
-| `src/terminal.zig` | DEC/XTerm query responder (stateless). |
-| `src/hook.zig` | Inline-settings + hook script generator. |
-| `src/driver.zig` | zmux session lifecycle + FIFO poll loop. |
-| `src/transcript.zig` | Session JSONL parser. |
-| `src/emit.zig` | Output formatters. |
-| `tests/integration.zig` | Real-claude end-to-end tests (gated). |
+## Load-bearing invariants and gotchas
 
-## Gotchas
+- **No zmux re-entrancy from `EventSink`.** `onZmuxEvent` runs on zmux's reader
+  thread. Never call `session.writeInput` inside it; queue bytes in
+  `shared.pending_to_pty` under `shared.write_mutex` and flush from the main
+  loop (`flushPendingToPty`).
+- **Ink hangs without DEC/XTerm replies.** Every `pane_output` chunk must pass
+  through `terminal.respondToDecQueries`.
+- **Open FIFO before spawn.** Open `events.fifo` with `O_RDONLY | O_NONBLOCK`
+  before creating the `NativeSession` so `hook.sh` never blocks on write.
+- **Targeted env filtering (`shouldStripChildEnv`).** Strip only nested-session
+  markers (`CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
+  and prefixes `CLAUDE_CODE_SESSION_`, `CLAUDE_CODE_PARENT_`,
+  `CLAUDE_CODE_SUBAGENT_`). **Never** blanket-strip `CLAUDE_CODE_*`—that breaks
+  `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex, and Foundry auth.
+- **Claude Code 2.1 trust dialog defaults to "No, exit".** `maybeHandleStartupDialogs`
+  must verify `❯` sits on the affirmative option on repaint before sending `\r`.
+- **macOS `TTYHOG` is 1024 bytes.** Always submit one-shot prompts through
+  `typePrompt` (`PasteChunker`: `<= 512` B UTF-8-safe chunks, `8 ms` gaps,
+  `\x1b[201~` neutralization, `120 ms` Enter debounce).
+- **Stop / transcript flush race.** `Stop` can fire before the final assistant
+  line hits disk. Retry `parseFileFromOffset` up to 20×50 ms (30× on
+  `last_assistant_message` mismatch), then fall back to Stop's
+  `last_assistant_message`.
+- **Resume offset isolation.** On `--resume`/`--continue`, wait for restored UI
+  quiescence (`400 ms`, cap `6000 ms`), snapshot `pre_prompt_transcript_offset`,
+  and parse only appended bytes via `parseFileFromOffset`.
+- **Daemon parity caveat.** `src/daemon.zig` still has its own inline dialog
+  check, `session.send`, and full env copy rather than sharing
+  `driver.maybeHandleStartupDialogs`, `driver.typePrompt`, and
+  `driver.buildChildEnv`. Check both files when fixing startup or paste bugs.
 
-- **Don't call back into zmux from inside the EventSink callback for the
-  same session.** The reader thread runs the callback; re-entering
-  `writeInput` from it would re-enter zmux's own locks. Queue bytes in a
-  mutex-guarded buffer and let the main loop flush.
-- **Ink hangs without DA/XTVERSION replies.** `terminal.respondToDecQueries`
-  is load-bearing. The EventSink callback must run it on every chunk of
-  PTY output. Do not remove it without testing against real claude.
-- **Hook FIFO ordering.** Both `SessionStart` and `Stop` write to the same
-  FIFO; the driver must tag each line by event name and handle out-of-order
-  arrivals.
-- **Multiple Stop events.** `Stop` fires after every assistant turn. For
-  single-turn print-mode emulation, take the first `Stop` and tear down.
-- **Stop / transcript race.** The Stop hook can fire a few ms before the
-  transcript JSONL is flushed. Retry `parseFile` (20×, 50 ms) and fall back
-  to `last_assistant_message` from the Stop payload.
+## Code conventions
 
-## When in doubt
-
-- Re-read `SPEC.md`.
-- zmux source / API: <https://github.com/smithersai/zmux>.
-- Live Claude Code hooks reference: <https://code.claude.com/docs/en/hooks>.
-
-## Conventions
-
-- Zig **0.15.2** (matches zmux's `comptime` pin).
-- Allocator-per-function: every public API takes a `std.mem.Allocator`.
-- Errors are `error{...}` unions, never `anyerror` in public APIs.
-- No `std.debug.print` in non-test code — use the `log` module gated on
-  `--debug`.
-- No silent fallbacks: if something we expected isn't there (e.g.
-  `transcript_path` missing from a Stop payload), error loudly with context.
+- Allocator-per-function for every public API.
+- Explicit `error{...}` unions in public APIs—never `anyerror`.
+- Gate diagnostic output on `opts.debug` (or `CLAUDE_P_PTY_TRACE` in daemon).
+- Fail loudly when required fields (such as `transcript_path` when fallback is
+  absent) are missing.

@@ -1,13 +1,27 @@
-//! Generates the Stop/SessionStart hook plumbing for a `claude` invocation:
-//! a per-run temp dir, a FIFO the parent reads, a tiny shell script that
-//! relays the hook payload to the FIFO, and the inline `--settings` JSON
-//! that tells `claude` to call it.
+//! Generates the SessionStart/UserPromptSubmit/Stop hook plumbing for a
+//! `claude` invocation: a per-run temp dir, a FIFO the parent reads, a tiny
+//! shell script that relays the hook payload to the FIFO, and the inline
+//! `--settings` JSON that tells `claude` to call it.
 //!
 //! Lifetime: caller owns the HookHarness and must `deinit` it; the temp
 //! directory and FIFO are removed there.
 const std = @import("std");
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: c_uint) c_int;
+
+pub const ExtraHook = struct {
+    event: []const u8,
+    command: []const u8,
+};
+
+pub const CreateOptions = struct {
+    /// Appended after the relay hook for the same event, or added under a new
+    /// event key. Relay hooks always remain first and authoritative.
+    extra_hooks: []const ExtraHook = &.{},
+    /// Optional JSON object whose top-level keys (other than `"hooks"`) are
+    /// merged into the generated `--settings` object.
+    extra_settings_json: ?[]const u8 = null,
+};
 
 pub const HookHarness = struct {
     allocator: std.mem.Allocator,
@@ -35,7 +49,7 @@ pub const HookHarness = struct {
 const script_body =
     \\#!/bin/sh
     \\# Relay a Claude Code hook event to claude-p's FIFO.
-    \\#   $1 = event name (e.g. "Stop", "SessionStart")
+    \\#   $1 = event name (e.g. "Stop", "SessionStart", "UserPromptSubmit")
     \\# stdin = the hook's JSON payload (single line, no embedded newlines).
     \\set -eu
     \\event="$1"
@@ -47,12 +61,27 @@ const script_body =
     \\
 ;
 
+const relay_events = [_][]const u8{
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+};
+
 fn tmpRoot() []const u8 {
     return std.posix.getenv("TMPDIR") orelse "/tmp";
 }
 
-/// Build a harness — creates tmp dir, FIFO, script, and settings JSON.
+/// Build a harness with default options — creates tmp dir, FIFO, script, and
+/// settings JSON.
 pub fn create(allocator: std.mem.Allocator) !HookHarness {
+    return createWithOptions(allocator, .{});
+}
+
+/// Build a harness whose settings JSON also merges `opts.extra_hooks` and
+/// `opts.extra_settings_json`. Validates all options before touching the
+/// filesystem so invalid settings or empty extra hooks never leave temp files
+/// behind.
+pub fn createWithOptions(allocator: std.mem.Allocator, opts: CreateOptions) !HookHarness {
     const seed: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
     var rng = std.Random.DefaultPrng.init(seed);
     const rand_suffix: u32 = rng.random().int(u32);
@@ -65,13 +94,18 @@ pub fn create(allocator: std.mem.Allocator) !HookHarness {
     );
     errdefer allocator.free(tmp_dir);
 
-    try std.fs.cwd().makePath(tmp_dir);
-
     const fifo_path = try std.fmt.allocPrint(allocator, "{s}/events.fifo", .{tmp_dir});
     errdefer allocator.free(fifo_path);
 
     const script_path = try std.fmt.allocPrint(allocator, "{s}/hook.sh", .{tmp_dir});
     errdefer allocator.free(script_path);
+
+    // Build and validate settings JSON BEFORE creating any files on disk.
+    const settings_json = try buildSettingsJson(allocator, script_path, opts);
+    errdefer allocator.free(settings_json);
+
+    try std.fs.cwd().makePath(tmp_dir);
+    errdefer std.fs.cwd().deleteDir(tmp_dir) catch {};
 
     // mkfifo via libc.
     const c_fifo_path = try allocator.dupeZ(u8, fifo_path);
@@ -79,14 +113,15 @@ pub fn create(allocator: std.mem.Allocator) !HookHarness {
     if (mkfifo(c_fifo_path.ptr, 0o600) != 0) {
         return error.MkfifoFailed;
     }
+    errdefer std.fs.cwd().deleteFile(fifo_path) catch {};
 
     // Write the relay script.
-    var script_file = try std.fs.cwd().createFile(script_path, .{ .mode = 0o700 });
-    defer script_file.close();
-    try script_file.writeAll(script_body);
-
-    const settings_json = try buildSettingsJson(allocator, script_path);
-    errdefer allocator.free(settings_json);
+    {
+        var script_file = try std.fs.cwd().createFile(script_path, .{ .mode = 0o700 });
+        defer script_file.close();
+        try script_file.writeAll(script_body);
+    }
+    errdefer std.fs.cwd().deleteFile(script_path) catch {};
 
     return HookHarness{
         .allocator = allocator,
@@ -97,28 +132,110 @@ pub fn create(allocator: std.mem.Allocator) !HookHarness {
     };
 }
 
-fn buildSettingsJson(allocator: std.mem.Allocator, script_path: []const u8) ![]u8 {
-    // Two hooks — SessionStart (so we know the UI is ready) and Stop (turn
-    // finished). The relay script reads stdin and appends a line to the FIFO.
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
-    const w = &aw.writer;
-    var js = std.json.Stringify{ .writer = w, .options = .{} };
-    try js.beginObject();
-    try js.objectField("hooks");
-    try js.beginObject();
-    try writeEvent(&js, "SessionStart", script_path);
-    try writeEvent(&js, "Stop", script_path);
-    try js.endObject();
-    try js.endObject();
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+fn needsShellQuoting(path: []const u8) bool {
+    if (path.len == 0) return true;
+    for (path) |c| {
+        const safe = std.ascii.isAlphanumeric(c) or c == '/' or c == '.' or c == '_' or c == '-';
+        if (!safe) return true;
+    }
+    return false;
 }
 
-fn writeEvent(js: *std.json.Stringify, event: []const u8, script_path: []const u8) !void {
-    try js.objectField(event);
-    try js.beginArray();
+fn formatRelayCommand(allocator: std.mem.Allocator, script_path: []const u8, event: []const u8) ![]u8 {
+    if (!needsShellQuoting(script_path)) {
+        return std.fmt.allocPrint(allocator, "{s} {s}", .{ script_path, event });
+    }
+    const escaped = try std.mem.replaceOwned(u8, allocator, script_path, "'", "'\\''");
+    defer allocator.free(escaped);
+    return std.fmt.allocPrint(allocator, "'{s}' {s}", .{ escaped, event });
+}
+
+fn buildSettingsJson(
+    allocator: std.mem.Allocator,
+    script_path: []const u8,
+    opts: CreateOptions,
+) ![]u8 {
+    // Reject empty event names or commands up front before doing any work.
+    for (opts.extra_hooks) |eh| {
+        if (eh.event.len == 0 or eh.command.len == 0) return error.InvalidExtraSettings;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    // Parse extra_settings_json up front (preserving number precision verbatim)
+    // so invalid input returns error.InvalidExtraSettings cleanly.
+    const extra_obj: ?std.json.ObjectMap = if (opts.extra_settings_json) |raw| blk: {
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, scratch, raw, .{
+            .duplicate_field_behavior = .use_last,
+            .parse_numbers = false,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidExtraSettings,
+        };
+        if (parsed != .object) return error.InvalidExtraSettings;
+        break :blk parsed.object;
+    } else null;
+
+    // Group relay and extra hooks by unique event key in first-seen order.
+    // Relay hooks are inserted first so they always stay authoritative at index 0.
+    var events: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)) = .{};
+    for (relay_events) |ev| {
+        const cmd = try formatRelayCommand(scratch, script_path, ev);
+        var cmds: std.ArrayList([]const u8) = .{};
+        try cmds.append(scratch, cmd);
+        try events.put(scratch, ev, cmds);
+    }
+    for (opts.extra_hooks) |eh| {
+        const gop = try events.getOrPut(scratch, eh.event);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        try gop.value_ptr.append(scratch, eh.command);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    writeSettingsJson(&aw.writer, extra_obj, &events) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+
+    return try aw.toOwnedSlice();
+}
+
+fn writeSettingsJson(
+    writer: *std.Io.Writer,
+    extra_obj: ?std.json.ObjectMap,
+    events: *const std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)),
+) std.Io.Writer.Error!void {
+    var js = std.json.Stringify{ .writer = writer, .options = .{} };
+    try js.beginObject();
+
+    // Merge caller's top-level keys except `"hooks"`, which we own.
+    if (extra_obj) |obj| {
+        var it = obj.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "hooks")) continue;
+            try js.objectField(entry.key_ptr.*);
+            try js.write(entry.value_ptr.*);
+        }
+    }
+
+    try js.objectField("hooks");
+    try js.beginObject();
+    var ev_it = events.iterator();
+    while (ev_it.next()) |entry| {
+        try js.objectField(entry.key_ptr.*);
+        try js.beginArray();
+        for (entry.value_ptr.items) |cmd| {
+            try writeMatcherEntry(&js, cmd);
+        }
+        try js.endArray();
+    }
+    try js.endObject();
+    try js.endObject();
+}
+
+fn writeMatcherEntry(js: *std.json.Stringify, command: []const u8) !void {
     try js.beginObject();
     try js.objectField("matcher");
     try js.write("*");
@@ -128,27 +245,21 @@ fn writeEvent(js: *std.json.Stringify, event: []const u8, script_path: []const u
     try js.objectField("type");
     try js.write("command");
     try js.objectField("command");
-    // The relay script takes the event name as $1.
-    const cmd = try std.fmt.allocPrint(
-        std.heap.page_allocator,
-        "{s} {s}",
-        .{ script_path, event },
-    );
-    defer std.heap.page_allocator.free(cmd);
-    try js.write(cmd);
+    try js.write(command);
     try js.endObject();
     try js.endArray();
     try js.endObject();
-    try js.endArray();
 }
 
 pub const HookEvent = enum {
     session_start,
+    user_prompt_submit,
     stop,
     unknown,
 
     pub fn fromString(s: []const u8) HookEvent {
         if (std.mem.eql(u8, s, "SessionStart")) return .session_start;
+        if (std.mem.eql(u8, s, "UserPromptSubmit")) return .user_prompt_submit;
         if (std.mem.eql(u8, s, "Stop")) return .stop;
         return .unknown;
     }
@@ -172,7 +283,7 @@ pub fn parseLine(raw: []const u8) ?HookLine {
     };
 }
 
-/// Pull `transcript_path` out of a Stop-hook payload JSON.
+/// Pull `transcript_path` out of a Stop/SessionStart hook payload JSON.
 /// Returned slice is heap-allocated.
 pub fn extractTranscriptPath(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
     return try extractStringField(allocator, payload_json, "transcript_path");
@@ -180,7 +291,7 @@ pub fn extractTranscriptPath(allocator: std.mem.Allocator, payload_json: []const
 
 /// Pull `last_assistant_message` out of a Stop-hook payload — recent Claude
 /// Code versions include this string in the payload directly, which lets us
-/// short-circuit transcript parsing entirely for the text format.
+/// verify or fall back when transcript flushing races Stop.
 pub fn extractLastAssistantMessage(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
     return try extractStringField(allocator, payload_json, "last_assistant_message");
 }
@@ -190,6 +301,12 @@ pub fn extractSessionId(allocator: std.mem.Allocator, payload_json: []const u8) 
     return try extractStringField(allocator, payload_json, "session_id");
 }
 
+/// Pull `prompt` out of a UserPromptSubmit hook payload JSON.
+/// Returned slice is heap-allocated.
+pub fn extractPrompt(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
+    return try extractStringField(allocator, payload_json, "prompt");
+}
+
 fn extractStringField(
     allocator: std.mem.Allocator,
     payload_json: []const u8,
@@ -197,7 +314,10 @@ fn extractStringField(
 ) !?[]u8 {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{
         .ignore_unknown_fields = true,
-    }) catch return null;
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const v = parsed.value.object.get(field) orelse return null;
@@ -209,33 +329,146 @@ fn extractStringField(
 
 const testing = std.testing;
 
-test "settings json: well-formed, contains both events" {
-    const json = try buildSettingsJson(testing.allocator, "/tmp/hook.sh");
+fn testCommandAt(hooks: std.json.ObjectMap, event: []const u8, idx: usize) []const u8 {
+    const entry = hooks.get(event).?.array.items[idx].object;
+    return entry.get("hooks").?.array.items[0].object.get("command").?.string;
+}
+
+test "settings json: well-formed, contains all three relay events" {
+    const json = try buildSettingsJson(testing.allocator, "/tmp/hook.sh", .{});
+    defer testing.allocator.free(json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{
+        .duplicate_field_behavior = .@"error",
+    });
+    defer parsed.deinit();
+
+    const hooks = parsed.value.object.get("hooks").?.object;
+    try testing.expectEqual(@as(usize, 3), hooks.count());
+    inline for (.{ "SessionStart", "UserPromptSubmit", "Stop" }) |ev| {
+        const arr = hooks.get(ev).?.array;
+        try testing.expectEqual(@as(usize, 1), arr.items.len);
+        const first = arr.items[0].object;
+        try testing.expectEqualStrings("*", first.get("matcher").?.string);
+        const command = first.get("hooks").?.array.items[0].object;
+        try testing.expectEqualStrings("command", command.get("type").?.string);
+        try testing.expectEqualStrings("/tmp/hook.sh " ++ ev, command.get("command").?.string);
+    }
+}
+
+test "settings json: shell-quotes script paths containing spaces or apostrophes" {
+    const json = try buildSettingsJson(testing.allocator, "/tmp/will's dir/hook.sh", .{});
     defer testing.allocator.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     defer parsed.deinit();
 
     const hooks = parsed.value.object.get("hooks").?.object;
-    try testing.expect(hooks.get("SessionStart") != null);
-    try testing.expect(hooks.get("Stop") != null);
+    try testing.expectEqualStrings("'/tmp/will'\\''s dir/hook.sh' Stop", testCommandAt(hooks, "Stop", 0));
+}
 
-    // Each event maps to an array of matcher entries.
-    const session_start = hooks.get("SessionStart").?.array;
-    try testing.expect(session_start.items.len >= 1);
-    const first = session_start.items[0].object;
-    try testing.expectEqualStrings("*", first.get("matcher").?.string);
+test "settings json: extra hooks append after relay and group custom events under unique keys" {
+    const json = try buildSettingsJson(testing.allocator, "/tmp/hook.sh", .{
+        .extra_hooks = &.{
+            .{ .event = "Stop", .command = "notify-first" },
+            .{ .event = "PreToolUse", .command = "audit-a" },
+            .{ .event = "Stop", .command = "notify-second" },
+            .{ .event = "PreToolUse", .command = "audit-b" },
+        },
+    });
+    defer testing.allocator.free(json);
 
-    const command = first.get("hooks").?.array.items[0].object;
-    try testing.expectEqualStrings("command", command.get("type").?.string);
-    try testing.expect(std.mem.indexOf(u8, command.get("command").?.string, "/tmp/hook.sh") != null);
-    try testing.expect(std.mem.endsWith(u8, command.get("command").?.string, " SessionStart"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{
+        .duplicate_field_behavior = .@"error",
+    });
+    defer parsed.deinit();
+
+    const hooks = parsed.value.object.get("hooks").?.object;
+    try testing.expectEqual(@as(usize, 4), hooks.count());
+
+    try testing.expectEqual(@as(usize, 3), hooks.get("Stop").?.array.items.len);
+    try testing.expectEqualStrings("/tmp/hook.sh Stop", testCommandAt(hooks, "Stop", 0));
+    try testing.expectEqualStrings("notify-first", testCommandAt(hooks, "Stop", 1));
+    try testing.expectEqualStrings("notify-second", testCommandAt(hooks, "Stop", 2));
+
+    try testing.expectEqual(@as(usize, 2), hooks.get("PreToolUse").?.array.items.len);
+    try testing.expectEqualStrings("audit-a", testCommandAt(hooks, "PreToolUse", 0));
+    try testing.expectEqualStrings("audit-b", testCommandAt(hooks, "PreToolUse", 1));
+
+    try testing.expectEqual(@as(usize, 1), hooks.get("SessionStart").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), hooks.get("UserPromptSubmit").?.array.items.len);
+}
+
+test "settings json: merges extra_settings_json top-level keys, preserves numbers, and ignores hooks" {
+    const json = try buildSettingsJson(testing.allocator, "/tmp/hook.sh", .{
+        .extra_settings_json =
+        \\{"env":{"FOO":"bar"},"includeCoAuthoredBy":false,"precision":0.1234567890123456789,"hooks":{"Stop":[],"Evil":[]}}
+        ,
+    });
+    defer testing.allocator.free(json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{
+        .duplicate_field_behavior = .@"error",
+        .parse_numbers = false,
+    });
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("bar", root.get("env").?.object.get("FOO").?.string);
+    try testing.expectEqual(false, root.get("includeCoAuthoredBy").?.bool);
+    try testing.expectEqualStrings("0.1234567890123456789", root.get("precision").?.number_string);
+
+    const hooks = root.get("hooks").?.object;
+    try testing.expectEqual(@as(usize, 3), hooks.count());
+    try testing.expect(hooks.get("Evil") == null);
+    try testing.expectEqualStrings("/tmp/hook.sh Stop", testCommandAt(hooks, "Stop", 0));
+}
+
+test "settings json: rejects malformed extra_settings_json and empty extra_hooks before touching disk" {
+    for ([_][]const u8{ "", "{", "[]", "null", "\"str\"", "42", "{} trailing" }) |bad| {
+        try testing.expectError(
+            error.InvalidExtraSettings,
+            createWithOptions(testing.allocator, .{ .extra_settings_json = bad }),
+        );
+    }
+    try testing.expectError(
+        error.InvalidExtraSettings,
+        createWithOptions(testing.allocator, .{
+            .extra_hooks = &.{.{ .event = "", .command = "echo hi" }},
+        }),
+    );
+    try testing.expectError(
+        error.InvalidExtraSettings,
+        createWithOptions(testing.allocator, .{
+            .extra_hooks = &.{.{ .event = "Stop", .command = "" }},
+        }),
+    );
+}
+
+test "settings json: allocation failures leak nothing" {
+    const Ctx = struct {
+        fn build(allocator: std.mem.Allocator) !void {
+            const json = try buildSettingsJson(allocator, "/tmp/hook.sh", .{
+                .extra_hooks = &.{
+                    .{ .event = "Stop", .command = "echo done" },
+                    .{ .event = "Notification", .command = "echo \"quoted\"" },
+                },
+                .extra_settings_json = "{\"model\":\"opus\"}",
+            });
+            allocator.free(json);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.build, .{});
 }
 
 test "parseLine: well-formed" {
     const ln = parseLine("Stop\t{\"transcript_path\":\"/tmp/x.jsonl\"}\n").?;
     try testing.expectEqual(HookEvent.stop, ln.event);
     try testing.expectEqualStrings("{\"transcript_path\":\"/tmp/x.jsonl\"}", ln.payload);
+
+    const ups = parseLine("UserPromptSubmit\t{\"prompt\":\"hi\"}\r\n").?;
+    try testing.expectEqual(HookEvent.user_prompt_submit, ups.event);
+    try testing.expectEqualStrings("{\"prompt\":\"hi\"}", ups.payload);
 }
 
 test "parseLine: unknown event tagged" {
@@ -265,15 +498,39 @@ test "extractSessionId" {
     try testing.expectEqualStrings("abc-123", s);
 }
 
+test "extractPrompt" {
+    const p = (try extractPrompt(testing.allocator, "{\"prompt\":\"line1\\nline2\",\"session_id\":\"x\"}")).?;
+    defer testing.allocator.free(p);
+    try testing.expectEqualStrings("line1\nline2", p);
+    for ([_][]const u8{ "{}", "{\"prompt\":42}", "[]", "not-json" }) |bad| {
+        try testing.expectEqual(@as(?[]u8, null), try extractPrompt(testing.allocator, bad));
+    }
+}
+
 test "create + deinit round-trip on tmp" {
     var h = try create(testing.allocator);
     defer h.deinit();
-    // FIFO and script exist.
     const sf = try std.fs.cwd().openFile(h.script_path, .{});
     sf.close();
-    // FIFO should exist (open in nonblock mode succeeds for FIFOs).
     const path_z = try testing.allocator.dupeZ(u8, h.fifo_path);
     defer testing.allocator.free(path_z);
     const fd = try std.posix.openZ(path_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0);
     std.posix.close(fd);
+}
+
+test "createWithOptions: round-trip with extra_hooks and extra_settings_json" {
+    var h = try createWithOptions(testing.allocator, .{
+        .extra_hooks = &.{.{ .event = "PostToolUse", .command = "echo done" }},
+        .extra_settings_json = "{\"cleanupPeriodDays\":7}",
+    });
+    defer h.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, h.settings_json, .{
+        .duplicate_field_behavior = .@"error",
+    });
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 7), parsed.value.object.get("cleanupPeriodDays").?.integer);
+    const hooks = parsed.value.object.get("hooks").?.object;
+    try testing.expectEqualStrings("echo done", testCommandAt(hooks, "PostToolUse", 0));
+    try testing.expect(std.mem.indexOf(u8, testCommandAt(hooks, "Stop", 0), h.script_path) != null);
 }

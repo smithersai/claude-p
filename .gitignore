@@ -4,4 +4,8 @@ prebuilt/
 prebuilt-stage-*/
 release-assets/
 node_modules/
+docs/dist/
+docs/.astro/
 .DS_Store
+
+zig-pkg/

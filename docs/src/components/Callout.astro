@@ -1,0 +1,14 @@
+---
+interface Props {
+  title: string;
+  kind?: 'concept' | 'bytes' | 'check' | 'trap';
+}
+
+const { title, kind = 'concept' } = Astro.props;
+const cls = kind === 'concept' ? 'hf-box' : `hf-box hf-${kind}`;
+---
+
+<aside class={cls}>
+  <div class="hf-title">{title}</div>
+  <slot />
+</aside>

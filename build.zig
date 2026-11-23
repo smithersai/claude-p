@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match this filter");
+    const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
 
     const zmux_dep = b.dependency("zmux", .{
         .target = target,
@@ -48,12 +50,12 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // tests
     // ------------------------------------------------------------------
-    const mod_tests = b.addTest(.{ .root_module = claude_p });
+    const mod_tests = b.addTest(.{ .root_module = claude_p, .filters = test_filters });
     if (target.result.os.tag == .linux) mod_tests.linkSystemLibrary("util");
     if (target.result.os.tag == .macos) mod_tests.linkSystemLibrary("proc");
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    const exe_tests = b.addTest(.{ .root_module = exe.root_module, .filters = test_filters });
     if (target.result.os.tag == .linux) exe_tests.linkSystemLibrary("util");
     if (target.result.os.tag == .macos) exe_tests.linkSystemLibrary("proc");
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -75,11 +77,15 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "claude_p", .module = claude_p },
             },
         }),
+        .filters = test_filters,
     });
     if (target.result.os.tag == .linux) integ_tests.linkSystemLibrary("util");
     if (target.result.os.tag == .macos) integ_tests.linkSystemLibrary("proc");
     const run_integ_tests = b.addRunArtifact(integ_tests);
     run_integ_tests.has_side_effects = true;
+    // The nested-env and daemon tests spawn the installed CLI binary.
+    run_integ_tests.step.dependOn(b.getInstallStep());
+    run_integ_tests.setEnvironmentVariable("CLAUDE_P_BIN", b.getInstallPath(.bin, exe.out_filename));
     const integ_step = b.step("test-integration", "Run integration tests against the real `claude` binary (set CLAUDE_P_E2E=1)");
     integ_step.dependOn(&run_integ_tests.step);
 }

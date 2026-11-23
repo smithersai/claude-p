@@ -1,6 +1,7 @@
 //! CLI argument parser. Mirrors a useful subset of `claude -p`'s surface
 //! and forwards unknown flags through to the child `claude` invocation.
 const std = @import("std");
+const hook_mod = @import("hook.zig");
 
 pub const OutputFormat = enum {
     text,
@@ -23,6 +24,8 @@ pub const ParseError = error{
     StreamJsonRequiresVerbose,
     BadInteger,
     BadFloat,
+    /// `--extra-hook` value is not `<Event>=<cmd>` with both sides non-empty.
+    BadExtraHook,
     OutOfMemory,
 };
 
@@ -50,6 +53,9 @@ pub const Options = struct {
     /// Daemon mode only: kill the session if no PTY output for this many
     /// seconds while busy. 0 disables. Default 180s.
     idle_timeout_seconds: u32 = 180,
+    /// Daemon mode only: kill the session if the transcript JSONL stops
+    /// growing for this many seconds while busy. 0 disables. Default 600s.
+    transcript_idle_timeout_seconds: u32 = 600,
     debug: bool = false,
     show_help: bool = false,
     show_version: bool = false,
@@ -66,6 +72,11 @@ pub const Options = struct {
     add_dirs: std.ArrayList([]const u8) = .{},
     /// `--mcp-config` may be repeated.
     mcp_configs: std.ArrayList([]const u8) = .{},
+    /// `--extra-hook <Event>=<cmd>` may be repeated. Strings borrow from argv.
+    extra_hooks: std.ArrayList(hook_mod.ExtraHook) = .{},
+    /// `--setting-json <json>`: a JSON object merged into the generated
+    /// `--settings` JSON (validated by the hook module).
+    extra_settings_json: ?[]const u8 = null,
 
     /// Arguments we don't recognize: passed through verbatim to `claude`.
     passthrough: std.ArrayList([]const u8) = .{},
@@ -76,28 +87,39 @@ pub const Options = struct {
         self.passthrough.deinit(allocator);
         self.add_dirs.deinit(allocator);
         self.mcp_configs.deinit(allocator);
+        self.extra_hooks.deinit(allocator);
     }
 };
 
 /// Long flags that `claude` accepts but take NO value. The greedy passthrough
 /// fallback below must NOT consume the next argv token for these — otherwise
 /// `claude-p --bare "hello"` swallows "hello" as a flag value.
+///
+/// `--bare` and `--safe-mode` are listed for completeness, but `parse`
+/// rejects them before this table is consulted.
 const known_boolean_long_flags = [_][]const u8{
+    "--allow-dangerously-skip-permissions",
+    "--ax-screen-reader",
+    "--background",
     "--bare",
+    "--bg",
     "--brief",
     "--chrome",
     "--no-chrome",
-    "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
+    "--desktop",
     "--disable-slash-commands",
     "--exclude-dynamic-system-prompt-sections",
     "--fork-session",
+    "--forward-subagent-text",
     "--ide",
     "--include-hook-events",
     "--include-partial-messages",
     "--mcp-debug",
     "--no-session-persistence",
     "--replay-user-messages",
+    "--restricted",
+    "--safe-mode",
     "--strict-mcp-config",
     "--tmux",
 };
@@ -105,6 +127,29 @@ const known_boolean_long_flags = [_][]const u8{
 fn isKnownBoolean(flag: []const u8) bool {
     for (known_boolean_long_flags) |b| if (std.mem.eql(u8, b, flag)) return true;
     return false;
+}
+
+/// Flags that make Claude Code 2.1.330 skip `--settings` hooks. claude-p
+/// depends on those hooks for SessionStart/Stop, so these are rejected.
+fn suppressesSettingsHooks(flag: []const u8) bool {
+    inline for (.{ "--bare", "--safe-mode" }) |name| {
+        if (std.mem.eql(u8, flag, name)) return true;
+        if (std.mem.startsWith(u8, flag, name ++ "=")) return true;
+    }
+    return false;
+}
+
+/// Parse `<Event>=<cmd>`. Splits on the first `=` so commands may contain `=`.
+fn parseExtraHook(value: []const u8) ParseError!hook_mod.ExtraHook {
+    const eq = std.mem.indexOfScalar(u8, value, '=') orelse return ParseError.BadExtraHook;
+    const event = value[0..eq];
+    const command = value[eq + 1 ..];
+    if (event.len == 0 or command.len == 0) return ParseError.BadExtraHook;
+    return .{ .event = event, .command = command };
+}
+
+fn parseU32(s: []const u8) ParseError!u32 {
+    return std.fmt.parseInt(u32, s, 10) catch ParseError.BadInteger;
 }
 
 const help_text =
@@ -129,7 +174,7 @@ const help_text =
     \\  --max-turns <N>                 Abort after N assistant turns
     \\  --allowedTools <list>           Permission-rule allow list
     \\  --disallowedTools <list>        Permission-rule deny list
-    \\  --permission-mode <mode>        acceptEdits|auto|bypassPermissions|default|dontAsk|plan
+    \\  --permission-mode <mode>        acceptEdits|auto|bypassPermissions|manual|default|dontAsk|plan
     \\  --dangerously-skip-permissions  Bypass permission prompts
     \\  --system-prompt <text>          Override the default system prompt
     \\  --append-system-prompt <text>   Append to the default system prompt
@@ -146,14 +191,23 @@ const help_text =
     \\  --idle-timeout <seconds>        Daemon-mode idle progress watchdog:
     \\                                  kill if no PTY output for this long
     \\                                  while busy. 0 disables. (default: 180)
+    \\  --transcript-idle-timeout <seconds>
+    \\                                  Daemon-mode transcript watchdog: kill if
+    \\                                  the transcript stops growing for this
+    \\                                  long while busy. 0 disables. (default: 600)
+    \\  --extra-hook <Event>=<cmd>      Add a hook command to the generated
+    \\                                  settings (repeatable)
+    \\  --setting-json <json>           JSON object merged into the generated
+    \\                                  settings (`hooks` key excluded)
     \\  --debug                         Wrapper debug logs to stderr
     \\  --                              End of options; remaining tokens go to PROMPT
     \\  -h, --help                      Print this help
     \\  -v, --version                   Print version
     \\
     \\Unrecognized flags are forwarded verbatim to `claude`. The wrapper rejects
-    \\`-p`/`--print` (we emulate it) and user-supplied `--settings` (we inject
-    \\our own to register the Stop hook).
+    \\`-p`/`--print` (we emulate it), user-supplied `--settings` (we inject our
+    \\own to register the Stop hook; use --extra-hook or --setting-json), and
+    \\`--bare`/`--safe-mode` (Claude Code skips `--settings` hooks under them).
     \\
 ;
 
@@ -253,6 +307,24 @@ pub fn parse(allocator: std.mem.Allocator, argv_in: []const []const u8) ParseErr
             i += 1;
             if (i >= argv.len) return ParseError.MissingValue;
             opts.idle_timeout_seconds = std.fmt.parseInt(u32, argv[i], 10) catch return ParseError.BadInteger;
+        } else if (std.mem.eql(u8, a, "--transcript-idle-timeout")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingValue;
+            opts.transcript_idle_timeout_seconds = try parseU32(argv[i]);
+        } else if (std.mem.startsWith(u8, a, "--transcript-idle-timeout=")) {
+            opts.transcript_idle_timeout_seconds = try parseU32(a["--transcript-idle-timeout=".len..]);
+        } else if (std.mem.eql(u8, a, "--extra-hook")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingValue;
+            try opts.extra_hooks.append(allocator, try parseExtraHook(argv[i]));
+        } else if (std.mem.startsWith(u8, a, "--extra-hook=")) {
+            try opts.extra_hooks.append(allocator, try parseExtraHook(a["--extra-hook=".len..]));
+        } else if (std.mem.eql(u8, a, "--setting-json")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingValue;
+            opts.extra_settings_json = argv[i];
+        } else if (std.mem.startsWith(u8, a, "--setting-json=")) {
+            opts.extra_settings_json = a["--setting-json=".len..];
         } else if (std.mem.eql(u8, a, "--system-prompt")) {
             i += 1;
             if (i >= argv.len) return ParseError.MissingValue;
@@ -291,6 +363,10 @@ pub fn parse(allocator: std.mem.Allocator, argv_in: []const []const u8) ParseErr
             // We inject our own --settings with the SessionStart/Stop hooks.
             // Accepting a user --settings would clobber that and break the
             // completion signal.
+            return ParseError.UnsupportedFlag;
+        } else if (suppressesSettingsHooks(a)) {
+            // Claude Code 2.1.330 skips `--settings` hooks under these
+            // flags, so our SessionStart/Stop relay would never fire.
             return ParseError.UnsupportedFlag;
         } else if (std.mem.startsWith(u8, a, "--")) {
             // Unknown long option — forward verbatim. For known boolean
@@ -452,12 +528,12 @@ test "parse: --input-file" {
 
 test "parse: known boolean passthrough flag does not consume next positional" {
     // Regression: greedy passthrough used to swallow the prompt when an
-    // unknown long flag was actually a boolean (e.g. --bare "hi").
-    var opts = try parse(testing.allocator, &.{ "--bare", "hi" });
+    // unknown long flag was actually a boolean (e.g. --brief "hi").
+    var opts = try parse(testing.allocator, &.{ "--brief", "hi" });
     defer opts.deinit(testing.allocator);
     try testing.expectEqualStrings("hi", opts.prompt.?);
     try testing.expectEqual(@as(usize, 1), opts.passthrough.items.len);
-    try testing.expectEqualStrings("--bare", opts.passthrough.items[0]);
+    try testing.expectEqualStrings("--brief", opts.passthrough.items[0]);
 }
 
 test "parse: --strict-mcp-config is boolean" {
@@ -573,4 +649,139 @@ test "parse: stream-json + --help skips the verbose check" {
     var opts = try parse(testing.allocator, &.{ "--output-format", "stream-json", "--help" });
     defer opts.deinit(testing.allocator);
     try testing.expect(opts.show_help);
+}
+
+test "parse: Claude Code 2.1.330 boolean flags do not consume the prompt" {
+    const flags = [_][]const u8{
+        "--ax-screen-reader",
+        "--bg",
+        "--background",
+        "--desktop",
+        "--forward-subagent-text",
+        "--restricted",
+    };
+    for (flags) |flag| {
+        var opts = try parse(testing.allocator, &.{ flag, "the prompt" });
+        defer opts.deinit(testing.allocator);
+        try testing.expectEqualStrings("the prompt", opts.prompt.?);
+        try testing.expectEqual(@as(usize, 1), opts.passthrough.items.len);
+        try testing.expectEqualStrings(flag, opts.passthrough.items[0]);
+    }
+}
+
+test "parse: rejects --bare and --safe-mode (they suppress --settings hooks)" {
+    const bad = [_][]const []const u8{
+        &.{ "--bare", "hi" },
+        &.{ "hi", "--bare" },
+        &.{"--bare=true"},
+        &.{ "--safe-mode", "hi" },
+        &.{"--safe-mode=1"},
+        &.{ "daemon", "--bare" },
+        &.{ "daemon", "--safe-mode" },
+    };
+    for (bad) |argv| {
+        try testing.expectError(ParseError.UnsupportedFlag, parse(testing.allocator, argv));
+    }
+}
+
+test "parse: lookalike flags are not mistaken for --bare/--safe-mode" {
+    var opts = try parse(testing.allocator, &.{ "--bareword", "x", "hi" });
+    defer opts.deinit(testing.allocator);
+    try testing.expectEqualStrings("hi", opts.prompt.?);
+    try testing.expectEqual(@as(usize, 2), opts.passthrough.items.len);
+}
+
+test "parse: --transcript-idle-timeout defaults to 600" {
+    var opts = try parse(testing.allocator, &.{"hi"});
+    defer opts.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 600), opts.transcript_idle_timeout_seconds);
+}
+
+test "parse: --transcript-idle-timeout space and = forms, including 0" {
+    var a = try parse(testing.allocator, &.{ "--transcript-idle-timeout", "45", "hi" });
+    defer a.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 45), a.transcript_idle_timeout_seconds);
+    try testing.expectEqualStrings("hi", a.prompt.?);
+
+    var b = try parse(testing.allocator, &.{ "--transcript-idle-timeout=0", "hi" });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), b.transcript_idle_timeout_seconds);
+
+    var c = try parse(testing.allocator, &.{ "daemon", "--transcript-idle-timeout", "0" });
+    defer c.deinit(testing.allocator);
+    try testing.expect(c.is_daemon);
+    try testing.expectEqual(@as(u32, 0), c.transcript_idle_timeout_seconds);
+}
+
+test "parse: --transcript-idle-timeout rejects bad and missing values" {
+    try testing.expectError(ParseError.BadInteger, parse(testing.allocator, &.{ "--transcript-idle-timeout", "ten" }));
+    try testing.expectError(ParseError.BadInteger, parse(testing.allocator, &.{ "--transcript-idle-timeout", "-1" }));
+    try testing.expectError(ParseError.BadInteger, parse(testing.allocator, &.{"--transcript-idle-timeout="}));
+    try testing.expectError(ParseError.MissingValue, parse(testing.allocator, &.{"--transcript-idle-timeout"}));
+}
+
+test "parse: --extra-hook is repeatable and splits on the first =" {
+    var opts = try parse(testing.allocator, &.{
+        "--extra-hook",                         "PreToolUse=echo pre",
+        "--extra-hook=PostToolUse=env A=1 true", "hi",
+    });
+    defer opts.deinit(testing.allocator);
+    try testing.expectEqualStrings("hi", opts.prompt.?);
+    try testing.expectEqual(@as(usize, 2), opts.extra_hooks.items.len);
+    try testing.expectEqualStrings("PreToolUse", opts.extra_hooks.items[0].event);
+    try testing.expectEqualStrings("echo pre", opts.extra_hooks.items[0].command);
+    try testing.expectEqualStrings("PostToolUse", opts.extra_hooks.items[1].event);
+    try testing.expectEqualStrings("env A=1 true", opts.extra_hooks.items[1].command);
+    try testing.expectEqual(@as(usize, 0), opts.passthrough.items.len);
+}
+
+test "parse: malformed --extra-hook values are rejected" {
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{ "--extra-hook", "PreToolUse" }));
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{ "--extra-hook", "=echo hi" }));
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{ "--extra-hook", "Stop=" }));
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{"--extra-hook=Stop"}));
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{"--extra-hook=="}));
+    try testing.expectError(ParseError.MissingValue, parse(testing.allocator, &.{"--extra-hook"}));
+    // A valid hook followed by a malformed one must not leak the first.
+    try testing.expectError(ParseError.BadExtraHook, parse(testing.allocator, &.{
+        "--extra-hook", "Stop=echo ok", "--extra-hook", "nope",
+    }));
+}
+
+test "parse: --setting-json space and = forms" {
+    var a = try parse(testing.allocator, &.{ "--setting-json", "{\"env\":{\"A\":\"1\"}}", "hi" });
+    defer a.deinit(testing.allocator);
+    try testing.expectEqualStrings("{\"env\":{\"A\":\"1\"}}", a.extra_settings_json.?);
+    try testing.expectEqualStrings("hi", a.prompt.?);
+
+    var b = try parse(testing.allocator, &.{ "--setting-json={\"model\":\"x\"}", "hi" });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqualStrings("{\"model\":\"x\"}", b.extra_settings_json.?);
+    try testing.expectEqual(@as(usize, 0), b.passthrough.items.len);
+
+    try testing.expectError(ParseError.MissingValue, parse(testing.allocator, &.{"--setting-json"}));
+}
+
+test "parse: --permission-mode manual and default" {
+    var a = try parse(testing.allocator, &.{ "--permission-mode", "manual", "hi" });
+    defer a.deinit(testing.allocator);
+    try testing.expectEqualStrings("manual", a.permission_mode.?);
+    try testing.expectEqualStrings("hi", a.prompt.?);
+
+    var b = try parse(testing.allocator, &.{ "--permission-mode", "default", "hi" });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqualStrings("default", b.permission_mode.?);
+}
+
+test "helpText documents the 2.1.330 surface" {
+    const h = helpText();
+    const needles = [_][]const u8{
+        "acceptEdits|auto|bypassPermissions|manual|default|dontAsk|plan",
+        "--transcript-idle-timeout <seconds>",
+        "(default: 600)",
+        "--extra-hook <Event>=<cmd>",
+        "--setting-json <json>",
+        "`--bare`/`--safe-mode`",
+    };
+    for (needles) |n| try testing.expect(std.mem.indexOf(u8, h, n) != null);
 }
