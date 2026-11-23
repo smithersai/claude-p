@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .zmux = .{
-            .url = "git+https://github.com/smithersai/zmux#9c581d5a4dfc14053177e27f5e98c0ab13ce3768",
-            .hash = "zmux-0.1.0-50zQ2FhpAwCRotTfOL4Kc4bej6X3NniP1yVeKZSoScAL",
+            .url = "git+https://github.com/smithersai/zmux#97cce865fb517f297cf0a6940ed1f0cd98867752",
+            .hash = "zmux-0.2.1-50zQ2LFaBwBihRUh0NejOetF3ji7i-Tfg9KM4VpeRpkQ",
         },
     },
     .paths = .{
