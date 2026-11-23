@@ -3,7 +3,7 @@
 //! Each line of the transcript is one JSON object describing a single event
 //! in the session. We extract:
 //!   - the final assistant text (concatenated content[].text blocks of the
-//!     last `assistant` event),
+//!     last assistant message),
 //!   - aggregated `usage` totals across all assistant messages,
 //!   - the session id (from any line that includes one),
 //!   - flags telling us whether an error result was reported.
@@ -17,6 +17,20 @@ pub const Usage = struct {
     output_tokens: u64 = 0,
     cache_read_input_tokens: u64 = 0,
     cache_creation_input_tokens: u64 = 0,
+
+    fn fromObject(obj: std.json.ObjectMap) Usage {
+        var usage: Usage = .{};
+        inline for (std.meta.fields(Usage)) |field| {
+            @field(usage, field.name) = unsignedField(u64, obj, field.name) orelse 0;
+        }
+        return usage;
+    }
+
+    fn add(total: *Usage, usage: Usage) void {
+        inline for (std.meta.fields(Usage)) |field| {
+            @field(total, field.name) +|= @field(usage, field.name);
+        }
+    }
 };
 
 pub const Summary = struct {
@@ -24,15 +38,16 @@ pub const Summary = struct {
     final_text: []u8,
     session_id: []u8,
     is_error: bool,
+    subtype: ?[]u8 = null,
     num_turns: u32,
     total_cost_usd: f64,
     duration_api_ms: u64,
     usage: Usage,
-    /// Pretty-printed view of the original transcript, re-serialized as
-    /// strict JSONL. Used by `emit.stream_json`. Owned by the caller.
+    /// Original nonempty lines with LF terminators, or empty when replay is disabled.
     jsonl_replay: []u8,
 
     pub fn deinit(self: *Summary, allocator: std.mem.Allocator) void {
+        if (self.subtype) |value| allocator.free(value);
         allocator.free(self.final_text);
         allocator.free(self.session_id);
         allocator.free(self.jsonl_replay);
@@ -56,8 +71,34 @@ fn unsignedField(comptime T: type, obj: std.json.ObjectMap, name: []const u8) ?T
     };
 }
 
+fn stringField(obj: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    const value = obj.get(name) orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+fn objectField(obj: std.json.ObjectMap, name: []const u8) ?std.json.ObjectMap {
+    const value = obj.get(name) orelse return null;
+    return if (value == .object) value.object else null;
+}
+
+fn appendText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), msg: std.json.ObjectMap) !void {
+    const content = msg.get("content") orelse return;
+    if (content != .array) return;
+    for (content.array.items) |block| {
+        if (block != .object) continue;
+        if (!std.mem.eql(u8, stringField(block.object, "type") orelse "", "text")) continue;
+        if (stringField(block.object, "text")) |t| try buf.appendSlice(allocator, t);
+    }
+}
+
+pub const ParseOptions = struct { keep_replay: bool = true };
+
 /// Parse a transcript from raw JSONL bytes.
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary {
+    return parseWithOptions(allocator, bytes, .{});
+}
+
+pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOptions) ParseError!Summary {
     var final_text_buf: std.ArrayList(u8) = .{};
     errdefer final_text_buf.deinit(allocator);
 
@@ -68,7 +109,15 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
     errdefer replay_buf.deinit(allocator);
 
     var usage: Usage = .{};
+    var result_usage: Usage = .{};
+    var usage_by_id = std.StringHashMap(Usage).init(allocator);
+    var id_arena = std.heap.ArenaAllocator.init(allocator);
+    defer id_arena.deinit();
+    defer usage_by_id.deinit();
+    var last_msg_id: ?[]const u8 = null;
     var is_error = false;
+    var subtype: ?[]u8 = null;
+    errdefer if (subtype) |value| allocator.free(value);
     var num_turns: u32 = 0;
     var total_cost_usd: f64 = 0.0;
     var duration_api_ms: u64 = 0;
@@ -81,8 +130,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
         if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
         if (line.len == 0) continue;
 
-        try replay_buf.appendSlice(allocator, line);
-        try replay_buf.append(allocator, '\n');
+        if (opts.keep_replay) {
+            try replay_buf.appendSlice(allocator, line);
+            try replay_buf.append(allocator, '\n');
+        }
 
         var parsed = std.json.parseFromSlice(
             std.json.Value,
@@ -111,56 +162,63 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
             }
         }
 
-        const ty = obj.get("type") orelse continue;
-        if (ty != .string) continue;
-
-        if (std.mem.eql(u8, ty.string, "assistant")) {
+        const ty = stringField(obj, "type") orelse continue;
+        var next_subtype: ?[]const u8 = null;
+        if (std.mem.eql(u8, ty, "assistant")) {
             saw_assistant = true;
-            num_turns +|= 1;
+            const msg = objectField(obj, "message") orelse std.json.ObjectMap.init(allocator);
+            const id = stringField(msg, "id");
+            if (id == null or last_msg_id == null or !std.mem.eql(u8, id.?, last_msg_id.?)) {
+                final_text_buf.clearRetainingCapacity();
+            }
+            const msg_usage = objectField(msg, "usage");
+            if (id) |key| {
+                const entry = try usage_by_id.getOrPut(key);
+                if (!entry.found_existing) {
+                    // Parsed strings can belong to the per-line JSON arena.
+                    entry.key_ptr.* = try id_arena.allocator().dupe(u8, key);
+                    entry.value_ptr.* = .{};
+                    num_turns +|= 1;
+                }
+                if (msg_usage) |u| entry.value_ptr.* = Usage.fromObject(u);
+                last_msg_id = entry.key_ptr.*;
+            } else {
+                last_msg_id = null;
+                num_turns +|= 1;
+                if (msg_usage) |u| usage.add(Usage.fromObject(u));
+            }
+            try appendText(allocator, &final_text_buf, msg);
 
-            // Reset and accumulate text from this assistant turn — we want
-            // the *last* assistant message, so each new one overwrites.
-            final_text_buf.clearRetainingCapacity();
-
-            if (obj.get("message")) |msg| {
-                if (msg == .object) {
-                    if (msg.object.get("content")) |content| {
-                        if (content == .array) {
-                            for (content.array.items) |block| {
-                                if (block != .object) continue;
-                                const block_type = block.object.get("type") orelse continue;
-                                if (block_type != .string) continue;
-                                if (std.mem.eql(u8, block_type.string, "text")) {
-                                    if (block.object.get("text")) |t| {
-                                        if (t == .string) try final_text_buf.appendSlice(allocator, t.string);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (msg.object.get("usage")) |u| {
-                        if (u == .object) {
-                            usage.input_tokens +%= unsignedField(u64, u.object, "input_tokens") orelse 0;
-                            usage.output_tokens +%= unsignedField(u64, u.object, "output_tokens") orelse 0;
-                            usage.cache_read_input_tokens +%= unsignedField(u64, u.object, "cache_read_input_tokens") orelse 0;
-                            usage.cache_creation_input_tokens +%= unsignedField(u64, u.object, "cache_creation_input_tokens") orelse 0;
+            const api_error = obj.get("isApiErrorMessage") orelse .null;
+            is_error = (api_error == .bool and api_error.bool) or
+                std.mem.eql(u8, stringField(msg, "model") orelse "", "<synthetic>");
+            if (is_error) next_subtype = "error_during_execution";
+        } else if (std.mem.eql(u8, ty, "result")) {
+            last_msg_id = null;
+            if (obj.get("is_error")) |flag| {
+                if (flag == .bool) is_error = flag.bool;
+            }
+            next_subtype = stringField(obj, "subtype");
+            if (stringField(obj, "result")) |result| {
+                final_text_buf.clearRetainingCapacity();
+                try final_text_buf.appendSlice(allocator, result);
+                saw_assistant = true;
+            } else if (is_error) {
+                if (obj.get("errors")) |errors| {
+                    if (errors == .array) {
+                        final_text_buf.clearRetainingCapacity();
+                        saw_assistant = true;
+                        var first = true;
+                        for (errors.array.items) |item| {
+                            if (item != .string) continue;
+                            if (!first) try final_text_buf.append(allocator, '\n');
+                            try final_text_buf.appendSlice(allocator, item.string);
+                            first = false;
                         }
                     }
                 }
             }
-        } else if (std.mem.eql(u8, ty.string, "result")) {
-            // Final result event — overrides everything if present.
-            if (obj.get("result")) |r| {
-                if (r == .string) {
-                    final_text_buf.clearRetainingCapacity();
-                    try final_text_buf.appendSlice(allocator, r.string);
-                    saw_assistant = true;
-                }
-            }
-            if (obj.get("is_error")) |x|
-                if (x == .bool) {
-                    is_error = x.bool;
-                };
+            if (objectField(obj, "usage")) |u| result_usage = Usage.fromObject(u);
             if (unsignedField(u32, obj, "num_turns")) |n| num_turns = n;
             if (obj.get("total_cost_usd")) |x| switch (x) {
                 .float => total_cost_usd = x.float,
@@ -168,13 +226,17 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
                 else => {},
             };
             if (unsignedField(u64, obj, "duration_api_ms")) |n| duration_api_ms = n;
-        }
+        } else continue;
+
+        const owned_subtype = if (next_subtype) |value| try allocator.dupe(u8, value) else null;
+        if (subtype) |old| allocator.free(old);
+        subtype = owned_subtype;
     }
 
-    if (!saw_assistant) {
-        // errdefer above will release the three temporary buffers.
-        return ParseError.NoAssistantMessage;
-    }
+    if (!saw_assistant) return error.NoAssistantMessage;
+    var usage_iter = usage_by_id.valueIterator();
+    while (usage_iter.next()) |u| usage.add(u.*);
+    if (std.meta.eql(usage, Usage{})) usage = result_usage;
 
     const final_text = try final_text_buf.toOwnedSlice(allocator);
     errdefer allocator.free(final_text);
@@ -184,6 +246,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
         .final_text = final_text,
         .session_id = session_id,
         .is_error = is_error,
+        .subtype = subtype,
         .num_turns = num_turns,
         .total_cost_usd = total_cost_usd,
         .duration_api_ms = duration_api_ms,
@@ -205,7 +268,25 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !Summary {
 /// `ParseError.NoAssistantMessage` when the file size is `<= start_offset`
 /// or when no assistant/result record exists in the appended slice.
 pub fn parseFileFromOffset(allocator: std.mem.Allocator, path: []const u8, start_offset: u64) !Summary {
-    const file = try std.fs.cwd().openFile(path, .{});
+    return parseFileFromOffsetWithOptions(allocator, path, start_offset, .{});
+}
+
+/// Open nonblocking so checking the descriptor kind also works for an idle FIFO.
+pub fn openTranscriptFile(path: []const u8) !std.fs.File {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidTranscriptPath;
+    const file: std.fs.File = .{ .handle = try std.posix.open(path, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NONBLOCK = true,
+        .NOCTTY = true,
+    }, 0) };
+    errdefer file.close();
+    if ((try file.stat()).kind != .file) return error.InvalidTranscriptPath;
+    return file;
+}
+
+pub fn parseFileFromOffsetWithOptions(allocator: std.mem.Allocator, path: []const u8, start_offset: u64, opts: ParseOptions) !Summary {
+    const file = try openTranscriptFile(path);
     defer file.close();
     const size = try file.getEndPos();
     if (size <= start_offset) return ParseError.NoAssistantMessage;
@@ -213,7 +294,7 @@ pub fn parseFileFromOffset(allocator: std.mem.Allocator, path: []const u8, start
     const bytes = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(bytes);
     if (bytes.len == 0) return ParseError.NoAssistantMessage;
-    return parse(allocator, bytes);
+    return parseWithOptions(allocator, bytes, opts);
 }
 
 // -------- tests --------

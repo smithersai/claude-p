@@ -5,6 +5,7 @@
 //!   --output-format stream-json  → JSONL replay of the transcript
 const std = @import("std");
 const transcript_mod = @import("transcript.zig");
+const stream = @import("stream.zig");
 const Summary = transcript_mod.Summary;
 const args_mod = @import("args.zig");
 pub const OutputFormat = args_mod.OutputFormat;
@@ -29,7 +30,7 @@ pub fn emit(
 
 pub fn emitText(writer: *std.Io.Writer, env: ResultEnvelope) !void {
     try writer.writeAll(env.summary.final_text);
-    try writer.writeAll("\n");
+    if (!std.mem.endsWith(u8, env.summary.final_text, "\n")) try writer.writeByte('\n');
 }
 
 pub fn emitJson(
@@ -44,7 +45,7 @@ pub fn emitJson(
     try jw.objectField("type");
     try jw.write("result");
     try jw.objectField("subtype");
-    try jw.write(if (s.is_error) "error" else "success");
+    try jw.write(s.subtype orelse if (s.is_error) "error_during_execution" else "success");
     try jw.objectField("session_id");
     try jw.write(s.session_id);
     try jw.objectField("result");
@@ -82,14 +83,12 @@ pub fn emitStreamJson(
     writer: *std.Io.Writer,
     env: ResultEnvelope,
 ) !void {
-    // Stream-json is just JSONL replay of the transcript, ending with a
-    // `result` event of the same shape as `emitJson`.
-    try writer.writeAll(env.summary.jsonl_replay);
-    // Ensure replay ends with a newline before appending the result line.
-    if (env.summary.jsonl_replay.len != 0 and
-        env.summary.jsonl_replay[env.summary.jsonl_replay.len - 1] != '\n')
-    {
-        try writer.writeAll("\n");
+    var lines = std.mem.tokenizeScalar(u8, env.summary.jsonl_replay, '\n');
+    while (lines.next()) |line| {
+        if (try stream.isForwardable(allocator, line)) {
+            try writer.writeAll(line);
+            try writer.writeByte('\n');
+        }
     }
     try emitJson(allocator, writer, env);
 }
@@ -176,14 +175,14 @@ test "emit text: final message + newline" {
     try testing.expectEqualStrings("hi\n", out);
 }
 
-test "emit text: preserves the final message newline before its delimiter" {
+test "emit text: preserves an existing final newline" {
     const jsonl =
         \\{"type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"hi\n"}]}}
         \\
     ;
     const out = try parseAndEmit(testing.allocator, .text, jsonl);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings("hi\n\n", out);
+    try testing.expectEqualStrings("hi\n", out);
 }
 
 test "emit json: result object shape" {

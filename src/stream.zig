@@ -8,20 +8,44 @@
 //! (Claude appends; we read from our own cursor) and we buffer incomplete
 //! trailing fragments until the newline arrives.
 const std = @import("std");
+const transcript = @import("transcript.zig");
+
+pub fn isForwardable(allocator: std.mem.Allocator, line: []const u8) !bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
+        .parse_numbers = false,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    if (parsed.value.object.get("type")) |ty| {
+        if (ty == .string and std.mem.eql(u8, ty.string, "result")) return false;
+    }
+    return true;
+}
 
 pub const Tailer = struct {
     allocator: std.mem.Allocator,
     file: std.fs.File,
     pos: u64 = 0,
-    /// Bytes read past the last newline. We hold them until the line
-    /// completes so callers never see torn JSON.
+    /// Bytes read but not yet forwarded or discarded.
     partial: std.ArrayList(u8) = .{},
+
+    scanned: usize = 0, // Prefix of the partial line already searched for LF.
 
     /// Open a file path for tailing. Caller owns the returned Tailer and must
     /// call `deinit`.
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Tailer {
-        const file = try std.fs.cwd().openFile(path, .{});
+        const file = try transcript.openTranscriptFile(path);
         return .{ .allocator = allocator, .file = file };
+    }
+
+    pub fn reopenAt(self: *Tailer, path: []const u8, offset: u64) !void {
+        var next = try open(self.allocator, path);
+        next.pos = offset;
+        self.deinit();
+        self.* = next;
     }
 
     pub fn deinit(self: *Tailer) void {
@@ -29,45 +53,51 @@ pub const Tailer = struct {
         self.partial.deinit(self.allocator);
     }
 
-    /// Read any newly-available bytes from the file and emit every complete
-    /// line (including its trailing `\n`) to `writer`. Returns the number of
-    /// complete lines emitted. Does not block: when the file has no new
-    /// bytes, returns 0.
-    pub fn pump(self: *Tailer, writer: *std.Io.Writer) !usize {
-        var buf: [4096]u8 = undefined;
+    fn forwardComplete(self: *Tailer, writer: *std.Io.Writer) !usize {
+        var consumed: usize = 0;
+        defer if (consumed != 0) {
+            const rest = self.partial.items[consumed..];
+            std.mem.copyForwards(u8, self.partial.items[0..rest.len], rest);
+            self.partial.shrinkRetainingCapacity(rest.len);
+            self.scanned -= consumed;
+        };
         var emitted: usize = 0;
-        while (true) {
-            const n = try std.posix.pread(self.file.handle, &buf, self.pos);
-            if (n == 0) break;
-            self.pos += n;
-            try self.partial.appendSlice(self.allocator, buf[0..n]);
-            while (std.mem.indexOfScalar(u8, self.partial.items, '\n')) |nl| {
-                const line_end = nl + 1;
-                try writer.writeAll(self.partial.items[0..line_end]);
+        while (std.mem.indexOfScalarPos(u8, self.partial.items, self.scanned, '\n')) |nl| {
+            const line = self.partial.items[consumed .. nl + 1];
+            if (try isForwardable(self.allocator, line)) {
+                try writer.writeAll(line);
                 emitted += 1;
-                const rest_len = self.partial.items.len - line_end;
-                if (rest_len > 0) {
-                    std.mem.copyForwards(
-                        u8,
-                        self.partial.items[0..rest_len],
-                        self.partial.items[line_end..],
-                    );
-                }
-                self.partial.shrinkRetainingCapacity(rest_len);
             }
-            if (n < buf.len) break;
+            consumed = nl + 1;
+            self.scanned = consumed;
         }
+        self.scanned = self.partial.items.len;
         return emitted;
     }
 
-    /// Emit any trailing partial line (one without a final `\n`). Useful at
-    /// session end if a writer didn't flush. After this call the internal
-    /// buffer is empty.
+    /// Forward complete JSON objects, omitting upstream result envelopes.
+    pub fn pump(self: *Tailer, writer: *std.Io.Writer) !usize {
+        var buf: [4096]u8 = undefined;
+        var emitted = try self.forwardComplete(writer);
+        while (true) {
+            const n = try std.posix.pread(self.file.handle, &buf, self.pos);
+            if (n == 0) break;
+            try self.partial.appendSlice(self.allocator, buf[0..n]);
+            self.pos += n;
+            emitted += try self.forwardComplete(writer);
+            if (n < buf.len) break;
+        }
+        if (emitted > 0) try writer.flush();
+        return emitted;
+    }
+
+    /// At EOF, forward a valid unterminated object with its JSONL delimiter.
     pub fn flushPartial(self: *Tailer, writer: *std.Io.Writer) !void {
         if (self.partial.items.len > 0) {
-            try writer.writeAll(self.partial.items);
-            self.partial.clearRetainingCapacity();
+            if (!std.mem.endsWith(u8, self.partial.items, "\n")) try self.partial.append(self.allocator, '\n');
+            _ = try self.forwardComplete(writer);
         }
+        try writer.flush();
     }
 };
 
@@ -105,7 +135,7 @@ test "Tailer: tails appended lines across multiple pumps" {
 
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
     defer f.close();
-    try f.writeAll("line1\n");
+    try f.writeAll("{\"n\":1}\n");
 
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
@@ -119,13 +149,13 @@ test "Tailer: tails appended lines across multiple pumps" {
 
     _ = try t.pump(&aw.writer);
     buf = aw.toArrayList();
-    try testing.expectEqualStrings("line1\n", buf.items);
+    try testing.expectEqualStrings("{\"n\":1}\n", buf.items);
 
-    try f.writeAll("line2\n");
+    try f.writeAll("{\"n\":2}\n");
     var aw2 = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
     _ = try t.pump(&aw2.writer);
     buf = aw2.toArrayList();
-    try testing.expectEqualStrings("line1\nline2\n", buf.items);
+    try testing.expectEqualStrings("{\"n\":1}\n{\"n\":2}\n", buf.items);
 }
 
 test "Tailer: holds back partial line until newline arrives" {
@@ -134,7 +164,7 @@ test "Tailer: holds back partial line until newline arrives" {
 
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
     defer f.close();
-    try f.writeAll("hello, ");
+    try f.writeAll("{\"text\":\"hello, ");
 
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
@@ -151,12 +181,12 @@ test "Tailer: holds back partial line until newline arrives" {
     try testing.expectEqual(@as(usize, 0), lines);
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 
-    try f.writeAll("world!\n");
+    try f.writeAll("world!\"}\n");
     var aw2 = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
     lines = try t.pump(&aw2.writer);
     buf = aw2.toArrayList();
     try testing.expectEqual(@as(usize, 1), lines);
-    try testing.expectEqualStrings("hello, world!\n", buf.items);
+    try testing.expectEqualStrings("{\"text\":\"hello, world!\"}\n", buf.items);
 }
 
 test "Tailer: emits multiple lines in a single pump" {
@@ -164,7 +194,7 @@ test "Tailer: emits multiple lines in a single pump" {
     defer tmp.cleanup();
 
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
-    try f.writeAll("a\nb\nc\n");
+    try f.writeAll("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
     f.close();
 
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
@@ -179,15 +209,15 @@ test "Tailer: emits multiple lines in a single pump" {
     const n = try t.pump(&aw.writer);
     buf = aw.toArrayList();
     try testing.expectEqual(@as(usize, 3), n);
-    try testing.expectEqualStrings("a\nb\nc\n", buf.items);
+    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n", buf.items);
 }
 
-test "Tailer: flushPartial emits trailing fragment" {
+test "Tailer: flushPartial terminates a valid trailing object" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
-    try f.writeAll("done\nincomplete");
+    try f.writeAll("{\"done\":true}\n{\"final\":true}");
     f.close();
 
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
@@ -202,5 +232,5 @@ test "Tailer: flushPartial emits trailing fragment" {
     _ = try t.pump(&aw.writer);
     try t.flushPartial(&aw.writer);
     buf = aw.toArrayList();
-    try testing.expectEqualStrings("done\nincomplete", buf.items);
+    try testing.expectEqualStrings("{\"done\":true}\n{\"final\":true}\n", buf.items);
 }

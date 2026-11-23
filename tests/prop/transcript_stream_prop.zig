@@ -182,8 +182,13 @@ test "transcript.parse 3000 generated transcripts agree with the event model" {
 }
 
 fn parseWithAllocationFailures(a: std.mem.Allocator) !void {
-    const bytes = "{\"sessionId\":\"s\"}\n{torn\n" ++
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}";
+    const bytes =
+        \\{"sessionId":"s"}
+        \\{torn
+        \\{"type":"assistant","message":{"id":"one","model":"<synthetic>"}}
+        \\{"type":"assistant","message":{"id":"two","content":[{"type":"text","text":"draft"}]}}
+        \\{"type":"result","is_error":true,"errors":["done"],"subtype":"error_max_turns"}
+    ;
     var s = try transcript.parse(a, bytes);
     defer s.deinit(a);
     try testing.expectEqualStrings("done", s.final_text);
@@ -303,4 +308,153 @@ test "Tailer emits exactly the completed prefix after each append across 1000 fr
         try testing.expectEqual(@as(usize, 0), try tailer.pump(&writer));
         try testing.expectEqualSlices(u8, bytes[0..complete], writer.buffered());
     }
+}
+
+test "three assistant blocks share one turn and the latest usage snapshot" {
+    const blocks =
+        \\{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking"}],"usage":{"input_tokens":7,"output_tokens":2}}}
+        \\{"type":"assistant","message":{"id":"m\u0031","content":[{"type":"text","text":"first "}],"usage":{"input_tokens":7,"output_tokens":5}}}
+        \\{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"last"}],"usage":{"input_tokens":7,"output_tokens":5}}}
+    ;
+    var s = try transcript.parseWithOptions(alloc, blocks, .{ .keep_replay = false });
+    defer s.deinit(alloc);
+    try testing.expectEqual(1, s.num_turns);
+    try testing.expectEqual(transcript.Usage{ .input_tokens = 7, .output_tokens = 5 }, s.usage);
+    try testing.expectEqualStrings("first last", s.final_text);
+    try testing.expectEqualStrings("", s.jsonl_replay);
+
+    const later =
+        \\{"type":"assistant","message":{"usage":{"input_tokens":3}}}
+        \\{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":4}}}
+        \\{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"updated"}],"usage":{"input_tokens":2}}}
+        \\{"type":"result","usage":{"output_tokens":100}}
+    ;
+    var revisited = try transcript.parse(alloc, blocks ++ "\n" ++ later);
+    defer revisited.deinit(alloc);
+    try testing.expectEqual(3, revisited.num_turns);
+    try testing.expectEqual(transcript.Usage{ .input_tokens = 9 }, revisited.usage);
+    try testing.expectEqualStrings("updated", revisited.final_text);
+}
+
+test "each interactive API error marker sets the subtype and a later success clears it" {
+    inline for (.{
+        "{\"type\":\"assistant\",\"isApiErrorMessage\":true}",
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\"}}",
+    }) |line| {
+        var failure = try transcript.parse(alloc, line);
+        defer failure.deinit(alloc);
+        try testing.expect(failure.is_error);
+        try testing.expectEqualStrings("error_during_execution", failure.subtype.?);
+        var recovered = try transcript.parse(alloc, line ++ "\n{\"type\":\"assistant\",\"message\":{\"id\":\"ok\"}}");
+        defer recovered.deinit(alloc);
+        try testing.expect(!recovered.is_error);
+        try testing.expectEqual(null, recovered.subtype);
+    }
+}
+
+test "result-only errors retain details, subtype and fallback usage" {
+    const line =
+        \\{"type":"result","is_error":true,"subtype":"error_max_turns","errors":["first","second"],"usage":{"output_tokens":12}}
+    ;
+    var failure = try transcript.parse(alloc, line);
+    defer failure.deinit(alloc);
+    try testing.expect(failure.is_error);
+    try testing.expectEqualStrings("error_max_turns", failure.subtype.?);
+    try testing.expectEqualStrings("first\nsecond", failure.final_text);
+    try testing.expectEqual(12, failure.usage.output_tokens);
+}
+
+test "all usage counters saturate across distinct assistant messages" {
+    const bytes =
+        \\{"type":"assistant","message":{"id":"max","usage":{"input_tokens":18446744073709551615,"output_tokens":18446744073709551615,"cache_read_input_tokens":18446744073709551615,"cache_creation_input_tokens":18446744073709551615}}}
+        \\{"type":"assistant","message":{"id":"one","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":1}}}
+    ;
+    var s = try transcript.parse(alloc, bytes);
+    defer s.deinit(alloc);
+    inline for (std.meta.fields(transcript.Usage)) |f| {
+        try testing.expectEqual(std.math.maxInt(u64), @field(s.usage, f.name));
+    }
+}
+
+test "Tailer skips malformed, non-object and upstream result lines including the final fragment" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const valid = " {\"type\":\"assistant\",\"message\":{\"type\":\"result\"}}\r\n";
+    const invalid = "garbage\n{\"bad\":}\n42\n[]\nnull\n{}{}\n";
+    const result = "{\"type\":\"res\\u0075lt\"}";
+    try tmp.dir.writeFile(.{ .sub_path = "live", .data = invalid ++ result ++ "\n" ++ valid ++ result });
+    const path = try tmp.dir.realpathAlloc(alloc, "live");
+    defer alloc.free(path);
+    var tailer = try Tailer.open(alloc, path);
+    defer tailer.deinit();
+    var storage: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try testing.expectEqual(1, try tailer.pump(&out));
+    try tailer.flushPartial(&out);
+    try testing.expectEqualStrings(valid, out.buffered());
+}
+
+test "Tailer retries a failed buffer allocation at the same position and reports writer and flush failures" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const line = "{\"n\":1}\n";
+    try tmp.dir.writeFile(.{ .sub_path = "live", .data = line });
+    const path = try tmp.dir.realpathAlloc(alloc, "live");
+    defer alloc.free(path);
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var tailer = try Tailer.open(failing.allocator(), path);
+    defer tailer.deinit();
+    var broken = std.Io.Writer.failing;
+    try testing.expectError(error.OutOfMemory, tailer.pump(&broken));
+    try testing.expectEqual(0, tailer.pos);
+    try testing.expectEqual(0, tailer.partial.items.len);
+    failing.fail_index = std.math.maxInt(usize);
+    try testing.expectError(error.WriteFailed, tailer.pump(&broken));
+    try testing.expectEqual(line.len, tailer.pos);
+    try testing.expectEqualStrings(line, tailer.partial.items);
+
+    var storage: [line.len]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try testing.expectEqual(1, try tailer.pump(&out));
+    try testing.expectEqualStrings(line, out.buffered());
+
+    try tailer.reopenAt(path, 0);
+    // The entire write fits in the buffer. Only flushing can fail.
+    broken.buffer = &storage;
+    try testing.expectError(error.WriteFailed, tailer.pump(&broken));
+}
+
+test "transcript file APIs reject invalid paths and reopenAt preserves state until the switch succeeds" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    for ([_][]const u8{ "name\x00suffix", dir, "/dev/null" }) |invalid| {
+        try testing.expectError(error.InvalidTranscriptPath, transcript.parseFile(alloc, invalid));
+        try testing.expectError(error.InvalidTranscriptPath, Tailer.open(alloc, invalid));
+    }
+    try tmp.dir.writeFile(.{ .sub_path = "old", .data = "{\"unfinished" });
+    const old = try tmp.dir.realpathAlloc(alloc, "old");
+    defer alloc.free(old);
+    var tailer = try Tailer.open(alloc, old);
+    defer tailer.deinit();
+    var storage: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try testing.expectEqual(0, try tailer.pump(&out));
+    try testing.expectError(error.InvalidTranscriptPath, tailer.reopenAt(dir, 0));
+    try testing.expectEqualStrings("{\"unfinished", tailer.partial.items);
+    try testing.expectEqual(tailer.partial.items.len, tailer.pos);
+
+    const prefix = "{\"old\":true}\n";
+    const fresh = "{\"type\":\"assistant\"}\n";
+    try tmp.dir.writeFile(.{ .sub_path = "new", .data = prefix ++ fresh });
+    const new = try tmp.dir.realpathAlloc(alloc, "new");
+    defer alloc.free(new);
+    try tailer.reopenAt(new, prefix.len);
+    try testing.expectEqual(1, try tailer.pump(&out));
+    try testing.expectEqualStrings(fresh, out.buffered());
+    var s = try transcript.parseFileFromOffsetWithOptions(alloc, new, prefix.len, .{ .keep_replay = false });
+    defer s.deinit(alloc);
+    try testing.expectEqual(1, s.num_turns);
+    try testing.expectEqualStrings("", s.jsonl_replay);
 }

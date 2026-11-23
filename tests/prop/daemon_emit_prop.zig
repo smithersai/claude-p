@@ -93,7 +93,7 @@ fn checkResult(alloc: Allocator, line: []const u8, env: emit.ResultEnvelope, fai
         try expectString(obj, "error", e.reason);
         try testing.expectEqual(!std.mem.eql(u8, e.subtype, "interrupted"), is_error.bool);
     } else {
-        try expectString(obj, "subtype", if (s.is_error) "error" else "success");
+        try expectString(obj, "subtype", s.subtype orelse if (s.is_error) "error_during_execution" else "success");
         try testing.expectEqual(s.is_error, is_error.bool);
     }
     try expectNumber(try field(obj, "duration_ms"), env.duration_ms);
@@ -137,8 +137,10 @@ fn checkEmit(alloc: Allocator, input: emit.ResultEnvelope, failure: ErrorFields,
             .text => {
                 try emit.emitText(&out.writer, env);
                 const bytes = out.written();
-                try testing.expectEqual(env.summary.final_text.len + 1, bytes.len);
-                try testing.expectEqualStrings(env.summary.final_text, bytes[0 .. bytes.len - 1]);
+                const text = env.summary.final_text;
+                const extra: usize = if (std.mem.endsWith(u8, text, "\n")) 0 else 1;
+                try testing.expectEqual(text.len + extra, bytes.len);
+                try testing.expectEqualStrings(text, bytes[0..text.len]);
                 try testing.expectEqual(@as(u8, '\n'), bytes[bytes.len - 1]);
             },
             .json => {
@@ -169,11 +171,12 @@ test "result envelopes round-trip 2500 random summaries" {
     const alloc = counter.allocator();
     const costs = [_]f64{ 0.0, -0.0, std.math.floatTrueMin(f64), std.math.floatMin(f64), std.math.floatMax(f64), 0.1 };
     for (0..2500) |i| {
-        var strings: [4][64]u8 = undefined;
+        var strings: [5][64]u8 = undefined;
         const summary: Summary = .{
             .final_text = randomText(r, &strings[0]),
             .session_id = randomText(r, &strings[1]),
             .is_error = r.boolean(),
+            .subtype = if (i % 2 == 0) randomText(r, &strings[4]) else null,
             .num_turns = if (i % 11 == 0) std.math.maxInt(u32) else r.int(u32),
             .total_cost_usd = if (i % 2 == 0) costs[(i / 2) % costs.len] else finiteCost(r.int(u64)),
             .duration_api_ms = unsigned(r),
@@ -404,4 +407,22 @@ test "fuzz signed watchdog clocks and unsigned thresholds" {
         "\xff" ** 31 ++ "\x7f",
         "\x01" ++ "\x00" ** 7 ++ "\x01" ++ "\x00" ** 7 ++ "\x81\x84\x1e",
     } });
+}
+
+test "replayed stream has one terminal result with upstream error details" {
+    const assistant = "{\"type\":\"assistant\"}";
+    const bytes = "garbage\n" ++ assistant ++ "\n[1]\n" ++
+        "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"errors\":[\"max turns\"],\"usage\":{\"output_tokens\":2}}";
+    var s = try lib.transcript.parse(testing.allocator, bytes);
+    defer s.deinit(testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const env: emit.ResultEnvelope = .{ .summary = &s, .duration_ms = 0 };
+    try emit.emitStreamJson(testing.allocator, &out.writer, env);
+    const prefix = assistant ++ "\n";
+    try testing.expect(std.mem.startsWith(u8, out.written(), prefix));
+    try checkResult(testing.allocator, out.written()[prefix.len..], env, null);
+    try testing.expectEqualStrings("error_max_turns", s.subtype.?);
+    try testing.expectEqualStrings("max turns", s.final_text);
+    try testing.expectEqual(2, s.usage.output_tokens);
 }
