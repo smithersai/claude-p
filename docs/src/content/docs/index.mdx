@@ -1,0 +1,89 @@
+---
+title: claude-p
+description: A drop-in replacement for claude -p that drives the interactive claude UI inside an in-process zmux PTY session.
+template: splash
+hero:
+  tagline: A drop-in replacement for <code>claude -p</code> that drives the interactive <code>claude</code> UI inside an in-process zmux PTY session.
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+    - text: How It Works
+      link: /internals/architecture/
+      variant: minimal
+      icon: open-book
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import LifecyclePipelineDiagram from '../../components/diagrams/LifecyclePipelineDiagram.astro';
+
+<div class="cp-disclaimer">
+  <strong>Use at your own risk.</strong> This package and repository exist for
+  <strong>educational purposes</strong> and demonstrate why client-side
+  restrictions on how a product is used are fundamentally unenforceable. Built
+  using the <a href="https://github.com/smithersai/smithers">smithers</a>{' '}
+  self-improving harness and <a href="https://github.com/smithersai/zmux">zmux</a>.
+</div>
+
+```bash
+# One-shot text (default)
+npx claude-p "Reply with the single word OK."
+
+# Structured JSON result
+git diff HEAD~1 | npx claude-p --output-format json "Summarize this diff."
+
+# Live per-message JSONL stream (--verbose required)
+npx claude-p --output-format stream-json --verbose "Audit src/" | jq .
+
+# Long-lived multi-turn daemon over NDJSON
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig modules."}}' \
+  | npx claude-p daemon
+```
+
+<LifecyclePipelineDiagram />
+
+## Pick your track
+
+<CardGrid>
+  <LinkCard
+    title="Tutorials (Head First style)"
+    description="Build a commit reviewer, drive a multi-turn daemon in Node.js, and embed claude-p in Zig—step by step with byte-level mental models."
+    href="/tutorials/first-automation/"
+  />
+  <LinkCard
+    title="How-to Guides"
+    description="Short, focused recipes for live stream-json, safe --resume isolation, nested CI auth, and --debug diagnostics."
+    href="/guides/streaming-json/"
+  />
+  <LinkCard
+    title="How It Works"
+    description="The machine model behind the wrapper: zmux PTY, 5 DEC/XTerm handshakes, Claude 2.1 dialog verification, and macOS TTYHOG chunked paste."
+    href="/internals/architecture/"
+  />
+  <LinkCard
+    title="Reference"
+    description="Exact CLI flags, exit codes, NDJSON daemon frames, Zig 0.15.2 API types, and SHA-256 release verification."
+    href="/reference/cli/"
+  />
+</CardGrid>
+
+## Design principles
+
+<CardGrid stagger>
+  <Card title="Zero ~/.claude mutation" icon="approve-check">
+    Every hook script, FIFO, and inline <code>--settings</code> payload lives inside a per-run
+    <code>$TMPDIR/claude-p-&lt;pid&gt;-&lt;rand&gt;/</code> directory and is deleted on exit.
+  </Card>
+  <Card title="Hooks, not screen scraping" icon="terminal">
+    <code>SessionStart</code>, <code>UserPromptSubmit</code>, and <code>Stop</code> drive the state
+    machine. Output comes straight from Claude's session JSONL transcript.
+  </Card>
+  <Card title="Real PTY, deterministic paste" icon="rocket">
+    <code>zmux.NativeSession</code> runs a real <code>forkpty</code> session. Prompts stream in
+    ≤ 512 B UTF-8-safe bracketed-paste chunks so macOS <code>TTYHOG</code> never drops bytes.
+  </Card>
+  <Card title="Verified prebuilt binaries" icon="seti:lock">
+    <code>scripts/install.js</code> downloads platform binaries from GitHub Releases and checks
+    their SHA-256 digest against <code>SHA256SUMS</code> before writing to disk.
+  </Card>
+</CardGrid>

@@ -1,0 +1,52 @@
+---
+title: Stream Live JSON Output
+description: Tail session transcript events in real time with --output-format stream-json --verbose and parse them cleanly with jq or Node.js.
+sidebar:
+  order: 1
+---
+
+Use `--output-format stream-json --verbose` when a run invokes tools or spans several assistant turns and you want each event as `claude` flushes it.
+
+## Basic usage
+
+Both flags are required in one-shot mode. Omitting `--verbose` exits with code `2` (`StreamJsonRequiresVerbose`), matching native `claude -p`.
+
+```bash
+npx claude-p \
+  --output-format stream-json \
+  --verbose \
+  --dangerously-skip-permissions \
+  "Inspect src/ and summarize the modules."
+```
+
+Each line on stdout is one complete JSON object terminated by `\n`. `src/stream.zig` uses `pread(2)` and buffers partial reads until `\n` arrives, so downstream parsers never see torn JSON.
+
+## Filter events with `jq`
+
+Extract assistant text blocks and the trailing `result` summary:
+
+```bash
+npx claude-p --output-format stream-json --verbose --dangerously-skip-permissions \
+  "Audit build.zig for unused steps." \
+| jq --unbuffered -r '
+    if .type == "assistant" then
+      (.message.content[]? | select(.type == "text") | .text)
+    elif .type == "result" then
+      "\n--- done: turns=\(.num_turns) ms=\(.duration_ms) in=\(.usage.input_tokens) out=\(.usage.output_tokens) ---"
+    else
+      empty
+    end
+  '
+```
+
+Use `--unbuffered` so `jq` flushes each line as it arrives rather than buffering stdout.
+
+## Granularity: per-message, not per-token
+
+`claude-p` tails Claude's session transcript JSONL file on disk. Lines arrive the moment `claude` flushes a user event, tool call, tool result, or assistant turn—not token-by-token mid-message. Per-token streaming requires native `claude -p --include-partial-messages`.
+
+After `Stop` fires, `driver.run()` drains the tailer for `20 × 20 ms` (400 ms) to catch late flushes before emitting the trailing `result` envelope.
+
+## Streaming in daemon mode
+
+In `claude-p daemon`, stdout is always `stream-json`—you do not pass `--output-format stream-json` or `--verbose`. See the [Daemon Protocol Reference](/reference/daemon-protocol/).

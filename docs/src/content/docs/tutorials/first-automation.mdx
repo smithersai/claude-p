@@ -1,0 +1,206 @@
+---
+title: Build a Commit Reviewer
+description: A hands-on tutorial that turns claude-p into a shell commit reviewer using stdin piping, JSON envelopes, and exit codes.
+sidebar:
+  order: 1
+---
+
+import Callout from '../../../components/Callout.astro';
+import LifecyclePipelineDiagram from '../../../components/diagrams/LifecyclePipelineDiagram.astro';
+
+**Goal:** Build a 20-line shell script that pipes a diff into `claude-p`, extracts structured review text and token usage from `--output-format json`, and distinguishes model errors from wrapper failures using exit codes.
+
+**Time:** 10 minutes. You need `claude`, `jq`, and `claude-p` on `$PATH`.
+
+---
+
+## The problem with piping to interactive `claude`
+
+Suppose you try to script interactive `claude` directly with a pipe:
+
+```bash
+echo "Review this diff" | claude
+```
+
+It fails immediately. Claude Code renders its UI with [Ink](https://github.com/vadimdemedes/ink), and Ink refuses to run when stdin is not a TTY. Even if you wrap it with `script(1)`, Ink still emits terminal queries at boot and waits forever for replies—and you have no clean way to know when the assistant finished answering.
+
+<Callout title="Watch the bytes" kind="bytes">
+  When you run <code>claude-p</code>, your shell still talks over plain stdin/stdout pipes.
+  Behind the curtain, <code>claude-p</code> puts a real PTY between itself and <code>claude</code>,
+  answers Ink's five terminal probes, and listens on a private FIFO for the <code>Stop</code> hook.
+</Callout>
+
+<LifecyclePipelineDiagram />
+
+---
+
+## Step 1: Send your first piped prompt
+
+Instead of stuffing a multi-line diff into shell quotes (and risking `ARG_MAX` limits), feed the prompt on stdin. When `claude-p` sees no positional `PROMPT` and no `--input-file`, it reads stdin up to 16 MiB and trims trailing `\r\n`.
+
+Run this in any repository:
+
+```bash
+{
+  printf 'Review the following diff for bugs. Reply in 3 bullet points max.\n\n'
+  git diff HEAD~1 2>/dev/null || printf '+ const x = 1 / 0;\n'
+} | npx claude-p --dangerously-skip-permissions
+```
+
+You should see a plain-text review printed to stdout and exit code `0`.
+
+<Callout title="What just happened?" kind="concept">
+  Why didn't your multiline diff submit after line 1? Because <code>claude-p</code> wraps the
+  entire prompt in <strong>DECSET 2004 bracketed paste</strong> (<code>ESC[200~</code> … <code>ESC[201~</code>),
+  paced in 512-byte chunks, then pauses 120 ms before sending a single <code>\r</code>.
+  Newlines inside the prompt stay newlines instead of firing premature Enter keystrokes.
+</Callout>
+
+---
+
+## Step 2: Switch to `--output-format json`
+
+Plain text is great for humans, awkward for scripts. Ask `claude-p` for the JSON result envelope instead, and combine it with `--system-prompt` and `--max-turns` to keep the review tight:
+
+```bash
+REVIEW_JSON=$(
+  printf 'Spot any bug in this code:\n\nfunction div(a, b) { return a / b; }\n' \
+  | npx claude-p \
+      --output-format json \
+      --max-turns 1 \
+      --dangerously-skip-permissions \
+      --system-prompt "You are a terse code reviewer. No preamble."
+)
+
+printf '%s\n' "$REVIEW_JSON" | jq '{
+  subtype,
+  is_error,
+  duration_ms,
+  input_tokens: .usage.input_tokens,
+  output_tokens: .usage.output_tokens,
+  result
+}'
+```
+
+Inspect the fields `jq` prints:
+- `result`: the final assistant text (exact same string `text` mode prints).
+- `session_id`: the Claude Code session UUID—save this if you want to `--resume` the review later.
+- `duration_ms`: wall-clock milliseconds from `driver.run()` entry until `Stop` fired.
+- `usage`: summed `input_tokens`, `output_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens` across every assistant turn in the run.
+
+---
+
+## Step 3: Try live streaming (and hit the guard rail on purpose)
+
+What if a review runs tools and takes 20 seconds? You want to see progress as messages arrive. Try running `stream-json` by itself first:
+
+```bash
+npx claude-p --output-format stream-json "Reply with OK."
+```
+
+```text
+Error: --output-format=stream-json requires --verbose
+```
+
+<Callout title="Mental check: why did that fail?" kind="check">
+  Native <code>claude -p</code> enforces the exact same rule:
+  <code>--output-format=stream-json</code> requires <code>--verbose</code>.
+  <code>claude-p</code> mirrors that validation in <code>src/args.zig</code> and exits with code
+  <code>2</code> before spawning a child process.
+</Callout>
+
+Now add `--verbose` and watch each JSONL frame arrive:
+
+```bash
+npx claude-p \
+  --output-format stream-json \
+  --verbose \
+  --dangerously-skip-permissions \
+  "Reply with the single word OK." | jq -c '{type, subtype}'
+```
+
+Notice the last line is always `{"type":"result","subtype":"success"}`—the exact same result object you parsed in Step 2.
+
+---
+
+## Step 4: Handle exit codes cleanly
+
+`claude-p` separates **model errors** from **wrapper errors** so your scripts never confuse a bad prompt or timeout with a normal assistant answer:
+
+| Exit code | What failed | How your script should react |
+| --- | --- | --- |
+| `0` | Nothing (`is_error: false`) | Parse stdout and continue. |
+| `1` | Assistant returned `is_error: true` | Surface `.result` to the caller; do not retry blindly. |
+| `2` | Bad flags, empty prompt, timeout, `PromptNotAccepted`, `PromptTruncated`, or spawn error | Read stderr (or rerun with `--debug`). |
+| `130` | Interrupted via `SIGINT` (npm shim) | Stop cleanly. |
+
+<Callout title="Watch out for variadic flags before PROMPT!" kind="trap">
+  <code>--add-dir</code> and <code>--mcp-config</code> are variadic: they consume every following
+  non-flag argument, just like <code>claude</code>. If you pass a positional prompt after them,
+  put <code>--</code> first:
+  <br />
+  <code>claude-p --add-dir ./src ./tests -- "Audit both folders"</code>
+</Callout>
+
+---
+
+## Step 5: Put it together in `review-commit.sh`
+
+Save this script and mark it executable (`chmod +x review-commit.sh`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+DIFF="$(git diff HEAD~1)"
+if [ -z "$DIFF" ]; then
+  echo "No diff against HEAD~1." >&2
+  exit 0
+fi
+
+TMP_PROMPT="$(mktemp)"
+trap 'rm -f "$TMP_PROMPT"' EXIT
+{
+  printf 'Review this diff. List concrete bugs or edge cases only.\n\n'
+  printf '%s\n' "$DIFF"
+} > "$TMP_PROMPT"
+
+set +e
+OUT="$(npx claude-p \
+  --output-format json \
+  --input-file "$TMP_PROMPT" \
+  --max-turns 1 \
+  --timeout 120 \
+  --dangerously-skip-permissions)"
+CODE=$?
+set -e
+
+case "$CODE" in
+  0)
+    printf '%s\n' "$OUT" | jq -r '.result'
+    printf '\n[session=%s tokens=%s/%s ms=%s]\n' \
+      "$(printf '%s\n' "$OUT" | jq -r '.session_id')" \
+      "$(printf '%s\n' "$OUT" | jq -r '.usage.input_tokens')" \
+      "$(printf '%s\n' "$OUT" | jq -r '.usage.output_tokens')" \
+      "$(printf '%s\n' "$OUT" | jq -r '.duration_ms')" >&2
+    ;;
+  1)
+    echo "Model reported an error:" >&2
+    printf '%s\n' "$OUT" | jq -r '.result' >&2
+    exit 1
+    ;;
+  *)
+    echo "claude-p wrapper failed (exit $CODE). Re-run with --debug." >&2
+    exit "$CODE"
+    ;;
+esac
+```
+
+Notice we used `--input-file "$TMP_PROMPT"` instead of passing `$DIFF` as a CLI argument—that avoids shell quoting hazards and kernel `ARG_MAX` caps on large diffs.
+
+## Checkpoint & next steps
+
+You now know how to pass prompts via stdin or `--input-file`, parse `--output-format json`, stream live JSONL with `--verbose`, and branch on exit codes `0`, `1`, and `2`.
+
+- **Running many turns in a row?** Don't pay PTY boot overhead on every turn—continue to [Drive a Multi-Turn Daemon](/tutorials/multi-turn-daemon/).
+- **Want the full byte story?** Read [Startup Dialogs and Paced Paste](/internals/startup-dialogs-and-paste/).

@@ -12,6 +12,7 @@ build.zig.zon
 SPEC.md
 CLAUDE.md
 REPORT.md
+docs/
 
 # VCS
 .git/

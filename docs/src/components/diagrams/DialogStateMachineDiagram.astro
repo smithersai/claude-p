@@ -1,0 +1,77 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'Enter is never sent blindly. Claude Code 2.1 preselects "No, exit" in the workspace trust modal, so claude-p moves the ❯ cursor first and verifies the repaint before confirming.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 820 330" role="img" aria-label="Startup dialog state machine diagram">
+    <defs>
+      <marker id="dlg-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
+      </marker>
+      <marker id="dlg-arr-g" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-green)" />
+      </marker>
+      <marker id="dlg-arr-r" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-rose)" />
+      </marker>
+      <marker id="dlg-arr-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-accent)" />
+      </marker>
+    </defs>
+
+    <!-- Node 1: Quiet + Strip -->
+    <rect x="20" y="34" width="175" height="72" rx="8" fill="var(--diag-surface)" stroke="var(--diag-border-strong)" stroke-width="1.5" />
+    <text x="107" y="58" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">1. PTY quiet ≥ 80 ms</text>
+    <text x="107" y="77" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">stripCsiInto() stack buf</text>
+    <text x="107" y="93" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">classifyDialog()</text>
+
+    <!-- Node 2: Analyze ❯ cursor -->
+    <rect x="242" y="34" width="186" height="72" rx="8" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.5" />
+    <text x="335" y="58" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">2. Locate last ❯</text>
+    <text x="335" y="77" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">analyzeDialog()</text>
+    <text x="335" y="93" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-blue)">affirmative | negative</text>
+
+    <!-- Branch A: Affirmative -->
+    <rect x="520" y="24" width="276" height="84" rx="8" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="658" y="48" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-green)">Cursor on affirmative → send \r</text>
+    <text x="658" y="68" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">"Yes, I trust" · "Yes, I accept"</text>
+    <text x="658" y="86" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">0 fresh bytes after 1500 ms? Retry \r</text>
+
+    <!-- Branch B: Negative -->
+    <rect x="520" y="156" width="276" height="96" rx="8" fill="var(--diag-rose-fill)" stroke="var(--diag-rose)" stroke-width="1.5" />
+    <text x="658" y="180" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-rose)">Cursor on negative ("No, exit")</text>
+    <text x="658" y="200" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">numbered? send digit (e.g. '2')</text>
+    <text x="658" y="218" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">unnumbered? ESC[B (down) or ESC[A (up)</text>
+    <text x="658" y="238" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">NEVER sends \r on this step</text>
+
+    <!-- Repaint verification loop -->
+    <rect x="130" y="216" width="298" height="72" rx="8" fill="var(--diag-accent-fill)" stroke="var(--diag-accent)" stroke-width="1.5" />
+    <text x="279" y="240" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-accent)">3. Wait for fresh repaint bytes</text>
+    <text x="279" y="259" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-text)">slice bytes after bytes_at_key</text>
+    <text x="279" y="276" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="var(--diag-muted)">0 bytes after 1500 ms → resend · cap 16 keys</text>
+
+    <!-- Arrows -->
+    <line x1="195" y1="70" x2="239" y2="70" stroke="var(--diag-border-strong)" stroke-width="1.75" marker-end="url(#dlg-arr)" />
+
+    <line x1="428" y1="62" x2="517" y2="62" stroke="var(--diag-green)" stroke-width="1.75" marker-end="url(#dlg-arr-g)" />
+    <text x="472" y="53" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-green)">affirmative</text>
+
+    <path d="M 428 84 L 474 84 L 474 204 L 517 204" fill="none" stroke="var(--diag-rose)" stroke-width="1.75" marker-end="url(#dlg-arr-r)" />
+    <text x="480" y="148" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-rose)">negative</text>
+
+    <path d="M 520 232 L 431 232" fill="none" stroke="var(--diag-accent)" stroke-width="1.75" marker-end="url(#dlg-arr-a)" />
+    <path d="M 279 216 L 279 110" fill="none" stroke="var(--diag-accent)" stroke-width="1.75" marker-end="url(#dlg-arr-a)" />
+    <text x="268" y="168" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-accent)">re-check fresh</text>
+
+    <!-- Footer note -->
+    <text x="20" y="314" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">
+      Suppressed immediately once main UI footer ("for shortcuts") paints or SessionStart arrives.
+    </text>
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

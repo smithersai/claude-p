@@ -98,6 +98,59 @@ pub fn emitStreamJson(
     try emitJson(allocator, writer, env);
 }
 
+/// Emit one structured daemon result line for a turn that did not finish
+/// normally: an interrupted turn or a terminal watchdog timeout. Same field
+/// set as `emitJson` plus `error`, so a hub parses both with one schema.
+/// `is_error` is false only for the `"interrupted"` subtype.
+pub fn emitErrorResult(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    subtype: []const u8,
+    error_reason: []const u8,
+    session_id: []const u8,
+    duration_ms: u64,
+) !void {
+    _ = allocator;
+    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("result");
+    try jw.objectField("subtype");
+    try jw.write(subtype);
+    try jw.objectField("error");
+    try jw.write(error_reason);
+    try jw.objectField("session_id");
+    try jw.write(session_id);
+    try jw.objectField("result");
+    try jw.write("");
+    try jw.objectField("is_error");
+    try jw.write(!std.mem.eql(u8, subtype, "interrupted"));
+    try jw.objectField("duration_ms");
+    try jw.write(duration_ms);
+    try jw.objectField("duration_api_ms");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("num_turns");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("total_cost_usd");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("usage");
+    try jw.beginObject();
+    try jw.objectField("input_tokens");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("output_tokens");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("cache_read_input_tokens");
+    try jw.write(@as(u64, 0));
+    try jw.objectField("cache_creation_input_tokens");
+    try jw.write(@as(u64, 0));
+    try jw.endObject();
+    try jw.objectField("permission_denials");
+    try jw.beginArray();
+    try jw.endArray();
+    try jw.endObject();
+    try writer.writeAll("\n");
+}
+
 // -------- tests --------
 
 const testing = std.testing;
@@ -189,4 +242,77 @@ test "emit stream-json: replay + trailing result" {
     try testing.expect(std.mem.indexOf(u8, line1, "\"subtype\":\"init\"") != null);
     try testing.expect(std.mem.indexOf(u8, line2, "\"type\":\"assistant\"") != null);
     try testing.expect(std.mem.indexOf(u8, line3, "\"type\":\"result\"") != null);
+}
+
+fn errorResultLine(
+    allocator: std.mem.Allocator,
+    subtype: []const u8,
+    error_reason: []const u8,
+    session_id: []const u8,
+    duration_ms: u64,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
+    try emitErrorResult(allocator, &aw.writer, subtype, error_reason, session_id, duration_ms);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+test "emitErrorResult: exact wire line for a timeout" {
+    const out = try errorResultLine(testing.allocator, "error", "transcript_stalled", "sid-1", 4200);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(
+        "{\"type\":\"result\",\"subtype\":\"error\",\"error\":\"transcript_stalled\"," ++
+            "\"session_id\":\"sid-1\",\"result\":\"\",\"is_error\":true,\"duration_ms\":4200," ++
+            "\"duration_api_ms\":0,\"num_turns\":0,\"total_cost_usd\":0," ++
+            "\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0," ++
+            "\"cache_creation_input_tokens\":0},\"permission_denials\":[]}\n",
+        out,
+    );
+}
+
+test "emitErrorResult: interrupted round-trips with is_error false" {
+    const out = try errorResultLine(testing.allocator, "interrupted", "interrupted", "sid-2", 1500);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\n"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("result", obj.get("type").?.string);
+    try testing.expectEqualStrings("interrupted", obj.get("subtype").?.string);
+    try testing.expectEqualStrings("interrupted", obj.get("error").?.string);
+    try testing.expectEqualStrings("sid-2", obj.get("session_id").?.string);
+    try testing.expectEqualStrings("", obj.get("result").?.string);
+    try testing.expect(!obj.get("is_error").?.bool);
+    try testing.expectEqual(@as(i64, 1500), obj.get("duration_ms").?.integer);
+    try testing.expectEqual(@as(i64, 0), obj.get("num_turns").?.integer);
+    try testing.expectEqual(@as(usize, 0), obj.get("permission_denials").?.array.items.len);
+    try testing.expectEqual(@as(i64, 0), obj.get("usage").?.object.get("output_tokens").?.integer);
+}
+
+test "emitErrorResult: other subtypes are errors" {
+    const subtypes = [_][]const u8{ "error", "error_during_execution", "" };
+    for (subtypes) |subtype| {
+        const out = try errorResultLine(testing.allocator, subtype, "idle_timeout", "", 0);
+        defer testing.allocator.free(out);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value.object.get("is_error").?.bool);
+    }
+}
+
+test "emitErrorResult: strings are JSON-escaped and stay on one line" {
+    const reason = "bad \"quote\" \\ back\nnew\tline \x01";
+    const sid = "s\"id\n";
+    const out = try errorResultLine(testing.allocator, "err\"or", reason, sid, 7);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\n"));
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("err\"or", obj.get("subtype").?.string);
+    try testing.expectEqualStrings(reason, obj.get("error").?.string);
+    try testing.expectEqualStrings(sid, obj.get("session_id").?.string);
 }

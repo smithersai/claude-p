@@ -22,6 +22,10 @@
 //!           envelope from the transcript slice covering this turn and
 //!           emit it, then switch back to idle
 //!        e. On stdin EOF, terminate the session and exit
+//!
+//! Every exit a hub cannot predict (SessionStart timeout, PTY idle timeout,
+//! transcript stall) writes one structured `result` error frame to stdout
+//! before the process ends, so the hub never reads a silent dead pipe.
 const std = @import("std");
 const zmux = @import("zmux");
 
@@ -64,16 +68,26 @@ pub const Options = struct {
     /// without false-killing long turns that keep emitting tool progress.
     /// Set to 0 to disable.
     idle_progress_timeout_ms: u64 = 180_000,
+    /// While busy, kill the session if the transcript file has not grown for
+    /// this long. Unlike `idle_progress_timeout_ms`, a ticking spinner does
+    /// not reset it: only real transcript bytes count. Set to 0 to disable.
+    transcript_idle_timeout_ms: u64 = 600_000,
+    /// Extra hooks merged into the generated settings (see `hook.zig`).
+    extra_hooks: []const hook_mod.ExtraHook = &.{},
+    /// Extra settings JSON object merged into the generated settings.
+    extra_settings_json: ?[]const u8 = null,
 };
 
 pub const RunError = error{
     SessionStartTimeout,
     IdleTimeout,
+    TranscriptStalled,
+    InvalidExtraSettings,
     TranscriptUnavailable,
     SpawnFailed,
 } || std.mem.Allocator.Error;
 
-const State = enum {
+pub const State = enum {
     /// Spawned, waiting for SessionStart hook.
     waiting_for_ready,
     /// SessionStart fired, transcript opened, awaiting prompt from stdin.
@@ -100,6 +114,42 @@ fn idleTimedOut(state: State, last_output_ns: i64, now_ns: i128, timeout_ms: u64
     return idle_ms > @as(i64, @intCast(timeout_ms));
 }
 
+/// Decide whether a busy turn has stalled: the transcript file has not grown
+/// for longer than the transcript-idle timeout. Spinner-immune counterpart of
+/// `idleTimedOut`: Ink repaints keep PTY bytes flowing during a wedged turn,
+/// but only real progress appends transcript bytes.
+///
+/// Same rules as `idleTimedOut`: only `.busy` can trip, `timeout_ms == 0`
+/// disables, and `last_transcript_advance_ns == 0` (no baseline) never trips.
+/// The caller MUST reset the baseline to "now" on the idle→busy transition
+/// and again each time the tailer reads new transcript bytes.
+pub fn transcriptStalled(state: State, last_transcript_advance_ns: i64, now_ns: i128, timeout_ms: u64) bool {
+    if (timeout_ms == 0) return false;
+    if (state != .busy) return false;
+    if (last_transcript_advance_ns == 0) return false;
+    const stalled_ms: i64 = @intCast(@divTrunc(now_ns - @as(i128, last_transcript_advance_ns), std.time.ns_per_ms));
+    return stalled_ms > @as(i64, @intCast(timeout_ms));
+}
+
+/// How long to wait for a `Stop` hook after sending ESC for an `interrupt`
+/// frame before reporting the turn as interrupted.
+pub const interrupt_window_ms: u64 = 1500;
+
+/// Decide whether a `Stop` hook that arrives while busy ends the current
+/// turn. After an interrupted turn the daemon returns to idle without waiting
+/// for that turn's `Stop`, so a late one can arrive after the next prompt was
+/// typed. Such a `Stop` is stale until the current turn shows life: its
+/// `UserPromptSubmit` hook fired or its transcript bytes arrived.
+fn stopBelongsToTurn(after_interrupt: bool, prompt_acked: bool, transcript_advanced: bool) bool {
+    return !after_interrupt or prompt_acked or transcript_advanced;
+}
+
+/// Milliseconds from `start_ns` to `now_ns`, clamped at 0.
+fn elapsedMs(start_ns: i128, now_ns: i128) u64 {
+    if (now_ns <= start_ns) return 0;
+    return @intCast(@divTrunc(now_ns - start_ns, std.time.ns_per_ms));
+}
+
 /// Translate daemon Options to a driver.Options (which buildArgv takes).
 /// Prompt stays empty — buildArgv never reads it, and the daemon never
 /// passes a prompt on argv anyway.
@@ -124,6 +174,8 @@ fn toDriverOptions(opts: Options) driver_mod.Options {
         .setting_sources = opts.setting_sources,
         .add_dirs = opts.add_dirs,
         .mcp_configs = opts.mcp_configs,
+        .extra_hooks = opts.extra_hooks,
+        .extra_settings_json = opts.extra_settings_json,
         .verbose = opts.verbose,
         .timeout_ms = opts.session_start_timeout_ms,
         .claude_path = opts.claude_path,
@@ -195,10 +247,8 @@ fn parseUserMessageContent(allocator: std.mem.Allocator, line: []const u8) !?[]u
     return null;
 }
 
-/// True if `line` is a `{"type":"ping"}` health-probe frame. Cheap classifier
-/// run before `parseUserMessageContent` in the stdin loop so a ping is answered
-/// with a `pong` and never queued as a prompt (see SPEC §2.7).
-fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+/// True if `line` is a JSON object whose `type` field equals `frame_type`.
+fn isFrameOfType(allocator: std.mem.Allocator, line: []const u8, frame_type: []const u8) bool {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
         .ignore_unknown_fields = true,
     }) catch return false;
@@ -206,7 +256,20 @@ fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
     if (parsed.value != .object) return false;
     const tval = parsed.value.object.get("type") orelse return false;
     if (tval != .string) return false;
-    return std.mem.eql(u8, tval.string, "ping");
+    return std.mem.eql(u8, tval.string, frame_type);
+}
+
+/// True if `line` is a `{"type":"ping"}` health-probe frame. Cheap classifier
+/// run before `parseUserMessageContent` in the stdin loop so a ping is answered
+/// with a `pong` and never queued as a prompt (see SPEC §2.7).
+fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+    return isFrameOfType(allocator, line, "ping");
+}
+
+/// True if `line` is a `{"type":"interrupt"}` frame: the hub asks the daemon
+/// to stop the turn in flight and keep the session (see SPEC §2.7).
+fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
+    return isFrameOfType(allocator, line, "interrupt");
 }
 
 /// Read the byte range [start_pos..end_pos) from a file via pread. Caller
@@ -326,6 +389,58 @@ fn fdReadable(fd: std.posix.fd_t) bool {
     return (pfd[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0;
 }
 
+/// Wait until the PTY has been quiet for `quiet_ms` (at most `max_ms`), then
+/// hold for `settle_ms` more so late Ink chrome finishes painting before we
+/// type. Flushes queued DEC replies the whole time: Ink blocks its render on
+/// those replies, so a wait that stops answering them never sees quiet.
+fn settleBeforePrompt(
+    shared: *driver_mod.SharedState,
+    session: *zmux.NativeSession,
+    quiet_ms: u64,
+    max_ms: u64,
+    settle_ms: u64,
+) void {
+    const step_ns: u64 = 15 * std.time.ns_per_ms;
+    const quiet_ns: i128 = @as(i128, quiet_ms) * std.time.ns_per_ms;
+    const started: i128 = std.time.nanoTimestamp();
+    const give_up: i128 = started + @as(i128, max_ms) * std.time.ns_per_ms;
+    while (true) {
+        driver_mod.flushPendingToPty(shared, session);
+        const now: i128 = std.time.nanoTimestamp();
+        if (now > give_up) break;
+        const last: i64 = shared.last_output_ns.load(.seq_cst);
+        if (last != 0 and now - @as(i128, last) > quiet_ns) break;
+        std.Thread.sleep(step_ns);
+    }
+    const settle_end: i128 = std.time.nanoTimestamp() + @as(i128, settle_ms) * std.time.ns_per_ms;
+    while (true) {
+        driver_mod.flushPendingToPty(shared, session);
+        const remaining = settle_end - std.time.nanoTimestamp();
+        if (remaining <= 0) break;
+        std.Thread.sleep(@intCast(@min(remaining, @as(i128, step_ns))));
+    }
+}
+
+/// Last act before a watchdog exit: flush what the transcript still holds,
+/// write one structured error `result` frame, flush stdout, and terminate the
+/// child. Returns `exit_code` so the caller can `return` it directly.
+fn exitWithErrorFrame(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    session: *zmux.NativeSession,
+    tailer: ?*stream_mod.Tailer,
+    error_reason: []const u8,
+    session_id: []const u8,
+    duration_ms: u64,
+    exit_code: u8,
+) u8 {
+    if (tailer) |t| _ = t.pump(writer) catch 0;
+    emit_mod.emitErrorResult(allocator, writer, "error", error_reason, session_id, duration_ms) catch {};
+    writer.flush() catch {};
+    session.terminate();
+    return exit_code;
+}
+
 /// Daemon entry. Runs until stdin EOF (callers close the spawned daemon's
 /// stdin to signal shutdown) or until the child `claude` exits.
 pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
@@ -333,7 +448,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     trace(opts, trace_start, "daemon.run() entered");
 
     // ----------- 1. Hook harness + argv + env -----------
-    var harness = try hook_mod.create(allocator);
+    var harness = hook_mod.createWithOptions(allocator, .{
+        .extra_hooks = opts.extra_hooks,
+        .extra_settings_json = opts.extra_settings_json,
+    }) catch |e| switch (e) {
+        error.InvalidExtraSettings => return RunError.InvalidExtraSettings,
+        else => return e,
+    };
     defer harness.deinit();
 
     const claude_bin = opts.claude_path orelse "claude";
@@ -345,25 +466,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     const shell_cmd = try driver_mod.shellQuoteArgv(allocator, argv.items);
     defer allocator.free(shell_cmd);
 
-    var env_list: std.ArrayList([]const u8) = .{};
-    defer {
-        for (env_list.items) |s| allocator.free(s);
-        env_list.deinit(allocator);
-    }
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
-    var env_it = env_map.iterator();
-    while (env_it.next()) |e| {
-        try env_list.append(
-            allocator,
-            try std.fmt.allocPrint(allocator, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }),
-        );
-    }
-    try env_list.append(
-        allocator,
-        try std.fmt.allocPrint(allocator, "CLAUDE_P_FIFO={s}", .{harness.fifo_path}),
-    );
-    try env_list.append(allocator, try allocator.dupe(u8, "TERM=xterm-256color"));
+    // Same child environment as one-shot mode: nested-session markers are
+    // stripped, and CLAUDE_P_FIFO, TERM and
+    // CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 are set.
+    var env_list = try driver_mod.buildChildEnv(allocator, harness.fifo_path);
+    defer driver_mod.freeChildEnv(allocator, &env_list);
 
     // ----------- 2. FIFO for hook events -----------
     const fifo_z = try allocator.dupeZ(u8, harness.fifo_path);
@@ -432,6 +539,19 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
         prompt_queue.deinit(allocator);
     }
 
+    // Session id from the SessionStart payload; error frames carry it.
+    var session_id: ?[]u8 = null;
+    defer if (session_id) |sid| allocator.free(sid);
+
+    // Transcript-advance watchdog baseline (see `transcriptStalled`).
+    var last_transcript_advance_ns: i64 = 0;
+    // Set while an `interrupt` frame waits for the turn's Stop hook.
+    var interrupt_deadline_ns: ?i128 = null;
+    // The previous turn ended as `interrupted`; its Stop hook may still come.
+    var after_interrupt = false;
+    // UserPromptSubmit fired for the turn in flight.
+    var prompt_acked = false;
+
     var turn_start_ns: i128 = 0;
     // Bytes already accounted for in a prior turn's result envelope. Lets us
     // compute per-turn totals from the JSONL slice [turn_start_pos..tailer.pos).
@@ -486,12 +606,19 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
             next_pty_trace_ns = now_ns + pty_trace_interval_ns;
         }
 
+        const sid_now: []const u8 = session_id orelse "";
+        const tailer_ptr: ?*stream_mod.Tailer = if (tailer) |*t| t else null;
         if (state == .waiting_for_ready and now_ns > session_start_deadline_ns) {
-            return RunError.SessionStartTimeout;
+            trace(opts, trace_start, "session start timeout: no SessionStart hook");
+            return exitWithErrorFrame(allocator, stdout, session, tailer_ptr, "session_start_timeout", sid_now, elapsedMs(trace_start, now_ns), 2);
         }
         if (idleTimedOut(state, shared.last_output_ns.load(.seq_cst), now_ns, opts.idle_progress_timeout_ms)) {
-            traceFmt(opts, trace_start, "idle timeout: no PTY activity since busy start", .{});
-            return RunError.IdleTimeout;
+            trace(opts, trace_start, "idle timeout: no PTY activity since busy start");
+            return exitWithErrorFrame(allocator, stdout, session, tailer_ptr, "idle_timeout", sid_now, elapsedMs(turn_start_ns, now_ns), 124);
+        }
+        if (transcriptStalled(state, last_transcript_advance_ns, now_ns, opts.transcript_idle_timeout_ms)) {
+            trace(opts, trace_start, "transcript stalled: no new transcript bytes while busy");
+            return exitWithErrorFrame(allocator, stdout, session, tailer_ptr, "transcript_stalled", sid_now, elapsedMs(turn_start_ns, now_ns), 124);
         }
         if (shared.exited.load(.seq_cst)) {
             if (state == .waiting_for_ready) return RunError.SpawnFailed;
@@ -506,81 +633,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
         }
 
         // ----- flush DEC-responder bytes to PTY -----
-        shared.write_mutex.lock();
-        const to_write = if (shared.pending_to_pty.items.len > 0)
-            try allocator.dupe(u8, shared.pending_to_pty.items)
-        else
-            null;
-        if (to_write != null) shared.pending_to_pty.clearRetainingCapacity();
-        shared.write_mutex.unlock();
-        if (to_write) |bytes| {
-            session.writeInput(bytes) catch {};
-            allocator.free(bytes);
-        }
+        driver_mod.flushPendingToPty(&shared, session);
 
-        // ----- pre-SessionStart modal dialog handling (mirrors driver.run) -----
-        if (state == .waiting_for_ready and (!shared.trust_dismissed or !shared.bypass_perms_accepted or !shared.dev_channels_confirmed)) {
-            shared.recent_mutex.lock();
-            const stripped = try driver_mod.stripCsi(allocator, shared.recent.items);
-            shared.recent_mutex.unlock();
-            defer allocator.free(stripped);
-
-            const last_out: i64 = shared.last_output_ns.load(.seq_cst);
-            const now_ns_i64: i64 = @intCast(std.time.nanoTimestamp());
-            const quiescence_ns: i64 = @intCast(driver_mod.dialog_quiescence_ms * std.time.ns_per_ms);
-            const quiescent = last_out != 0 and (now_ns_i64 - last_out) > quiescence_ns;
-            var fired_this_iter = false;
-
-            if (!shared.trust_dismissed and !fired_this_iter) {
-                const has_trust = std.mem.indexOf(u8, stripped, "trust") != null;
-                const has_folder = std.mem.indexOf(u8, stripped, "folder") != null;
-                if (has_trust and has_folder and quiescent) {
-                    trace(opts, trace_start, "workspace-trust dialog detected — Enter");
-                    session.send("", true) catch {};
-                    shared.trust_dismissed = true;
-                    fired_this_iter = true;
-                    shared.recent_mutex.lock();
-                    shared.recent.clearRetainingCapacity();
-                    shared.recent_mutex.unlock();
-                    shared.last_output_ns.store(@intCast(std.time.nanoTimestamp()), .seq_cst);
-                }
-            }
-            if (!shared.bypass_perms_accepted and !fired_this_iter) {
-                const has_bypass = std.mem.indexOf(u8, stripped, "Bypass") != null or
-                    std.mem.indexOf(u8, stripped, "bypass") != null;
-                const has_permissions = std.mem.indexOf(u8, stripped, "Permissions") != null or
-                    std.mem.indexOf(u8, stripped, "permissions") != null;
-                const has_accept = std.mem.indexOf(u8, stripped, "accept") != null;
-                if (has_bypass and has_permissions and has_accept and quiescent) {
-                    trace(opts, trace_start, "bypass-permissions accept dialog detected — '2'+Enter");
-                    session.send("2", false) catch {};
-                    std.Thread.sleep(driver_mod.ink_enter_debounce_ms * std.time.ns_per_ms);
-                    session.send("", true) catch {};
-                    shared.bypass_perms_accepted = true;
-                    fired_this_iter = true;
-                    shared.recent_mutex.lock();
-                    shared.recent.clearRetainingCapacity();
-                    shared.recent_mutex.unlock();
-                    shared.last_output_ns.store(@intCast(std.time.nanoTimestamp()), .seq_cst);
-                }
-            }
-            // Development-channels confirmation (--dangerously-load-development-channels).
-            // Default selection = option 1 ("I am using this for local development"); bare Enter accepts.
-            if (!shared.dev_channels_confirmed and !fired_this_iter) {
-                const has_loading = std.mem.indexOf(u8, stripped, "Loading") != null;
-                const has_development = std.mem.indexOf(u8, stripped, "development") != null;
-                const has_channels = std.mem.indexOf(u8, stripped, "channels") != null;
-                if (has_loading and has_development and has_channels and quiescent) {
-                    trace(opts, trace_start, "dev-channels dialog detected — Enter");
-                    session.send("", true) catch {};
-                    shared.dev_channels_confirmed = true;
-                    fired_this_iter = true;
-                    shared.recent_mutex.lock();
-                    shared.recent.clearRetainingCapacity();
-                    shared.recent_mutex.unlock();
-                    shared.last_output_ns.store(@intCast(std.time.nanoTimestamp()), .seq_cst);
-                }
-            }
+        // ----- pre-SessionStart modal dialogs (shared with driver.run) -----
+        // Workspace trust (Claude Code 2.1 preselects "No, exit"),
+        // bypass-permissions, and development channels.
+        if (state == .waiting_for_ready) {
+            driver_mod.maybeHandleStartupDialogs(drv_opts, trace_start, &shared, session);
         }
 
         // ----- drain FIFO (hook events) -----
@@ -610,33 +669,55 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
                             // whether the transcript file already has its
                             // own system entries.
                             if (state == .waiting_for_ready) {
-                                const sid = (hook_mod.extractSessionId(allocator, ev.payload) catch null) orelse try allocator.dupe(u8, "");
-                                defer allocator.free(sid);
-                                emitSystemInit(stdout, sid) catch {};
+                                if (session_id == null) {
+                                    session_id = hook_mod.extractSessionId(allocator, ev.payload) catch null;
+                                }
+                                emitSystemInit(stdout, session_id orelse "") catch {};
                                 stdout.flush() catch {};
-                                driver_mod.waitForInkQuiescent(drv_opts, trace_start, &shared);
+                                // A resumed conversation repaints for longer
+                                // than a fresh prompt box.
+                                if (driver_mod.isResumeRun(drv_opts)) {
+                                    settleBeforePrompt(&shared, session, driver_mod.resume_quiescence_ms, driver_mod.resume_max_wait_ms, 0);
+                                } else {
+                                    settleBeforePrompt(&shared, session, driver_mod.ink_quiescence_ms, driver_mod.ink_max_wait_ms, driver_mod.prompt_settle_ms);
+                                }
                                 state = .idle;
                                 trace(opts, trace_start, "daemon ready for prompts");
                             }
+                        },
+                        .user_prompt_submit => {
+                            // claude accepted a prompt. Marks the turn in
+                            // flight as live for `stopBelongsToTurn`.
+                            trace(opts, trace_start, "UserPromptSubmit hook fired");
+                            if (state == .busy) prompt_acked = true;
                         },
                         .stop => {
                             trace(opts, trace_start, "Stop hook fired");
                             if (transcript_path == null) {
                                 transcript_path = try hook_mod.extractTranscriptPath(allocator, ev.payload);
                             }
-                            if (state == .busy and transcript_path != null) {
+                            const advanced = if (tailer) |t| t.pos > turn_start_pos else false;
+                            if (state != .busy) {
+                                trace(opts, trace_start, "Stop while not busy; ignored");
+                            } else if (!stopBelongsToTurn(after_interrupt, prompt_acked, advanced)) {
+                                trace(opts, trace_start, "Stop from the interrupted turn; ignored");
+                            } else {
+                                // With no transcript path the read fails and
+                                // the result falls back to the Stop payload.
                                 emitTurnResult(
                                     allocator,
                                     stdout,
-                                    transcript_path.?,
+                                    transcript_path orelse "",
                                     ev.payload,
                                     if (tailer) |*t| t else null,
                                     turn_start_pos,
                                     turn_start_ns,
                                 ) catch {};
                                 if (tailer) |t| turn_start_pos = t.pos;
+                                interrupt_deadline_ns = null;
+                                after_interrupt = false;
+                                state = .idle;
                             }
-                            state = .idle;
                         },
                         .unknown => {},
                     }
@@ -670,10 +751,30 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
         }
 
         // ----- pump transcript to stdout (raw lines, as claude flushes them) -----
-        if (tailer != null) {
-            const n = tailer.?.pump(stdout) catch 0;
-            if (n > 0) {
-                stdout.flush() catch {};
+        if (tailer) |*t| {
+            const pos_before = t.pos;
+            const lines = t.pump(stdout) catch 0;
+            if (lines > 0) stdout.flush() catch {};
+            // Bytes, not lines: a long line arriving in pieces is progress.
+            if (t.pos > pos_before) last_transcript_advance_ns = @intCast(std.time.nanoTimestamp());
+        }
+
+        // ----- interrupt window: no Stop arrived after ESC -----
+        // Runs after the FIFO drain above, so a Stop that landed inside the
+        // window has already ended the turn with a normal result.
+        if (state == .busy) {
+            if (interrupt_deadline_ns) |deadline| {
+                const window_now: i128 = std.time.nanoTimestamp();
+                if (window_now >= deadline) {
+                    trace(opts, trace_start, "interrupt window elapsed without Stop; reporting interrupted");
+                    emit_mod.emitErrorResult(allocator, stdout, "interrupted", "interrupted", session_id orelse "", elapsedMs(turn_start_ns, window_now)) catch {};
+                    stdout.flush() catch {};
+                    if (tailer) |t| turn_start_pos = t.pos;
+                    interrupt_deadline_ns = null;
+                    after_interrupt = true;
+                    // The session stays alive for the next turn.
+                    state = .idle;
+                }
             }
         }
 
@@ -692,6 +793,14 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
                     // Answered inline by the main loop — proves the loop is live.
                     emitPong(stdout) catch {};
                     stdout.flush() catch {};
+                } else if (isInterruptFrame(allocator, line)) {
+                    if (state == .busy and interrupt_deadline_ns == null) {
+                        trace(opts, trace_start, "interrupt frame: sending ESC");
+                        session.writeInput("\x1b") catch {};
+                        interrupt_deadline_ns = std.time.nanoTimestamp() + @as(i128, interrupt_window_ms) * std.time.ns_per_ms;
+                    } else {
+                        traceFmt(opts, trace_start, "interrupt frame ignored (state={s})", .{@tagName(state)});
+                    }
                 } else if (try parseUserMessageContent(allocator, line)) |content| {
                     try prompt_queue.append(allocator, content);
                 }
@@ -717,16 +826,32 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
             const content = prompt_queue.orderedRemove(0);
             defer allocator.free(content);
             traceFmt(opts, trace_start, "sending prompt ({d} bytes)", .{content.len});
-            driver_mod.waitForInkQuiescent(drv_opts, trace_start, &shared);
-            session.send(content, false) catch {};
-            std.Thread.sleep(driver_mod.ink_enter_debounce_ms * std.time.ns_per_ms);
-            session.send("", true) catch {};
+            settleBeforePrompt(&shared, session, driver_mod.ink_quiescence_ms, driver_mod.ink_max_wait_ms, driver_mod.prompt_settle_ms);
+            if (after_interrupt) {
+                // Lines the interrupted turn wrote late belong to that turn,
+                // not to this one's result.
+                if (tailer) |*t| {
+                    _ = t.pump(stdout) catch 0;
+                    stdout.flush() catch {};
+                    turn_start_pos = t.pos;
+                }
+                // Ctrl-U: clear input the interrupt may have restored.
+                session.writeInput("\x15") catch {};
+            }
+            // Paced bracketed paste: one large write overruns the macOS
+            // 1024-byte TTYHOG and truncates the prompt.
+            driver_mod.typePrompt(session, content) catch |e| {
+                traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(e)});
+            };
             turn_start_ns = std.time.nanoTimestamp();
-            // Reset the idle-progress baseline to "now". Without this, a long
-            // idle period (no PTY output) leaves last_output_ns stale and the
-            // first busy loop trips idleTimedOut even though the child is
-            // healthy and simply hasn't responded to the new prompt yet.
+            // Reset both watchdog baselines to "now". Without this, a long
+            // idle period leaves stale timestamps and the first busy loop
+            // trips even though the child is healthy and simply hasn't
+            // responded to the new prompt yet.
             shared.last_output_ns.store(@intCast(turn_start_ns), .seq_cst);
+            last_transcript_advance_ns = @intCast(turn_start_ns);
+            prompt_acked = false;
+            interrupt_deadline_ns = null;
             state = .busy;
         }
 
@@ -830,4 +955,105 @@ test "idleTimedOut: timeout 0 disables" {
     const now: i128 = 1_000_000 * std.time.ns_per_ms;
     const ancient: i64 = @intCast(now - 3_600_000 * std.time.ns_per_ms);
     try testing.expect(!idleTimedOut(.busy, ancient, now, 0));
+}
+
+test "transcriptStalled: busy + stale baseline trips" {
+    const now: i128 = 1_000_000 * std.time.ns_per_ms;
+    const stale: i64 = @intCast(now - 700_000 * std.time.ns_per_ms);
+    try testing.expect(transcriptStalled(.busy, stale, now, 600_000));
+    // Exactly at the limit does not trip; one ms past it does.
+    const at_limit: i64 = @intCast(now - 600_000 * std.time.ns_per_ms);
+    try testing.expect(!transcriptStalled(.busy, at_limit, now, 600_000));
+    const past_limit: i64 = @intCast(now - 600_001 * std.time.ns_per_ms);
+    try testing.expect(transcriptStalled(.busy, past_limit, now, 600_000));
+}
+
+test "transcriptStalled: fresh baseline or no baseline does not trip" {
+    const now: i128 = 1_000_000 * std.time.ns_per_ms;
+    // Reset on dispatch or on a tailer advance.
+    try testing.expect(!transcriptStalled(.busy, @intCast(now), now, 600_000));
+    const recent: i64 = @intCast(now - 599_000 * std.time.ns_per_ms);
+    try testing.expect(!transcriptStalled(.busy, recent, now, 600_000));
+    try testing.expect(!transcriptStalled(.busy, 0, now, 600_000));
+}
+
+test "transcriptStalled: idle/waiting never trip, timeout 0 disables" {
+    const now: i128 = 10_000_000 * std.time.ns_per_ms;
+    const ancient: i64 = @intCast(now - 7_200_000 * std.time.ns_per_ms);
+    try testing.expect(!transcriptStalled(.idle, ancient, now, 600_000));
+    try testing.expect(!transcriptStalled(.waiting_for_ready, ancient, now, 600_000));
+    try testing.expect(!transcriptStalled(.busy, ancient, now, 0));
+}
+
+test "transcriptStalled: spinner output cannot reset it" {
+    // The PTY watchdog sees fresh output; the transcript watchdog still trips.
+    const now: i128 = 1_000_000 * std.time.ns_per_ms;
+    const fresh_pty: i64 = @intCast(now - 100 * std.time.ns_per_ms);
+    const stale_transcript: i64 = @intCast(now - 601_000 * std.time.ns_per_ms);
+    try testing.expect(!idleTimedOut(.busy, fresh_pty, now, 180_000));
+    try testing.expect(transcriptStalled(.busy, stale_transcript, now, 600_000));
+}
+
+test "isInterruptFrame: interrupt frame recognized" {
+    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
+    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\",\"id\":3}"));
+}
+
+test "isInterruptFrame: other frames and malformed input return false" {
+    const user = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"interrupt\"}}";
+    try testing.expect(!isInterruptFrame(testing.allocator, user));
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":\"ping\"}"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":7}"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "{\"interrupt\":true}"));
+    try testing.expect(!isInterruptFrame(testing.allocator, "\"interrupt\""));
+    try testing.expect(!isInterruptFrame(testing.allocator, "not json"));
+    try testing.expect(!isInterruptFrame(testing.allocator, ""));
+    // A ping is not an interrupt and an interrupt is not a ping or a prompt.
+    try testing.expect(!isPingFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
+    try testing.expectEqual(@as(?[]u8, null), try parseUserMessageContent(testing.allocator, "{\"type\":\"interrupt\"}"));
+}
+
+test "stopBelongsToTurn: stale Stop after an interrupt is rejected" {
+    // Normal turns: every Stop while busy ends the turn.
+    try testing.expect(stopBelongsToTurn(false, false, false));
+    try testing.expect(stopBelongsToTurn(false, true, true));
+    // After an interrupt: a Stop before the new turn shows life is stale.
+    try testing.expect(!stopBelongsToTurn(true, false, false));
+    try testing.expect(stopBelongsToTurn(true, true, false));
+    try testing.expect(stopBelongsToTurn(true, false, true));
+}
+
+test "elapsedMs: clamps a start in the future to 0" {
+    try testing.expectEqual(@as(u64, 1500), elapsedMs(0, 1500 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(u64, 0), elapsedMs(10, 5));
+    try testing.expectEqual(@as(u64, 0), elapsedMs(7, 7));
+}
+
+test "Options: hardening defaults match the contract" {
+    const opts: Options = .{};
+    try testing.expectEqual(@as(u64, 600_000), opts.transcript_idle_timeout_ms);
+    try testing.expectEqual(@as(usize, 0), opts.extra_hooks.len);
+    try testing.expectEqual(@as(?[]const u8, null), opts.extra_settings_json);
+}
+
+test "toDriverOptions: passes extra hooks and extra settings" {
+    const hooks = [_]hook_mod.ExtraHook{.{ .event = "PreToolUse", .command = "echo hi" }};
+    const drv = toDriverOptions(.{
+        .extra_hooks = &hooks,
+        .extra_settings_json = "{\"env\":{\"A\":\"1\"}}",
+        .session_start_timeout_ms = 42,
+    });
+    try testing.expectEqual(@as(usize, 1), drv.extra_hooks.len);
+    try testing.expectEqualStrings("PreToolUse", drv.extra_hooks[0].event);
+    try testing.expectEqualStrings("echo hi", drv.extra_hooks[0].command);
+    try testing.expectEqualStrings("{\"env\":{\"A\":\"1\"}}", drv.extra_settings_json.?);
+    try testing.expectEqual(@as(u64, 42), drv.timeout_ms);
+    try testing.expectEqual(@as(usize, 0), toDriverOptions(.{}).extra_hooks.len);
+}
+
+test "RunError: carries the hardening errors" {
+    const stalled: RunError = RunError.TranscriptStalled;
+    const invalid: RunError = RunError.InvalidExtraSettings;
+    try testing.expectEqualStrings("TranscriptStalled", @errorName(stalled));
+    try testing.expectEqualStrings("InvalidExtraSettings", @errorName(invalid));
 }

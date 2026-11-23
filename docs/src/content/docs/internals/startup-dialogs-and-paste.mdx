@@ -1,0 +1,50 @@
+---
+title: Startup Dialogs and Paced Paste
+description: How claude-p safely dismisses Claude Code 2.1 modals, stays under macOS's 1024-byte TTYHOG limit, and verifies prompt delivery.
+sidebar:
+  order: 3
+---
+
+import DialogStateMachineDiagram from '../../../components/diagrams/DialogStateMachineDiagram.astro';
+import BracketedPasteDiagram from '../../../components/diagrams/BracketedPasteDiagram.astro';
+
+Two subtle terminal bugs break naive PTY wrappers: sending Enter on a modal that defaults to "No, exit", and overflowing the kernel PTY input queue on long prompts. `src/driver.zig` handles both explicitly.
+
+## 1. Claude Code 2.1 startup dialog state machine
+
+Before `SessionStart` fires, Claude Code may display modal prompts (workspace folder trust, bypass-permissions confirmation, or development-channels confirmation).
+
+In Claude Code 2.1, the workspace-trust modal **lists and preselects `"No, exit"` above `"Yes, I trust this folder"`**, has no option numbers, ignores digit keys, and wraps arrow keys. Blindly pressing Enter exits Claude immediately.
+
+<DialogStateMachineDiagram />
+
+`maybeHandleStartupDialogs()` runs only when the PTY has been quiet for `80 ms` (`dialog_quiescence_ms`):
+
+1. **Zero-heap snapshot & CSI strip:** Copies the 8192-byte rolling buffer `shared.recent` onto the stack and strips CSI/OSC/DCS sequences into stack buffers (`full` and `fresh` since `bytes_at_key`).
+2. **Latest-marker classification (`classifyDialog`):** Detects `.trust` (`trust` + `folder`), `.bypass_permissions` (`bypass` + `permissions` + `accept`), and `.dev_channels` (`loading` + `development` + `channels`). Latest marker wins; if Claude's main prompt footer (`"for shortcuts"`) painted afterward, returns `.none`.
+3. **Cursor verification (`analyzeDialog`):** Finds the last `❯` glyph (`\xe2\x9d\xaf`) and uses whitespace-insensitive prefix matching (`looseMatch`, because Ink pads words with cursor moves that strip to zero spaces on first paint).
+4. **Safe action selection (`chooseDialogAction`):**
+   - Sends `\r` **only** when `❯` is verified on an affirmative option (`Yes,Itrust`, `Yes,proceed`, `Yes,Iaccept`, `Iamusing`).
+   - When `❯` is on a negative option (`No,exit`, `Exit`): sends the option digit on numbered menus (e.g. `'2'` for `2. Yes, I accept`), or falls back to Down (`\x1b[B`) / Up (`\x1b[A`) depending on whether the affirmative text appears below the cursor.
+   - Waits for fresh repaint bytes before acting again. If zero fresh bytes arrive within `1500 ms` (`dialog_retry_ms`), retries the dropped key. Hard cap: `16` keys (`max_dialog_keys`).
+
+## 2. Paced bracketed paste and macOS `TTYHOG`
+
+macOS enforces a **1024-byte `TTYHOG` limit** on raw PTY input queues. Writing a 4 KB prompt in one `writeInput()` call silently drops bytes past 1024. On top of that, raw newlines inside a prompt trigger early submission, and sending `\r` immediately after a paste gets swallowed by Ink's paste burst detector.
+
+<BracketedPasteDiagram />
+
+`typePrompt()` and `PasteChunker` solve all three constraints:
+
+- **Bracketed paste framing:** Wraps the prompt in DECSET 2004 `\x1b[200~` … `\x1b[201~` so embedded newlines stay inside one prompt.
+- **Chunk sizing:** Emits chunks of at most `512` bytes (`paste_chunk_bytes`, half of `TTYHOG`), pausing `8 ms` (`paste_chunk_gap_ms`) between chunks so the child drains each write.
+- **UTF-8 safety:** Checks `utf8ByteSequenceLength` before adding a leading byte (`>= 0xC0`) so a multi-byte character is never split across chunk boundaries.
+- **Injection safety:** Detects any literal `\x1b[201~` inside untrusted prompt text and drops its trailing `~`, preventing prompt content from escaping bracketed paste early.
+- **Enter debounce:** Sleeps `120 ms` (`ink_enter_debounce_ms`) after `\x1b[201~`, then writes `\r` once.
+
+## 3. Prompt-acceptance and truncation watchdog
+
+After `typePrompt()` finishes, one-shot mode expects confirmation from either `UserPromptSubmit` or transcript growth past `pre_prompt_transcript_offset`:
+
+- **Truncation check (`isPromptTruncated`):** On `UserPromptSubmit`, if the prompt has more than `64` non-whitespace bytes (`prompt_truncation_min_len`) and Claude's received string does not contain a paste placeholder (`[Pasted text #` or `<pasted_content`), having fewer non-whitespace bytes than expected aborts immediately with `RunError.PromptTruncated`.
+- **Re-injection (`promptWatchdogAction`):** If neither confirmation arrives within `4000 ms` (`prompt_accept_timeout_ms`), the driver sends `Ctrl-U` (`\x15`) to clear residual input, waits for quiescence, and re-runs `typePrompt()`. After `4` total attempts (`max_prompt_injections`), it fails fast with `RunError.PromptNotAccepted`.

@@ -1,0 +1,56 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'Every one-shot invocation walks through four deterministic stages. No screen scraping is ever used to decide whether the assistant finished.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 820 176" role="img" aria-label="One-shot four-stage pipeline diagram">
+    <defs>
+      <marker id="pipe-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
+      </marker>
+    </defs>
+
+    <!-- Stage 1 -->
+    <rect x="16" y="26" width="178" height="122" rx="9" fill="var(--diag-surface)" stroke="var(--diag-blue)" stroke-width="1.5" />
+    <text x="30" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-blue)">STAGE 1 · BOOT</text>
+    <text x="30" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">PTY + FIFO</text>
+    <text x="30" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">Open events.fifo first,</text>
+    <text x="30" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">spawn claude, reply to</text>
+    <text x="30" y="125" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">5 DEC probes + modals.</text>
+
+    <!-- Stage 2 -->
+    <rect x="218" y="26" width="178" height="122" rx="9" fill="var(--diag-surface)" stroke="var(--diag-accent)" stroke-width="1.5" />
+    <text x="232" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-accent)">STAGE 2 · SUBMIT</text>
+    <text x="232" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">SessionStart</text>
+    <text x="232" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">Wait for quiescence,</text>
+    <text x="232" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">bracketed-paste prompt,</text>
+    <text x="232" y="125" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">verify UserPromptSubmit.</text>
+
+    <!-- Stage 3 -->
+    <rect x="420" y="26" width="178" height="122" rx="9" fill="var(--diag-surface)" stroke="var(--diag-purple)" stroke-width="1.5" />
+    <text x="434" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-purple)">STAGE 3 · RUN</text>
+    <text x="434" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">Tail &amp; Wait</text>
+    <text x="434" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">Stream JSONL lines via</text>
+    <text x="434" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">pread() as flushed until</text>
+    <text x="434" y="125" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">Stop arrives on FIFO.</text>
+
+    <!-- Stage 4 -->
+    <rect x="622" y="26" width="182" height="122" rx="9" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="636" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" font-weight="700" fill="var(--diag-green)">STAGE 4 · EMIT</text>
+    <text x="636" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">Result + Reap</text>
+    <text x="636" y="93" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">Parse offset slice, emit</text>
+    <text x="636" y="109" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">text/json/result, kill</text>
+    <text x="636" y="125" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="var(--diag-muted)">child, remove temp dir.</text>
+
+    <!-- Connectors -->
+    <line x1="194" y1="87" x2="215" y2="87" stroke="var(--diag-border-strong)" stroke-width="1.8" marker-end="url(#pipe-arr)" />
+    <line x1="396" y1="87" x2="417" y2="87" stroke="var(--diag-border-strong)" stroke-width="1.8" marker-end="url(#pipe-arr)" />
+    <line x1="598" y1="87" x2="619" y2="87" stroke="var(--diag-border-strong)" stroke-width="1.8" marker-end="url(#pipe-arr)" />
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

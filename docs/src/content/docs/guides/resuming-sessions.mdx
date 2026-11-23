@@ -1,0 +1,55 @@
+---
+title: Resume and Continue Sessions
+description: Reuse prior Claude Code conversations with --resume, --continue, and --session-id without leaking historical answers into the current turn.
+sidebar:
+  order: 2
+---
+
+import ResumeOffsetDiagram from '../../../components/diagrams/ResumeOffsetDiagram.astro';
+
+`claude-p` forwards session flags directly to `claude` and adds byte-offset isolation so previous turns in the transcript file can never leak into the current turn's output or token totals.
+
+## Resume by session ID
+
+Capture `session_id` from a `--output-format json` run, then pass it to `--resume`:
+
+```bash
+SID=$(npx claude-p --output-format json --dangerously-skip-permissions \
+  "Remember the token KESTREL. Reply OK." | jq -r '.session_id')
+
+npx claude-p --resume "$SID" --dangerously-skip-permissions \
+  "What token did I give you?"
+```
+
+## Continue the most recent session
+
+Use `--continue` (or `-c`) to pick up the latest session in `--cwd`:
+
+```bash
+npx claude-p --continue --cwd /path/to/repo --dangerously-skip-permissions \
+  "Now write a unit test for the function we just discussed."
+```
+
+## Pin a specific UUID up front
+
+Pass `--session-id <uuid>` on the first run when an orchestrator generates session IDs ahead of time:
+
+```bash
+UUID="550e8400-e29b-41d4-a716-446655440000"
+npx claude-p --session-id "$UUID" --dangerously-skip-permissions "Start audit."
+```
+
+## How offset isolation prevents stale answers
+
+When resuming, Claude appends new JSONL lines to the existing transcript file. Without offset tracking, a fast `Stop` hook or an empty turn could return the *previous* turn's assistant message.
+
+<ResumeOffsetDiagram />
+
+In one-shot mode (`src/driver.zig`):
+
+1. `settleBeforePrompt()` detects `--resume`, `-r`, `--continue`, or `-c` and waits for `400 ms` of PTY silence (capped at `6000 ms`) while Ink repaints the restored history.
+2. Right before typing the new prompt, the driver snapshots `pre_prompt_transcript_offset = stat(transcript_path).size`.
+3. Live `stream-json` tailing starts at `pre_prompt_transcript_offset`.
+4. After `Stop`, `transcript.parseFileFromOffset()` reads only `[pre_prompt_transcript_offset..EOF)`. If no new assistant message appears in that slice, it returns `NoAssistantMessage` instead of returning an older turn.
+
+In daemon mode (`src/daemon.zig`), when `opts.resume_session != null` or `opts.cont == true`, the transcript `Tailer` seeks to the file's existing EOF on first open so historical turns are not re-emitted to stdout.

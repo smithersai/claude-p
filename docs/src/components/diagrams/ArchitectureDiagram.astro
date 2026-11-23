@@ -1,0 +1,117 @@
+---
+interface Props {
+  caption?: string;
+}
+const {
+  caption = 'Two OS boundaries keep claude-p deterministic: a real PTY for Ink I/O, and an out-of-band FIFO + JSONL transcript for lifecycle events and output.',
+} = Astro.props;
+---
+
+<figure class="cp-diagram">
+  <svg viewBox="0 0 820 400" role="img" aria-label="claude-p system architecture diagram">
+    <defs>
+      <marker id="arch-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-border-strong)" />
+      </marker>
+      <marker id="arch-arrow-accent" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-accent)" />
+      </marker>
+      <marker id="arch-arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-blue)" />
+      </marker>
+      <marker id="arch-arrow-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--diag-green)" />
+      </marker>
+    </defs>
+
+    <!-- Outer process container -->
+    <rect x="16" y="16" width="530" height="368" rx="12" fill="var(--diag-surface)" stroke="var(--diag-border)" stroke-width="1.5" />
+    <text x="32" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="var(--diag-accent)">
+      claude-p process (Zig 0.15.2)
+    </text>
+
+    <!-- Main event loop -->
+    <rect x="34" y="62" width="210" height="96" rx="8" fill="var(--diag-accent-fill)" stroke="var(--diag-accent)" stroke-width="1.5" />
+    <text x="48" y="84" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-text)">driver / daemon loop</text>
+    <text x="48" y="104" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• startup dialog FSM</text>
+    <text x="48" y="121" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• paced bracketed paste</text>
+    <text x="48" y="138" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• watchdog + FIFO poll</text>
+
+    <!-- zmux NativeSession -->
+    <rect x="312" y="62" width="214" height="96" rx="8" fill="var(--diag-blue-fill)" stroke="var(--diag-blue)" stroke-width="1.5" />
+    <text x="326" y="84" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-text)">zmux.NativeSession</text>
+    <text x="326" y="104" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• openpty / forkpty</text>
+    <text x="326" y="121" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• background reader thread</text>
+    <text x="326" y="138" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">• 8 KB recent ring + EventSink</text>
+
+    <!-- terminal.zig DEC responder -->
+    <rect x="312" y="196" width="214" height="72" rx="8" fill="var(--diag-surface-alt)" stroke="var(--diag-blue)" stroke-width="1.25" stroke-dasharray="4 3" />
+    <text x="326" y="218" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">terminal.zig (reader thread)</text>
+    <text x="326" y="237" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">DA1 · DA2 · DSR · XTVERSION · 18t</text>
+    <text x="326" y="254" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-blue)">queues into pending_to_pty</text>
+
+    <!-- stream.zig + transcript.zig + emit.zig -->
+    <rect x="34" y="294" width="210" height="72" rx="8" fill="var(--diag-green-fill)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="48" y="316" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">stream · transcript · emit</text>
+    <text x="48" y="335" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">pread Tailer + offset parser</text>
+    <text x="48" y="352" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-green)">stdout: text | json | stream-json</text>
+
+    <!-- Hook harness / FIFO -->
+    <rect x="312" y="294" width="214" height="72" rx="8" fill="var(--diag-purple-fill)" stroke="var(--diag-purple)" stroke-width="1.5" />
+    <text x="326" y="316" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.5" font-weight="700" fill="var(--diag-text)">hook.zig + events.fifo</text>
+    <text x="326" y="335" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">$TMPDIR/claude-p-pid-rand/</text>
+    <text x="326" y="352" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-purple)">SessionStart · UserPromptSubmit · Stop</text>
+
+    <!-- Child claude process -->
+    <rect x="598" y="62" width="206" height="126" rx="10" fill="var(--diag-surface)" stroke="var(--diag-border-strong)" stroke-width="1.5" />
+    <text x="614" y="86" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.5" font-weight="700" fill="var(--diag-text)">child `claude`</text>
+    <text x="614" y="106" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="var(--diag-muted)">Interactive Ink TUI</text>
+    <text x="614" y="124" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">--settings '&lt;inline json&gt;'</text>
+    <text x="614" y="142" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">TERM=xterm-256color</text>
+    <text x="614" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">CLAUDE_P_FIFO=…</text>
+
+    <!-- Transcript file on disk -->
+    <rect x="598" y="294" width="206" height="72" rx="10" fill="var(--diag-surface)" stroke="var(--diag-green)" stroke-width="1.5" />
+    <text x="614" y="318" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="var(--diag-text)">transcript.jsonl</text>
+    <text x="614" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-muted)">Claude's session log</text>
+    <text x="614" y="355" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="var(--diag-green)">appended per message</text>
+
+    <!-- Arrows -->
+    <!-- driver -> zmux -->
+    <line x1="244" y1="95" x2="309" y2="95" stroke="var(--diag-accent)" stroke-width="1.75" marker-end="url(#arch-arrow-accent)" />
+    <text x="276" y="88" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-accent)">writeInput</text>
+
+    <!-- zmux <-> claude PTY -->
+    <line x1="526" y1="108" x2="595" y2="108" stroke="var(--diag-blue)" stroke-width="1.75" marker-start="url(#arch-arrow-blue)" marker-end="url(#arch-arrow-blue)" />
+    <text x="562" y="99" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-blue)">PTY</text>
+
+    <!-- zmux -> terminal.zig -->
+    <line x1="419" y1="158" x2="419" y2="193" stroke="var(--diag-blue)" stroke-width="1.5" marker-end="url(#arch-arrow-blue)" />
+    <text x="427" y="180" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-blue)">pane_output</text>
+
+    <!-- terminal.zig -> driver (mutex queue) -->
+    <path d="M 312 232 L 155 232 L 155 161" fill="none" stroke="var(--diag-blue)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arch-arrow-blue)" />
+    <text x="236" y="225" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-blue)">mutex queue (no re-entry)</text>
+
+    <!-- claude -> hook FIFO -->
+    <path d="M 650 188 L 650 250 L 560 250 L 560 322 L 529 322" fill="none" stroke="var(--diag-purple)" stroke-width="1.5" marker-end="url(#arch-arrow)" />
+    <text x="604" y="242" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-purple)">hook.sh</text>
+
+    <!-- FIFO -> driver -->
+    <path d="M 312 316 L 274 316 L 274 134 L 247 134" fill="none" stroke="var(--diag-purple)" stroke-width="1.5" marker-end="url(#arch-arrow)" />
+    <text x="274" y="280" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-purple)" transform="rotate(-90 274 280)">O_NONBLOCK read</text>
+
+    <!-- claude -> transcript.jsonl -->
+    <line x1="726" y1="188" x2="726" y2="291" stroke="var(--diag-green)" stroke-width="1.75" marker-end="url(#arch-arrow-green)" />
+    <text x="734" y="244" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-green)">flush JSONL</text>
+
+    <!-- transcript.jsonl -> stream/emit -->
+    <path d="M 598 352 L 570 352 L 570 390 L 138 390 L 138 369" fill="none" stroke="var(--diag-green)" stroke-width="1.75" marker-end="url(#arch-arrow-green)" />
+    <text x="370" y="384" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-green)">pread() tailer &amp; parseFileFromOffset()</text>
+
+    <!-- driver -> emit -->
+    <line x1="94" y1="158" x2="94" y2="291" stroke="var(--diag-accent)" stroke-width="1.5" marker-end="url(#arch-arrow-accent)" />
+    <text x="86" y="226" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="var(--diag-accent)">on Stop</text>
+  </svg>
+  <figcaption>{caption}</figcaption>
+</figure>

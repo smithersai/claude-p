@@ -1,8 +1,7 @@
 #!/bin/sh
 # Build all 4 prebuilt claude-p targets inside a Linux container and emit
-# gzipped release assets to release-assets/. On Linux, zig uses its bundled
-# macOS libSystem stub, so the darwin targets cross-compile without an SDK
-# (which is exactly what fails on a macOS host carrying a too-new system SDK).
+# gzipped assets and SHA256SUMS to release-assets/. Zig's bundled macOS
+# libSystem stub lets the darwin targets cross-compile without an SDK.
 set -e
 
 ZIG_VERSION=0.15.2
@@ -42,7 +41,8 @@ build darwin-x64    x86_64-macos
 build linux-x64     x86_64-linux-musl
 build linux-arm64   aarch64-linux-musl
 
+(cd release-assets && sha256sum claude-p-*.gz > SHA256SUMS)
+chmod 0644 release-assets/*.gz release-assets/SHA256SUMS
+
 echo "=== done ==="
 ls -la release-assets/
-# Make assets owned by the mount user (root in container -> fix perms loosely)
-chmod -R 0644 release-assets/*.gz

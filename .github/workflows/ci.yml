@@ -7,6 +7,24 @@ on:
       - main
 
 jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: LICENSE exists
+        run: test -s LICENSE || { echo "::error::LICENSE file is missing or empty"; exit 1; }
+
+      - name: Versions agree (package.json, build.zig.zon, src/root.zig)
+        run: node scripts/publish.mjs --check-versions
+
+      - name: Release scripts parse
+        run: node --check scripts/install.js && node --check scripts/publish.mjs
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -22,3 +40,29 @@ jobs:
 
       - name: zig build test
         run: zig build test
+
+  cross-compile:
+    # Same targets and flags as scripts/publish.mjs, so a release tag never
+    # discovers a broken target for the first time.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-macos
+          - x86_64-macos
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: zig build (${{ matrix.target }})
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -p out
+
+      - name: Binary exists
+        run: test -s out/bin/claude-p && file out/bin/claude-p

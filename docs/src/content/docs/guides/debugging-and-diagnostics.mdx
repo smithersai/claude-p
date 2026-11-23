@@ -1,0 +1,62 @@
+---
+title: Debugging and Diagnostics
+description: Trace startup dialogs, hook arrivals, PTY byte rates, and common wrapper errors using --debug and CLAUDE_P_PTY_TRACE.
+sidebar:
+  order: 4
+---
+
+When a run times out, drops a prompt, or exits with code `2`, `claude-p` provides two diagnostic streams on stderr so stdout stays machine-readable.
+
+## One-shot tracing with `--debug`
+
+Pass `--debug` to emit millisecond-stamped lifecycle events to stderr:
+
+```bash
+npx claude-p --debug --dangerously-skip-permissions "Reply OK."
+```
+
+Key milestones to look for in the trace:
+
+```text
+[claude-p +0ms] run() entered
+[claude-p +2ms] hook harness ready (FIFO + relay script + --settings)
+[claude-p +14ms] zmux session spawned; child claude PID up, Ink booting
+[claude-p +410ms] trust dialog: sending move_down (key 1/16)
+[claude-p +530ms] trust dialog: sending confirm (key 2/16)
+[claude-p +820ms] SessionStart hook fired (Ink is up)
+[claude-p +1005ms] typing prompt (9 bytes; transcript offset 0)
+[claude-p +1155ms] UserPromptSubmit hook fired (prompt accepted)
+[claude-p +2940ms] Stop hook fired (assistant turn finished)
+```
+
+## Daemon PTY telemetry (`CLAUDE_P_PTY_TRACE`)
+
+In daemon mode, a hung Ink TUI can look identical to a slow tool call from stdout alone. `claude-p daemon` prints a structured `[pty-trace]` line to stderr every 60 seconds by default:
+
+```text
+[pty-trace] state=busy pty_bytes=48210 pty_delta=1920 last_byte_age_ms=340 turn_age_ms=60012 transcript_pos=8192
+```
+
+- `pty_delta > 0` while `transcript_pos` is flat: Ink is still animating (for example, a spinner or slow model/tool wait).
+- `pty_delta == 0` and `last_byte_age_ms` growing: the child PTY is completely silent; `--idle-timeout` will fire once `last_byte_age_ms` exceeds the threshold.
+
+Configure the trace interval via `CLAUDE_P_PTY_TRACE`:
+
+| Value | Behavior |
+| --- | --- |
+| Unset / empty | Print every `60` seconds (default). |
+| `<positive integer>` | Print every `N` seconds (e.g. `CLAUDE_P_PTY_TRACE=10`). |
+| `0`, `off`, `false`, `no` | Disable `[pty-trace]` output. |
+
+## Diagnosing specific errors
+
+| Error / symptom | Cause | Fix |
+| --- | --- | --- |
+| `Error: --output-format=stream-json requires --verbose` | `stream-json` passed without `--verbose` in one-shot mode. | Add `--verbose`. |
+| `Error: unsupported flag` | Passed `-p`, `--print`, or `--settings`. | Remove `-p`/`--print` (already emulated); for custom settings/hooks use the Zig API (`extra_hooks`, `extra_settings_json`). |
+| `SessionStartTimeout` | Ink hung before `SessionStart` fired (unhandled modal, new terminal probe, or `claude` auth prompt). | Re-run with `--debug`; verify `claude` works interactively in `--cwd`; raise `--timeout`. |
+| `PromptNotAccepted` | Four prompt injections went unacknowledged by `UserPromptSubmit` or transcript growth. | Check `--debug` for a lingering modal or non-responsive TUI; ensure `--setting-sources` didn't block inline hooks. |
+| `PromptTruncated` | `UserPromptSubmit` reported fewer non-whitespace bytes than sent (for prompts > 64 non-space bytes). | Inspect `--debug` byte counts; pass large prompts via `--input-file` or stdin. |
+| `TranscriptUnavailable` | `Stop` fired (or child exited) with neither a parseable assistant message nor `last_assistant_message`. | Check `claude` stderr/auth state; verify `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE` is not set to `0`. |
+| `IdleTimeout` (daemon) | No PTY bytes arrived for `--idle-timeout` seconds while `.busy`. | Inspect `[pty-trace]` or raise/disable `--idle-timeout 0`. |
+| Missing binary (`ENOENT` from `bin/claude-p.js`) | Postinstall download failed or `CLAUDE_P_SKIP_DOWNLOAD=1` was set. | Re-run `npm install claude-p` or build from source with Zig 0.15.2. |

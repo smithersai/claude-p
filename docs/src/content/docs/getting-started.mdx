@@ -1,0 +1,89 @@
+---
+title: Getting Started
+description: Install claude-p, verify your environment, and run text, JSON, stream-json, and daemon invocations in under a minute.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import LifecyclePipelineDiagram from '../../components/diagrams/LifecyclePipelineDiagram.astro';
+
+`claude-p` is a drop-in replacement for `claude -p`. It spawns your installed `claude` binary inside an in-process [zmux](https://github.com/smithersai/zmux) PTY, drives the interactive UI, and emits `claude -p`-compatible stdout.
+
+## Prerequisites
+
+- **OS & CPU:** macOS or Linux on `arm64` or `x64`. Windows is unsupported (`forkpty` is POSIX-only).
+- **`claude` on `$PATH`:** `claude-p` drives the real Claude Code binary. Verify with `claude --version`.
+- **Runtime:** Node `>= 18` for `npx` / `npm`, or Zig **`0.15.2`** to build from source.
+
+## Install
+
+<Tabs>
+  <TabItem label="npx (no install)">
+    ```bash
+    npx claude-p --version
+    ```
+  </TabItem>
+  <TabItem label="npm (global)">
+    ```bash
+    npm install -g claude-p
+    claude-p --version
+    ```
+  </TabItem>
+  <TabItem label="From source (Zig 0.15.2)">
+    ```bash
+    git clone https://github.com/smithersai/claude-p
+    cd claude-p
+    zig build -Doptimize=ReleaseSafe
+    ./zig-out/bin/claude-p --version
+    ```
+  </TabItem>
+</Tabs>
+
+On `npm install`, `scripts/install.js` fetches `claude-p-<platform>-<arch>.gz` and `SHA256SUMS` from GitHub Releases and verifies the SHA-256 digest before extracting the binary. A digest mismatch aborts installation with exit code `1`.
+
+## Three ways to run it
+
+### 1. Plain text (default)
+
+```bash
+npx claude-p --dangerously-skip-permissions "Reply with the single word OK."
+```
+
+```text
+OK
+```
+
+If you omit the positional prompt, `claude-p` reads stdin (up to 16 MiB) or `--input-file <path>`.
+
+### 2. Single JSON result object
+
+```bash
+npx claude-p --output-format json --dangerously-skip-permissions \
+  "Reply with the single word OK."
+```
+
+```json
+{"type":"result","subtype":"success","session_id":"550e8400-e29b-41d4-a716-446655440000","result":"OK","is_error":false,"duration_ms":2410,"duration_api_ms":0,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":6,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"permission_denials":[]}
+```
+
+### 3. Live per-message JSONL stream
+
+`stream-json` requires `--verbose`, matching native `claude -p`:
+
+```bash
+npx claude-p --output-format stream-json --verbose \
+  --dangerously-skip-permissions "Reply with OK." | jq -c '{type, subtype}'
+```
+
+Each transcript line flushes to stdout as soon as `claude` writes it, followed by the final `result` envelope.
+
+## What just happened?
+
+<LifecyclePipelineDiagram />
+
+`claude-p` never edits `~/.claude/settings.json`. It builds an inline `--settings` JSON string pointing `SessionStart`, `UserPromptSubmit`, and `Stop` hooks to a temporary FIFO in `$TMPDIR`, runs `claude` on a real PTY, and reads the final answer from the session transcript JSONL.
+
+## Next steps
+
+- **Learn by building:** Start the hands-on [Build a Commit Reviewer](/tutorials/first-automation/) tutorial.
+- **Keep one session alive:** Walk through [Drive a Multi-Turn Daemon](/tutorials/multi-turn-daemon/).
+- **Look up a flag or exit code:** Jump straight to the [CLI Reference](/reference/cli/).

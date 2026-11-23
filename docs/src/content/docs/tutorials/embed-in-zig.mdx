@@ -1,0 +1,170 @@
+---
+title: Embed claude-p in a Zig Program
+description: Add claude_p as a Zig 0.15.2 dependency, call claude_p.run, stream live transcript lines, and attach custom hooks and settings.
+sidebar:
+  order: 3
+---
+
+import Callout from '../../../components/Callout.astro';
+
+**Goal:** Add `claude_p` to a Zig **0.15.2** executable, run a one-shot prompt, stream live JSONL lines to a custom writer, and merge library-level `extra_hooks` and `extra_settings_json` without touching `~/.claude/`.
+
+**Time:** 10 minutes. You need Zig **0.15.2** (`zmux` enforces `0.15.2` at comptime) and `claude` on `$PATH`.
+
+---
+
+## Step 1: Fetch `claude_p` and wire `build.zig`
+
+In your Zig project directory, fetch the package:
+
+```bash
+zig fetch --save=claude_p git+https://github.com/smithersai/claude-p
+```
+
+Then wire the `claude_p` module and platform system library (`proc` on macOS, `util` on Linux, plus `libc`) in `build.zig`:
+
+```zig
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const claude_p_dep = b.dependency("claude_p", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "my-agent",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "claude_p", .module = claude_p_dep.module("claude_p") },
+            },
+        }),
+    });
+    if (target.result.os.tag == .linux) exe.linkSystemLibrary("util");
+    if (target.result.os.tag == .macos) exe.linkSystemLibrary("proc");
+
+    b.installArtifact(exe);
+}
+```
+
+<Callout title="Why link proc / util?" kind="concept">
+  <code>claude_p</code> embeds <code>zmux.NativeSession</code>, which calls POSIX PTY syscalls
+  (<code>openpty</code>/<code>forkpty</code> in <code>libutil</code> on Linux) and process
+  inspection APIs (<code>libproc</code> on macOS). Linking those libraries avoids undefined symbol
+  errors at link time.
+</Callout>
+
+---
+
+## Step 2: Run your first prompt from Zig
+
+Replace `src/main.zig` with a minimal one-shot call:
+
+```zig
+const std = @import("std");
+const claude_p = @import("claude_p");
+
+pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var result = try claude_p.run(alloc, .{
+        .prompt = "What is the capital of France? Reply with one word.",
+        .output_format = .text,
+        .skip_permissions = true,
+        .timeout_ms = 60_000,
+    });
+    defer result.deinit(alloc);
+
+    std.debug.print("answer: {s}\n", .{result.summary.final_text});
+    std.debug.print("session: {s}\n", .{result.summary.session_id});
+    std.debug.print("tokens: in={d} out={d} ({d} ms)\n", .{
+        result.summary.usage.input_tokens,
+        result.summary.usage.output_tokens,
+        result.duration_ms,
+    });
+}
+```
+
+Build and run:
+
+```bash
+zig build run
+```
+
+Notice the ownership contract: `claude_p.run` takes an explicit `std.mem.Allocator` and returns a `Result` whose `Summary` owns `final_text`, `session_id`, and `jsonl_replay`. Always pair it with `defer result.deinit(alloc);`.
+
+---
+
+## Step 3: Stream live lines + attach custom hooks
+
+Here is something the Zig API gives you that the CLI flags don't expose yet: **inline hook and settings merging** (`extra_hooks` and `extra_settings_json`), plus a direct **`stream_writer`** hook into the live transcript tailer.
+
+Update `src/main.zig`:
+
+```zig
+const std = @import("std");
+const claude_p = @import("claude_p");
+
+pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+
+    var result = try claude_p.run(alloc, .{
+        .prompt = "Reply with the single word OK.",
+        .output_format = .stream_json,
+        .verbose = true,
+        .skip_permissions = true,
+        .stream_writer = stdout,
+        // Appended AFTER claude-p's relay hooks (relay stays index 0).
+        .extra_hooks = &.{
+            .{ .event = "Stop", .command = "echo 'turn finished' >&2" },
+        },
+        // Top-level keys merged into --settings; any "hooks" key here is ignored.
+        .extra_settings_json = "{\"cleanupPeriodDays\":7}",
+    });
+    defer result.deinit(alloc);
+
+    // Safe to call even in stream_json mode: Result.write is a no-op
+    // when result.streamed == true so nothing is double-emitted.
+    try result.write(alloc, stdout, .stream_json);
+    try stdout.flush();
+}
+```
+
+<Callout title="Watch the bytes: how extra_hooks stays safe" kind="bytes">
+  In <code>src/hook.zig</code>, <code>createWithOptions()</code> validates
+  <code>extra_hooks</code> and <code>extra_settings_json</code> <em>before</em> creating the temp
+  directory or FIFO. Invalid JSON, non-object JSON, or empty hook strings fail immediately with
+  <code>error.InvalidExtraSettings</code> and leave zero temp files behind. And
+  <code>claude-p</code>'s own relay hooks are always inserted first so your hooks can never break
+  <code>SessionStart</code> or <code>Stop</code> detection.
+</Callout>
+
+<Callout title="Mental check: why didn't Result.write print twice?" kind="check">
+  When <code>output_format == .stream_json</code> and <code>stream_writer != null</code>,
+  <code>driver.run()</code> tails lines live, emits the trailing <code>result</code> envelope, and
+  sets <code>result.streamed = true</code>. <code>Result.write()</code> checks
+  <code>if (self.streamed and fmt == .stream_json) return;</code> so callers can use one unified
+  emit path for all three formats.
+</Callout>
+
+## Checkpoint & next steps
+
+You wired `claude_p` into a Zig 0.15.2 build, ran a prompt, streamed live JSONL through `stream_writer`, and merged custom hooks and settings cleanly.
+
+- **Need every struct field and error variant?** Open the [Zig Library API Reference](/reference/zig-api/).
+- **Curious how `Tailer` reads a file while Claude appends to it?** See [Hooks and Transcripts](/internals/hooks-and-transcripts/).

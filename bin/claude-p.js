@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Thin shim that execs the platform-specific prebuilt `claude-p` binary
+// Thin shim that runs the platform-specific prebuilt `claude-p` binary
 // downloaded by scripts/install.js into ../prebuilt/.
 
-const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const { constants: { signals } } = require("node:os");
 const path = require("node:path");
 
 function platformDir() {
@@ -19,26 +19,39 @@ function binaryPath() {
 }
 
 function main() {
-  const bin = binaryPath();
-  if (!fs.existsSync(bin)) {
-    console.error(
-      `claude-p: prebuilt binary not found at ${bin}\n` +
-        `Re-run \`npm install claude-p\` or build from source with \`zig build\`.`,
-    );
-    process.exit(2);
-  }
-  const result = spawnSync(bin, process.argv.slice(2), {
+  const child = spawn(binaryPath(), process.argv.slice(2), {
     stdio: "inherit",
   });
-  if (result.error) {
-    console.error("claude-p:", result.error.message);
-    process.exit(2);
+  const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const forwardSignal = (signal) => child.kill(signal);
+  for (const signal of forwardedSignals) {
+    process.on(signal, forwardSignal);
   }
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-    return;
-  }
-  process.exit(result.status ?? 0);
+
+  child.on("error", (error) => {
+    console.error("claude-p:", error.message);
+    if (child.pid === undefined) {
+      console.error(
+        "Re-run `npm install claude-p` or build https://github.com/smithersai/claude-p " +
+          "with `zig build -Doptimize=ReleaseSafe` and run `./zig-out/bin/claude-p`.",
+      );
+    }
+  });
+
+  child.once("close", (code, signal) => {
+    for (const forwardedSignal of forwardedSignals) {
+      process.removeListener(forwardedSignal, forwardSignal);
+    }
+    if (signal) {
+      process.exitCode = 128 + signals[signal];
+      // Node uses SIGUSR1 to start its debugger.
+      if (signal !== "SIGUSR1") {
+        process.kill(process.pid, signal);
+      }
+      return;
+    }
+    process.exitCode = child.pid === undefined ? 2 : (code ?? 2);
+  });
 }
 
 main();

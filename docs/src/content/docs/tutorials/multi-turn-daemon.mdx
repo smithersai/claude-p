@@ -1,0 +1,189 @@
+---
+title: Drive a Multi-Turn Daemon
+description: Build a Node.js controller that sends multiple turns and health pings to a single long-lived claude-p daemon process over NDJSON.
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../components/Callout.astro';
+import DaemonProtocolDiagram from '../../../components/diagrams/DaemonProtocolDiagram.astro';
+
+**Goal:** Spawn `claude-p daemon` once from Node.js, verify liveness with `ping`/`pong`, run two back-to-back conversational turns in the same Claude Code session, and shut down cleanly on stdin EOF.
+
+**Time:** 12 minutes. You need Node `>= 18`, `claude`, and `claude-p`.
+
+---
+
+## Why not just call `claude-p` twice?
+
+Every one-shot `claude-p` call allocates a fresh PTY, boots Ink, negotiates DEC queries, and tears down the process (~50–200 ms plus Claude initialization). If you are building an agent loop, chat bridge, or test harness that sends 20 turns, starting from scratch every turn wastes seconds and forces `--resume` replay.
+
+`claude-p daemon` solves this by keeping **one** interactive `claude` session alive and turning stdin/stdout into a two-way NDJSON pipe:
+
+<DaemonProtocolDiagram />
+
+---
+
+## Step 1: Test the wire protocol by hand
+
+Before writing code, send a `ping` and a `user` turn from your terminal so you can watch the exact frames come back:
+
+```bash
+printf '%s\n' \
+  '{"type":"ping"}' \
+  '{"type":"user","message":{"role":"user","content":"Remember the word: ZIRCON. Reply OK."}}' \
+  | npx claude-p daemon --dangerously-skip-permissions \
+  | jq -c '{type, subtype, ts, session_id, result}'
+```
+
+Look closely at the order of lines on stdout:
+
+1. `{"type":"pong","ts":1763859600123}` — can arrive **even before** `system/init` because `ping` is answered inline by the main event loop in any state!
+2. `{"type":"system","subtype":"init","session_id":"..."}` — emitted once as soon as `SessionStart` fires.
+3. Raw transcript JSONL lines from Claude (`user`, `assistant`, tool events) as they flush.
+4. `{"type":"result","subtype":"success","session_id":"...","result":"OK",...}` — emitted when `Stop` fires for that turn.
+5. Because `printf` closed stdin (EOF), the daemon finishes the active turn, drains the queue, terminates `claude`, and exits `0`.
+
+<Callout title="Mental check: why did pong arrive first?" kind="check">
+  In <code>src/daemon.zig</code>, every stdin line is checked with <code>isPingFrame()</code>
+  <strong>before</strong> <code>parseUserMessageContent()</code>. Pings bypass the prompt queue
+  completely—if you get a <code>pong</code> back, you know the daemon's main event loop is not
+  wedged, even while Claude is busy thinking.
+</Callout>
+
+---
+
+## Step 2: Write a tiny Node.js daemon client
+
+Let's build `daemon-client.mjs` that spawns `claude-p daemon`, waits for `system/init`, runs a health `ping`, asks two connected questions in the same session, and closes stdin to exit cleanly.
+
+Create `daemon-client.mjs`:
+
+```js
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
+
+const child = spawn(
+  'npx',
+  [
+    'claude-p',
+    'daemon',
+    '--dangerously-skip-permissions',
+    '--idle-timeout',
+    '120',
+  ],
+  {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    env: { ...process.env, CLAUDE_P_PTY_TRACE: 'off' },
+  },
+);
+
+const rl = readline.createInterface({ input: child.stdout });
+
+// Simple waiter queue for the next frame matching a predicate.
+const waiters = [];
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const frame = JSON.parse(line);
+  const idx = waiters.findIndex((w) => w.match(frame));
+  if (idx !== -1) {
+    const [w] = waiters.splice(idx, 1);
+    w.resolve(frame);
+  }
+});
+
+function waitFor(match) {
+  return new Promise((resolve) => waiters.push({ match, resolve }));
+}
+
+function send(frame) {
+  child.stdin.write(`${JSON.stringify(frame)}\n`);
+}
+
+// 1. Wait until Claude finishes booting and SessionStart fires.
+const init = await waitFor((f) => f.type === 'system' && f.subtype === 'init');
+console.log('Session ready:', init.session_id);
+
+// 2. Verify main loop liveness with a ping/pong round-trip.
+const pongPromise = waitFor((f) => f.type === 'pong');
+send({ type: 'ping' });
+const pong = await pongPromise;
+console.log('Loop alive at unix ms:', pong.ts);
+
+// 3. Turn 1: plant a fact in session memory.
+const turn1Promise = waitFor((f) => f.type === 'result');
+send({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: 'Remember the codeword COBALT. Reply only: STORED',
+  },
+});
+const turn1 = await turn1Promise;
+console.log('Turn 1:', turn1.result, `(${turn1.duration_ms} ms)`);
+
+// 4. Turn 2: recall it in the exact same live PTY session.
+const turn2Promise = waitFor((f) => f.type === 'result');
+send({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: 'What was the codeword? Reply with one word.',
+  },
+});
+const turn2 = await turn2Promise;
+console.log('Turn 2:', turn2.result, `(${turn2.duration_ms} ms)`);
+
+// 5. Close stdin (EOF) so the daemon terminates claude and exits 0.
+child.stdin.end();
+const exitCode = await new Promise((resolve) => child.once('close', resolve));
+console.log('Daemon exited with code:', exitCode);
+```
+
+Run it:
+
+```bash
+node daemon-client.mjs
+```
+
+Expected output:
+
+```text
+Session ready: 550e8400-e29b-41d4-a716-446655440000
+Loop alive at unix ms: 1763859642018
+Turn 1: STORED (2140 ms)
+Turn 2: COBALT (1480 ms)
+Daemon exited with code: 0
+```
+
+---
+
+## Step 3: Understand the two timers you just configured
+
+Look at two lines in `daemon-client.mjs` that quietly prevented common production bugs:
+
+1. **`--idle-timeout 120`** sets the busy-turn PTY silence watchdog to 120 seconds (default is 180 s; `0` disables it).
+   - While **idle** (waiting for your next `user` frame), this timer **never trips**—your daemon can sit parked for hours.
+   - The moment a prompt is dispatched (`idle → busy`), `claude-p` resets `last_output_ns` to `now` so a long idle period never causes an instant false timeout on the next turn.
+2. **`CLAUDE_P_PTY_TRACE: 'off'`** silences the daemon's periodic stderr trace. By default, `claude-p daemon` prints a `[pty-trace]` line every 60 seconds showing `pty_delta` and `transcript_pos` so you can tell a live spinner apart from a truly wedged process.
+
+<Callout title="Watch the bytes: how per-turn usage stays accurate" kind="bytes">
+  Claude appends every turn to the same session <code>.jsonl</code> file.
+  After Turn 1's <code>Stop</code> hook, the daemon records <code>turn_start_pos = tailer.pos</code>.
+  When Turn 2 finishes, <code>emitTurnResult()</code> reads only bytes
+  <code>[turn_start_pos .. turn_end_pos)</code>—so Turn 2's <code>result</code> envelope
+  reports Turn 2's text and token counts, not Turn 1's.
+</Callout>
+
+<Callout title="Trap: don't send malformed JSON without checking stdout" kind="trap">
+  In <code>src/daemon.zig</code>, non-<code>user</code> / non-<code>ping</code> or unparseable
+  stdin lines are silently ignored rather than aborting the daemon. Always serialize frames with
+  <code>JSON.stringify</code> and terminate each frame with <code>\n</code>.
+</Callout>
+
+## Checkpoint & next steps
+
+You built a stateful NDJSON controller over a single `claude-p daemon` process with liveness probes, isolated per-turn result envelopes, and graceful EOF shutdown.
+
+- **Need exact frame schemas and edge cases?** Read the [Daemon Protocol Reference](/reference/daemon-protocol/).
+- **Debugging a slow or stuck turn?** See [Debugging and Diagnostics](/guides/debugging-and-diagnostics/).

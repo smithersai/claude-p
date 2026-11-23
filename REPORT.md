@@ -1,5 +1,7 @@
 # `claude-p` — Implementation Report
 
+This report records the original v0.1.0 implementation milestone.
+
 ## What shipped
 
 A working CLI + Zig library that emulates `claude -p` (Claude Code's
@@ -247,7 +249,7 @@ unsupported platforms (no Windows).
 ## Build & run
 
 ```bash
-git clone https://github.com/williamcory/claude-p
+git clone https://github.com/smithersai/claude-p
 cd claude-p
 zig build                            # Debug build
 zig build -Doptimize=ReleaseSafe     # Release build

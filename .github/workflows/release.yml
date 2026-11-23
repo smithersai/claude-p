@@ -1,9 +1,14 @@
 name: Release
 
-# Triggers on tag push (e.g. `git push origin v0.0.2`). Cross-compiles the
+# Triggers on tag push (e.g. `git push origin v0.1.3`). Cross-compiles the
 # Zig binary for every supported target on a single Linux runner (zig
-# cross-compiles natively), uploads each as a GitHub release asset, then
-# publishes the npm package which downloads them via postinstall.
+# cross-compiles natively), uploads each plus SHA256SUMS as GitHub release
+# assets, then publishes the npm package whose postinstall downloads and
+# verifies them.
+#
+# Re-running is safe: publish.mjs skips tag creation on tag-triggered runs,
+# re-uploads assets to an existing release with --clobber, and skips
+# `npm publish` when the version is already on the registry.
 
 on:
   push:
@@ -12,7 +17,11 @@ on:
 
 permissions:
   contents: write   # for `gh release create`
-  id-token: write   # for npm provenance
+  id-token: write   # for npm provenance / trusted publishing (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -34,19 +43,26 @@ jobs:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
 
-      - name: Verify tag matches package.json
+      - name: Verify tag matches package.json, build.zig.zon, src/root.zig
+        run: node scripts/publish.mjs --check-versions --expect-version="${GITHUB_REF_NAME#v}"
+
+      - name: Check npm auth
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg=$(node -p "require('./package.json').version")
-          if [ "$tag" != "$pkg" ]; then
-            echo "tag $tag does not match package.json $pkg"
-            exit 1
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "NPM_TOKEN present: token publish with --provenance"
+          else
+            echo "::warning::NPM_TOKEN secret not set; relying on npm trusted publishing (OIDC). Configure a trusted publisher for this repo/workflow on npmjs.com, or the publish step fails."
           fi
+
+      - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@^11.5.1 && npm --version
 
       - name: zig build test
         run: zig build test
 
-      - name: Release (build prebuilts, GH release, npm publish)
+      - name: Release (build prebuilts, SHA256SUMS, GH release, npm publish)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish.mjs --skip-git --skip-tests

@@ -1,0 +1,35 @@
+---
+title: PTY and DEC Terminal Queries
+description: Why Ink hangs without terminal query replies and the exact five escape-sequence handshakes implemented in src/terminal.zig.
+sidebar:
+  order: 2
+---
+
+import DecHandshakeDiagram from '../../../components/diagrams/DecHandshakeDiagram.astro';
+
+`zmux.NativeSession` provides a real PTY and a raw byte ring buffer, but it does **not** emulate a terminal state machine. When Claude Code starts, Ink probes the terminal for capabilities, cursor position, and viewport dimensions. If nothing answers those queries, Ink blocks indefinitely and `SessionStart` never fires.
+
+<DecHandshakeDiagram />
+
+## The five recognized sequences (`src/terminal.zig`)
+
+`terminal.respondToDecQueries(allocator, bytes, out)` is a pure, stateless scanner over incoming PTY bytes. It inspects every CSI sequence (`0x1b '['`, optional private `'>'`, parameter bytes `0x30..0x3f`, intermediate bytes `0x20..0x2f`, final byte) and appends the matching reply to `out`:
+
+| Query | Incoming sequence | Hex bytes | Reply emitted | Meaning |
+| --- | --- | --- | --- | --- |
+| **DA1** (Primary Device Attributes) | `ESC [ c` or `ESC [ 0 c` | `1b 5b [30] 63` | `ESC [ ? 1 ; 2 c` | VT100 with Advanced Video Option |
+| **DA2** (Secondary Device Attributes) | `ESC [ > c` or `ESC [ > 0 c` | `1b 5b 3e [30] 63` | `ESC [ > 0 ; 0 ; 0 c` | Firmware / model tuple `0;0;0` |
+| **DSR** (Cursor Position Report) | `ESC [ 6 n` | `1b 5b 36 6e` | `ESC [ 1 ; 1 R` | Cursor at row `1`, column `1` |
+| **XTVERSION** | `ESC [ > q` or `ESC [ > 0 q` | `1b 5b 3e [30] 71` | `ESC P > \| claude-p ESC \` | DCS terminal identification string |
+| **Window size** (`XTWINOPS 18t`) | `ESC [ 18 t` | `1b 5b 31 38 74` | `ESC [ 8 ; 40 ; 120 t` | Terminal size `40` rows × `120` cols |
+
+All non-matching bytes and non-query CSI sequences are ignored. Because the function holds zero state, it is trivially thread-safe and covered directly by unit tests in `src/terminal.zig`.
+
+## Why no full VT emulator (no `libghostty-vt`)?
+
+An early prototype considered embedding a full terminal screen grid to read the assistant's reply off the screen. Once `Stop` hooks and JSONL transcript parsing replaced screen scraping, `claude-p` only needed two lightweight operations on PTY output:
+
+1. **Answer the five startup probes** (`src/terminal.zig`, ~65 lines of code).
+2. **Strip CSI / OSC / DCS escapes** (`driver.stripCsiInto`, zero heap allocation) so the startup dialog detector can inspect plain text and the `❯` cursor.
+
+If a future Claude Code release introduces a new terminal query at startup, the failure mode is a `SessionStartTimeout` (visible under `--debug`), and the fix is one `switch` arm in `src/terminal.zig`.
