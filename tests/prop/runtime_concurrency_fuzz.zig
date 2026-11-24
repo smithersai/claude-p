@@ -108,7 +108,6 @@ fn fuzzDriverHelpers(_: void, input: []const u8) anyerror!void {
 test "fuzz: driver promptWatchdogAction, finalTextMatchesStop, and isResumeRun" {
     try testing.fuzz({}, fuzzDriverHelpers, .{
         .corpus = &.{
-            "",
             "\x00\x04\x00\x00\x00\xff\x7f\x00\x00\x00\x00\x00\x00\x08--resumehello",
             "\x00\x01\x00\x00\x00\xa1\x0f\x00\x00\x00\x00\x00\x00\x0b--resume=id  hello\n",
             "\x01\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x80\x02-c",

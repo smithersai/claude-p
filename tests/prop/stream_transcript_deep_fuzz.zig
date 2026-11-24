@@ -77,7 +77,6 @@ fn fuzzIsForwardable(_: void, input: []const u8) anyerror!void {
 test "fuzz: stream.isForwardable matches JSON-object non-result oracle" {
     try testing.fuzz({}, fuzzIsForwardable, .{
         .corpus = &.{
-            "",
             "{}",
             "{\"type\":\"assistant\",\"text\":\"hi\"}",
             "{\"type\":\"result\",\"result\":\"ok\"}",
@@ -203,7 +202,6 @@ fn fuzzStreamTailer(_: void, input: []const u8) anyerror!void {
 test "fuzz: stream.Tailer chunked pump, reopenAt, and flushPartial match reference oracle" {
     try testing.fuzz({}, fuzzStreamTailer, .{
         .corpus = &.{
-            "",
             "\x00\x08{\"a\":1}\n\x1c{\"type\":\"result\",\"ok\":1}\n",
             "\x01\x06{\"x\":1\x04}\n\x08{\"b\":2}\n",
             "\x00\x05bad\n\x07{\"k\":3}",
@@ -262,7 +260,6 @@ fn fuzzTranscriptOptionsAndEmit(_: void, input: []const u8) anyerror!void {
 test "fuzz: transcript.parseWithOptions + emitJson strict RFC-8259 round-trip" {
     try testing.fuzz({}, fuzzTranscriptOptionsAndEmit, .{
         .corpus = &.{
-            "",
             "{\"type\":\"result\",\"result\":\"ok\",\"total_cost_usd\":1e400}\n",
             "{\"type\":\"result\",\"result\":\"ok\",\"total_cost_usd\":-1e400}\n",
             "{\"type\":\"result\",\"result\":\"ok\",\"total_cost_usd\":0.05}\n",

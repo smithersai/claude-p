@@ -233,7 +233,6 @@ fn fuzzEmit(_: void, input: []const u8) !void {
 
 test "fuzz result emitters and format dispatch" {
     try testing.fuzz({}, fuzzEmit, .{ .corpus = &.{
-        "",
         "\n",
         "👩‍💻\x00\r\n\xffid\\\"\xffinterrupted\xff\x01\t\xff" ++ "\xff" ** 64,
         "line\n\n\xff\xfferror\xff\x00\xff\x01",
@@ -326,7 +325,6 @@ fn fuzzFrames(_: void, input: []const u8) !void {
 
 test "fuzz stdin frame exclusion and structured content" {
     try testing.fuzz({}, fuzzFrames, .{ .corpus = &.{
-        "",
         "\x00\xff\xfe",
         "🧑🏽‍🚀\xff\r\n\t\"\\",
         "{\"type\":\"ping\",\"content\":\"x\"}",
@@ -405,7 +403,6 @@ fn fuzzWatchdogs(_: void, input: []const u8) !void {
 
 test "fuzz signed watchdog clocks and unsigned thresholds" {
     try testing.fuzz({}, fuzzWatchdogs, .{ .corpus = &.{
-        "",
         "\xff" ** 32,
         "\x01" ++ "\x00" ** 7 ++ "\xff" ** 8 ++ "\x00" ** 15 ++ "\x80",
         "\xff" ** 31 ++ "\x7f",

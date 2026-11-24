@@ -335,7 +335,6 @@ fn fuzzPaste(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: PasteChunker / writeBracketedPasteTo / typePromptTo" {
     try testing.fuzz({}, fuzzPaste, .{ .corpus = &.{
-        "",
         "~",
         "hello",
         paste_end,
@@ -669,7 +668,6 @@ fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
 test "fuzz: isPromptTruncated(expected, received)" {
     const long = "The quick brown fox jumps over the lazy dog, then writes a property test. " ** 3;
     try testing.fuzz({}, fuzzTruncated, .{ .corpus = &.{
-        "",
         "\x00",
         "\xff",
         "\x80abcabc",
@@ -897,7 +895,6 @@ fn fuzzStripName(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: shouldStripChildEnv" {
     try testing.fuzz({}, fuzzStripName, .{ .corpus = &.{
-        "",
         "CLAUDECODE",
         "claudecode",
         "CLAUDECODE ",
@@ -1093,7 +1090,6 @@ fn fuzzChildEnv(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: buildChildEnvFromMap" {
     try testing.fuzz({}, fuzzChildEnv, .{ .corpus = &.{
-        "",
         "/tmp/f",
         "/tmp/f\nPATH=/bin\nHOME=/root",
         "/tmp/f\nTERM=dumb\nCLAUDE_P_FIFO=/evil\nCLAUDECODE=1\nAI_AGENT=x",
@@ -1273,7 +1269,6 @@ fn fuzzShellQuote(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: shellQuoteArgv POSIX round trip" {
     try testing.fuzz({}, fuzzShellQuote, .{ .corpus = &.{
-        "",
         "\x00",
         "'",
         "''\x00'\\''\x00\\",
@@ -1440,7 +1435,6 @@ fn fuzzBuildArgv(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: buildArgv" {
     try testing.fuzz({}, fuzzBuildArgv, .{ .corpus = &.{
-        "",
         "\x00\x00\x00\x00\x00\x00\x00\x00",
         "\xff\xff\xff\xff\xff\xff\xff\xffprompt\x00opus\x00Bash,Read\x00sess\x00id\x00sys\x00app\x00plan\x00Write\x00sonnet\x00user\x00/a\x00/b\x00/c\x00m1\x00m2\x00m3\x00--x\x00y",
         "\x02\x00\x00\x00\x00\x00\x00\x00p",

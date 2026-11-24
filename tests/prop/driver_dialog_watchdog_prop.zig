@@ -499,7 +499,6 @@ fn checkFailureScreen(_: void, raw: []const u8) anyerror!void {
 
 test "fuzz failure screens stay bounded, printable, and free of blank lines" {
     try testing.fuzz({}, checkFailureScreen, .{ .corpus = &.{
-        "",
         "\r\n\r\n",
         "\x1b[31msh: claude: command not found\x1b[0m\r\n",
         "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\n",

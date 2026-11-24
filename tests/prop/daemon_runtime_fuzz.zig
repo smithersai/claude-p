@@ -150,7 +150,6 @@ test "fuzz: daemon.elapsedMs total over all i128 clock extremes" {
 
     try testing.fuzz({}, fuzzElapsedMs, .{
         .corpus = &.{
-            "",
             &extreme_min_max,
             &extreme_huge_pos,
             &([_]u8{0} ** 32),
@@ -189,7 +188,6 @@ fn fuzzPtyTrace(_: void, input: []const u8) anyerror!void {
 test "fuzz: daemon.ptyTraceInterval total over arbitrary env values" {
     try testing.fuzz({}, fuzzPtyTrace, .{
         .corpus = &.{
-            "",
             "   \t\r\n ",
             "0",
             "00",
@@ -267,7 +265,6 @@ fn fuzzDaemonEmitters(_: void, input: []const u8) anyerror!void {
 test "fuzz: daemon.emitSystemInit, emitPong, and toDriverOptions" {
     try testing.fuzz({}, fuzzDaemonEmitters, .{
         .corpus = &.{
-            "",
             "sid-123",
             "quote\"\\\n\r\t\x01\x1f",
             "utf8-🌿-❯",
@@ -415,7 +412,6 @@ fn fuzzDaemonStateMachine(_: void, input: []const u8) anyerror!void {
 test "fuzz: daemon turn, interrupt, stale-Stop, and watchdog state machine" {
     try testing.fuzz({}, fuzzDaemonStateMachine, .{
         .corpus = &.{
-            "",
             "\x00\x01\x02\x06\x07\x10\x01\x02\x08\x05\x08\x0a",
             "\x00\x01\x02\x09\x08\x0a",
             "\x00\x01\x01\x02\x0a\x08\x02\x08\x0a",

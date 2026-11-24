@@ -808,7 +808,6 @@ fn fuzzParseLine(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: parseLine never panics and keeps its structural invariant" {
     try testing.fuzz({}, fuzzParseLine, .{ .corpus = &.{
-        "",
         "\t",
         "\n",
         "\r",
@@ -1000,7 +999,6 @@ fn fuzzExtractors(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: extractors never crash or leak on arbitrary payloads" {
     try testing.fuzz({}, fuzzExtractors, .{ .corpus = &.{
-        "",
         "{}",
         "[]",
         "null",
@@ -1663,7 +1661,7 @@ fn fuzzSettingsJson(_: void, input: []const u8) anyerror!void {
 }
 
 test "fuzz: buildSettingsJson with arbitrary extra_settings_json bytes" {
-    try testing.fuzz({}, fuzzSettingsJson, .{ .corpus = &(malformed_settings ++ evil_hooks_values ++ [_][]const u8{
+    try testing.fuzz({}, fuzzSettingsJson, .{ .corpus = &(malformed_settings[1..].* ++ evil_hooks_values ++ [_][]const u8{
         "{}",
         " { } ",
         "{\"env\":{\"FOO\":\"bar\"},\"includeCoAuthoredBy\":false,\"precision\":0.1234567890123456789}",
@@ -1752,7 +1750,6 @@ fn fuzzSettingsStructured(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: buildSettingsJson with byte-decoded path, hooks, and settings" {
     try testing.fuzz({}, fuzzSettingsStructured, .{ .corpus = &.{
-        "",
         "\x00\x00\x00",
         "\x0c/tmp/hook.sh\x00\x00",
         "\x0c/tmp/hook.sh\x02\x02\x07echo hi\x05\x04Evnt\x03a|b\x01{\"model\":\"opus\"}",
