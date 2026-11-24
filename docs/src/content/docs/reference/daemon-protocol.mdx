@@ -59,8 +59,8 @@ Answered with `pong` as soon as the main loop reads it, in any state (`waiting_f
 
 - When `.busy` (and not already waiting on an interrupt): writes Escape (`\x1b`) to the PTY and starts a `1500 ms` (`interrupt_window_ms`) window waiting for `Stop`.
 - If `Stop` arrives within `1500 ms`, the turn finishes normally with a standard `result` frame.
-- If `1500 ms` elapses without `Stop`, the daemon emits a structured interrupted `result` frame (`subtype: "interrupted"`, `error: "interrupted"`, `is_error: false`), advances `turn_start_pos`, sets `after_interrupt = true`, and returns to `.idle` with the session open.
-- On the next turn after an interrupt, any stale `Stop` from the canceled turn is ignored (`stopBelongsToTurn`) until the new turn shows life (`UserPromptSubmit` or transcript growth), and `Ctrl-U` (`\x15`) clears any restored input before pasting the next prompt.
+- If `1500 ms` elapses without `Stop`, the daemon emits a structured interrupted `result` frame (`subtype: "interrupted"`, `error: "interrupted"`, `is_error: false`), sets `after_interrupt = true`, and returns to `.idle` with the session open.
+- On the next turn after an interrupt, any stale `Stop` from the canceled turn is ignored (`stopBelongsToTurn`) until the new turn shows life (`UserPromptSubmit` or transcript growth), and `Ctrl-U` (`\x15`) clears any restored input before pasting the next prompt. That turn's transcript range starts at the new prompt's own user record (`findPromptTurnOffset`), so late output from the canceled turn never reaches its `result`.
 - Ignored when not `.busy`.
 
 ### `EOF` — graceful shutdown
@@ -98,7 +98,7 @@ Raw JSONL lines tailed from Claude's session transcript file via `stream.Tailer`
 
 ### Per-turn `result` envelope
 
-Emitted once `Stop` is confirmed: the daemon confirms immediately on `system`/`stop_hook_summary` (`preventedContinuation: false`), supersedes immediately on continuation or a later `Stop`, and otherwise waits a fallback confirmation window (`150 ms`, or `2000 ms` when `--extra-hook Stop=...` is set), then drains and parses the tailer for up to `30 × 25 ms` (exiting early on match). Prompt delivery pastes incrementally in the event loop so `ping`, `interrupt`, and DEC replies stay responsive during large prompts. Summary fields (`result`, `usage`, `num_turns`, etc.) are computed from `[turn_start_pos..turn_end_pos)` covering only that turn, falling back to Stop's `last_assistant_message` if the slice cannot be parsed. Schema matches the [CLI JSON `result` schema](/claude-p/reference/cli/#json-result-schema).
+Emitted once `Stop` is confirmed: the daemon confirms immediately on `system`/`stop_hook_summary` (`preventedContinuation: false`), supersedes immediately on continuation or a later `Stop`, and otherwise waits a fallback confirmation window (`150 ms`, or `2000 ms` when `--extra-hook Stop=...` is set), then drains and parses the tailer for up to `30 × 25 ms` (exiting early on match). Prompt delivery pastes incrementally in the event loop so `ping`, `interrupt`, and DEC replies stay responsive during large prompts. Summary fields (`result`, `usage`, `num_turns`, etc.) are computed from the transcript bytes appended since the turn began (`[TurnTranscript.start..tailer.pos)`, where `start` is the file size snapshotted right before the prompt is typed), falling back to Stop's `last_assistant_message` if the slice cannot be parsed. Schema matches the [CLI JSON `result` schema](/claude-p/reference/cli/#json-result-schema).
 
 ### `pong`
 

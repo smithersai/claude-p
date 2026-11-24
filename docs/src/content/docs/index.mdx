@@ -79,12 +79,12 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"List the Zig m
 
 <CardGrid stagger>
   <Card title="Zero ~/.claude mutation" icon="approve-check">
-    Every hook script, FIFO, and inline <code>--settings</code> payload lives inside a per-run
-    <code>$TMPDIR/claude-p-&lt;pid&gt;-&lt;rand&gt;/</code> directory and is deleted on exit.
+    Hooks arrive through an inline <code>--settings</code> argument. The hook script and FIFO live
+    inside a per-run <code>$TMPDIR/claude-p-&lt;pid&gt;-&lt;rand&gt;/</code> directory that is deleted on exit.
   </Card>
   <Card title="Hooks, not screen scraping" icon="terminal">
-    <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>Stop</code>, and
-    <code>StopFailure</code> drive the state machine. Output comes straight from Claude's session JSONL transcript.
+    <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>Stop</code>,
+    <code>StopFailure</code>, and <code>PermissionRequest</code> drive the state machine. Output comes straight from Claude's session JSONL transcript.
   </Card>
   <Card title="Real PTY, paced bracketed paste" icon="rocket">
     <code>zmux.NativeSession</code> runs a real <code>forkpty</code> session. Prompts stream in

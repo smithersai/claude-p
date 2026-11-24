@@ -11,11 +11,11 @@ Local-first Smithers factory and incremental CI for `smithersai/claude-p`.
 | Target | Kind | What it runs |
 | --- | --- | --- |
 | `hygiene` | test | Verifies non-empty `LICENSE` and version agreement across `package.json`, `build.zig.zon`, and `src/root.zig` |
-| `test-js` | test | `node --check` on JS scripts, `sh -n` on `build-in-linux.sh`, and `node --test .smithers/tests/install-checksum.test.mjs` |
+| `test-js` | test | `node --check` on the JS scripts, `sh -n scripts/build-in-linux.sh`, `bash -n scripts/fuzz-linux.sh`, and `node --test` on `.smithers/tests/install-checksum.test.mjs`, `.smithers/tests/factory-projections.test.mjs`, and `tests/prop/js_supplychain_prop.mjs` |
 | `factory-check` | build, lint | Verifies `.smithers/factory.json` and `.smithers/home.json` match `.smithers/FACTORY.ts` and discovered flows |
 | `factory-write` | build, lint | Regenerates `.smithers/factory.json` and `.smithers/home.json` (`smthrs target //.smithers:factory-write --write`) |
 | `build` | build | `zig build -Doptimize=ReleaseSafe` (Zig 0.15.2 via `.smithers/run-zig.sh`) |
-| `test-unit` | test | `zig build test --summary all` (full Zig unit test suite, zero leaks) |
+| `test-unit` | test | `zig build test --summary all` (unit, property, and fuzz-corpus tests; zero leaks) |
 | `build-linux-x64` | build | Cross-compile `x86_64-linux-musl` (`ReleaseSafe`) |
 | `build-linux-arm64` | build | Cross-compile `aarch64-linux-musl` (`ReleaseSafe`) |
 | `build-darwin-arm64` | build | Cross-compile `aarch64-macos` (`ReleaseSafe`) |

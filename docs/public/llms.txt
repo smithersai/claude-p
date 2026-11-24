@@ -7,8 +7,8 @@
 - One-shot CLI: `claude-p [OPTIONS] [PROMPT]` (stdin or `--input-file` up to 16 MiB).
 - Output formats: `text` (default), `json`, `stream-json` (requires `--verbose` in one-shot mode).
 - Daemon CLI: `claude-p daemon [OPTIONS]` speaks NDJSON on stdin (`user`, `ping`, `interrupt`) and stdout (`system/init`, live transcript lines, per-turn `result`, `pong`, structured `interrupted` / watchdog error `result` frames).
-- Rejected CLI flags: `-p`, `--print`, `--settings` (use `--extra-hook` or `--setting-json`), `--bare`, `--safe-mode`.
-- Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error, `124` every timeout (one-shot timeouts and daemon `session_start_timeout`/`idle_timeout`/`transcript_stalled`), `128+sig` via npm shim.
+- Rejected CLI flags (exit `2`): `-p`, `--print`, `--settings` (use `--extra-hook` or `--setting-json`), `--bare`, `--safe-mode`, `--no-session-persistence`, and the print-mode-only `--input-format`, `--json-schema`, `--max-budget-usd`, `--max-turns`, `--fallback-model`, `--include-partial-messages`, `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`.
+- Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error, `124` every timeout (one-shot timeouts and daemon `session_start_timeout`/`idle_timeout`/`transcript_stalled`), `128+sig` after `SIGINT`/`SIGTERM`/`SIGHUP` (set by the native binary; the npm shim passes it through).
 - Never mutates `~/.claude/`; uses per-run `$TMPDIR/claude-p-<pid>-<rand>/` FIFO + relay script.
 
 ## Start here
@@ -41,4 +41,4 @@
 - [CLI Reference](https://smithersai.github.io/claude-p/reference/cli/): All flags, defaults, passthrough rules, JSON result schema, environment variables, and exit codes.
 - [Daemon Protocol Reference](https://smithersai.github.io/claude-p/reference/daemon-protocol/): Stdin/stdout NDJSON frames, interrupt handling, dual watchdogs, and `[pty-trace]`.
 - [Zig Library API Reference](https://smithersai.github.io/claude-p/reference/zig-api/): `root.zig`, `driver.Options`, `driver.Result`, `driver.RunError`, `daemon.Options`, `hook.ExtraHook`, `emitErrorResult`, `transcript.Summary`.
-- [Installation, Checksums, and Builds](https://smithersai.github.io/claude-p/reference/installation-and-builds/): Platform matrix, `SHA256SUMS` verification, Zig 0.15.2 source/cross-compile builds, and test suites.
+- [Installation, Checksums, and Builds](https://smithersai.github.io/claude-p/reference/installation-and-builds/): Platform matrix, the `checksums.json` install trust root, Zig 0.15.2 source/cross-compile builds, and test suites.

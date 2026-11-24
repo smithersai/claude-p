@@ -80,7 +80,7 @@ Each transcript line flushes to stdout as soon as `claude` writes it, followed b
 
 <LifecyclePipelineDiagram />
 
-`claude-p` never edits `~/.claude/settings.json`. It builds an inline `--settings` JSON string pointing `SessionStart`, `UserPromptSubmit`, and `Stop` hooks to a temporary FIFO in `$TMPDIR`, runs `claude` on a real PTY, and reads the final answer from the session transcript JSONL.
+`claude-p` never edits `~/.claude/settings.json`. It builds an inline `--settings` JSON string pointing the `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, and `PermissionRequest` hooks to a temporary FIFO in `$TMPDIR`, runs `claude` on a real PTY, and reads the final answer from the session transcript JSONL.
 
 ## Next steps
 

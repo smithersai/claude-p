@@ -42,7 +42,7 @@ Look closely at the order of lines on stdout:
 1. `{"type":"pong","ts":1763859600123}` — can arrive **even before** `system/init` because `ping` is answered inline by the main event loop in any state!
 2. `{"type":"system","subtype":"init","session_id":"..."}` — emitted once as soon as `SessionStart` fires.
 3. Raw transcript JSONL lines from Claude (`user`, `assistant`, tool events) as they flush.
-4. `{"type":"result","subtype":"success","session_id":"...","result":"OK",...}` — emitted when `Stop` fires for that turn and stays unchallenged for a 150 ms confirmation window.
+4. `{"type":"result","subtype":"success","session_id":"...","result":"OK",...}` — emitted when `Stop` for that turn is confirmed: at once on a `stop_hook_summary` record, otherwise after a 150 ms window with no continuation.
 5. Because `printf` closed stdin (EOF), the daemon finishes the active turn, drains the queue, terminates `claude`, and exits `0`. The `user` frame arrived before `SessionStart`, so it waited in the queue (up to 64 prompts / 64 MiB) until the session was ready.
 
 <Callout title="Mental check: why did pong arrive first?" kind="check">
@@ -174,9 +174,9 @@ Look at how `claude-p daemon` protects a long-running controller from hanging:
 
 <Callout title="Watch the bytes: how per-turn usage stays accurate" kind="bytes">
   Claude appends every turn to the same session <code>.jsonl</code> file.
-  After Turn 1's <code>Stop</code> hook, the daemon records <code>turn_start_pos = tailer.pos</code>.
-  When Turn 2 finishes, <code>emitTurnResult()</code> reads only bytes
-  <code>[turn_start_pos .. turn_end_pos)</code>—so Turn 2's <code>result</code> envelope
+  Right before typing Turn 2, <code>TurnTranscript.begin()</code> snapshots the file size as
+  <code>start</code>. When Turn 2 finishes, <code>emitTurnResult()</code> parses only bytes
+  <code>[start .. tailer.pos)</code>, so Turn 2's <code>result</code> envelope
   reports Turn 2's text and token counts, not Turn 1's.
 </Callout>
 
@@ -205,8 +205,9 @@ Look at how `claude-p daemon` protects a long-running controller from hanging:
     <strong>No.</strong> After an interrupt window elapses, <code>daemon.zig</code> sets
     <code>after_interrupt = true</code>. On Turn 2, <code>stopBelongsToTurn()</code> ignores any
     <code>Stop</code> hook until Turn 2 proves it is live via <code>UserPromptSubmit</code> or new
-    transcript bytes. Before pasting Turn 2, the daemon also pumps stray transcript bytes,
-    advances <code>turn_start_pos</code>, and sends <code>Ctrl-U</code> to clear any restored input.
+    transcript bytes. Before pasting Turn 2, the daemon sends <code>Ctrl-U</code> to clear any
+    restored input, and Turn 2's transcript range starts at Turn 2's own user record
+    (<code>findPromptTurnOffset</code>), so Turn 1's late output never counts toward Turn 2.
   </Fragment>
 </Exercise>
 

@@ -157,7 +157,7 @@ If `PROMPT` is omitted in one-shot mode, `claude-p` reads from `--input-file` or
 | `--debug` | `false` | Emit timestamped driver diagnostics to stderr; in daemon mode also enables `[pty-trace]`. |
 | `--` | — | End of options; remaining token goes to `PROMPT`. |
 | `-h`, `--help` | — | Print help and exit `0`. |
-| `-v`, `--version` | — | Print version (`0.1.3`) and exit `0`. |
+| `-v`, `--version` | — | Print `claude-p 0.1.3` and exit `0`. |
 
 **Forwarded and rejected flags:** Unrecognized flags are forwarded verbatim to `claude` (known boolean flags such as `--fork-session` and `--strict-mcp-config` do not consume the following argument). These flags are rejected with exit code `2`, in both the bare and `<flag>=<value>` forms:
 
@@ -193,7 +193,7 @@ The native binary sets every code; `bin/claude-p.js` passes it through.
 | --- | --- |
 | `0` | Success (`is_error: false`), or daemon shut down cleanly. |
 | `1` | Assistant returned an error (`is_error: true`), including `StopFailure`. |
-| `2` | Invalid or rejected arguments, empty prompt, missing binary, or a run error: `PermissionPromptBlocked`, `InvalidOptions`, `PromptNotAccepted`, `PromptTruncated`, `TranscriptUnavailable`, `SpawnFailed`, `InvalidExtraSettings`, `InvalidCwd`, `UnexpectedStartupDialog`, or `Interrupted` without a caught signal. Daemon `claude_not_found`, `spawn_failed`, and `child_exited` also exit `2`. |
+| `2` | Invalid or rejected arguments, empty prompt, missing binary, or a run error: `PermissionPromptBlocked`, `InvalidOptions`, `PromptNotAccepted`, `PromptTruncated`, `TranscriptUnavailable`, `SpawnFailed`, `InvalidExtraSettings`, `InvalidCwd`, `UnexpectedStartupDialog`, or `Interrupted` without a caught signal. Daemon `claude_not_found`, `spawn_failed`, `child_exited`, `unexpected_startup_dialog`, and `prompt_truncated` also exit `2`. |
 | `124` | Timeout: `SessionStartTimeout`, `StopTimeout`, or `TranscriptStalled` (one-shot); `session_start_timeout`, `idle_timeout`, or `transcript_stalled` (daemon). |
 | `128 + sig` | `SIGINT`, `SIGTERM`, or `SIGHUP`: the binary cleans up and exits `128 + sig` (`130` for `SIGINT`). A duplicate signal within 2 s is ignored, so a process-group `SIGINT` through `bin/claude-p.js` still cleans up. |
 
@@ -229,7 +229,7 @@ pub fn main() !void {
 }
 ```
 
-The Zig API (`claude_p.Options`) also exposes hook/settings composition via `extra_hooks` (`[]const hook.ExtraHook`, the `--extra-hook` flag) and `extra_settings_json` (`?[]const u8`, the `--setting-json` flag), live streaming via `stream_writer`, and multi-turn driving via `claude_p.daemon.run`.
+The Zig API (`claude_p.Options`) also exposes hook/settings composition via `extra_hooks` (`[]const hook.ExtraHook`, the `--extra-hook` flag) and `extra_settings_json` (`?[]const u8`, the `--setting-json` flag), live streaming via `stream_writer`, and multi-turn driving via `claude_p.daemon.run`. See the [Zig Library API Reference](https://smithersai.github.io/claude-p/reference/zig-api/) for every field and error.
 
 ---
 
@@ -265,7 +265,7 @@ node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_
 
 ## Documentation
 
-- **Full documentation site (Starlight):** [`docs/`](./docs) — run `cd docs && npm install && npm run dev` to browse locally.
+- **Documentation site:** <https://smithersai.github.io/claude-p/> (Starlight source in [`docs/`](./docs); preview locally with `cd docs && npm install && npm run dev`).
 - **Technical specification:** [`SPEC.md`](./SPEC.md) — module contracts, wire formats, state machines, and test matrix.
 - **Agent guide:** [`CLAUDE.md`](./CLAUDE.md) — invariants and gotchas for contributors and coding agents.
 

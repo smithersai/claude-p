@@ -61,8 +61,11 @@ zig build -Doptimize=ReleaseSafe
 # Version & release script hygiene (same checks as CI)
 node scripts/publish.mjs --check-versions --expect-version=0.1.3
 node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
-sh -n scripts/build-in-linux.sh && sh -n .smithers/run-zig.sh
+sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh && sh -n .smithers/run-zig.sh
 node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
+# Factory projections (.smithers/factory.json, home.json) match FACTORY.ts;
+# on failure run `smthrs target //.smithers:factory-write --write`
+node --test .smithers/tests/factory-projections.test.mjs
 
 # End-to-end tests against the real `claude` binary on $PATH
 CLAUDE_P_E2E=1 zig build test-integration --summary all

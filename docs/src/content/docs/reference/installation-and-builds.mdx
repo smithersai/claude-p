@@ -83,9 +83,15 @@ zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl -p out
 Test counts change with every release; print the current ones with `--summary all`.
 
 ```bash
-# Unit tests across src/*.zig (zero external dependencies)
+# Unit, property, and fuzz-corpus tests (no external `claude` needed)
 zig build test --summary all
 zig build test -Dtest-filter="daemon"
+
+# Property and fuzz suites only (tests/prop_fuzz.zig); on macOS this replays the fuzz corpora
+zig build test-prop
+
+# Linux only: coverage-guided fuzzing of every std.testing.fuzz target (FUZZ_SECONDS, default 60)
+./scripts/fuzz-linux.sh
 
 # End-to-end tests against the real `claude` binary on $PATH (no mocks)
 CLAUDE_P_E2E=1 zig build test-integration --summary all
@@ -93,6 +99,8 @@ CLAUDE_P_E2E=1 zig build test-integration -Dtest-filter="resume"
 
 # CI hygiene checks (version lockstep across package.json, build.zig.zon, src/root.zig)
 node scripts/publish.mjs --check-versions
-node --check scripts/install.js && node --check scripts/publish.mjs
+node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
+sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh
 node --test .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
+node --test .smithers/tests/factory-projections.test.mjs
 ```

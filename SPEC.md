@@ -345,8 +345,12 @@ and `64 MiB` of text.
 - Per-turn `result` envelope (same schema as `emit.emitJson`) — emitted on
   confirmed `Stop` after a pump-and-parse loop of up to `30 × 25 ms` that
   exits early when the parsed text matches Stop's `last_assistant_message`,
-  computed from the transcript byte range `[turn_start_pos..turn_end_pos)`
-  (falling back to Stop's `last_assistant_message`). A `StopFailure` turn
+  computed from the transcript byte range `[TurnTranscript.start..tailer.pos)`
+  (falling back to Stop's `last_assistant_message`). `TurnTranscript.begin`
+  snapshots `start` as the transcript size right before the prompt is typed;
+  after an interrupt it records that size as `minimum_prompt_offset` instead,
+  and `start` becomes the offset of the new prompt's user record at or past it
+  (`driver.findPromptTurnOffset`). A `StopFailure` turn
   keeps the parsed usage, sets `is_error: true`, and carries
   `"error":"stop_failure"`.
   `readFileRange` returns an exactly sized buffer when the file is shorter
