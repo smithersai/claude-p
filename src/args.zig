@@ -179,7 +179,9 @@ pub const rejected_flags = [_][]const u8{
 
 fn isRejectedFlag(flag: []const u8) bool {
     const name = std.mem.sliceTo(flag, '=');
-    if (name.len > 2 and name[0] == '-' and name[1] != '-' and std.mem.indexOfScalar(u8, name[1..], 'p') != null) return true;
+    const short_p = name.len > 2 and name[0] == '-' and name[1] != '-' and
+        std.mem.indexOfScalar(u8, name[1..], 'p') != null;
+    if (short_p) return true;
     return matchFlag(flag, rejected_flags) != null;
 }
 
@@ -189,6 +191,7 @@ fn parseExtraHook(value: []const u8) ParseError!hook_mod.ExtraHook {
     const event = value[0..eq];
     const command = value[eq + 1 ..];
     if (event.len == 0 or command.len == 0) return ParseError.BadExtraHook;
+    std.debug.assert(event.len > 0 and command.len > 0);
     return .{ .event = event, .command = command };
 }
 
@@ -196,97 +199,11 @@ fn parseU32(s: []const u8) ParseError!u32 {
     return std.fmt.parseInt(u32, s, 10) catch ParseError.BadInteger;
 }
 
-const help_text =
-    \\Usage: claude-p [OPTIONS] [PROMPT]
-    \\       claude-p daemon [OPTIONS]
-    \\
-    \\Default mode: one-shot. Emulates `claude -p` by driving the interactive
-    \\`claude` binary inside an in-process zmux PTY and capturing the final
-    \\assistant message via a Stop hook.
-    \\
-    \\Prompt sources: PROMPT, --input-file <path> (not both), or piped stdin.
-    \\With PROMPT and piped stdin, the prompt sent is `<stdin>\n\n<PROMPT>`.
-    \\Without PROMPT or --input-file, stdin must be piped (a TTY is an error).
-    \\
-    \\Daemon mode (prepend `daemon` as the first arg): long-lived multi-turn
-    \\wrapper. Reads `{"type":"user","message":{"role":"user","content":"..."}}`
-    \\JSONL frames from stdin. Per turn it writes to stdout
-    \\session-transcript JSONL events plus a claude -p-shaped result envelope
-    \\(event lines use Claude Code transcript schema, not full native
-    \\claude -p stream-json wire parity).
-    \\Daemon mode rejects PROMPT and --input-file. Its output is always
-    \\stream-json, so it also rejects --output-format text and json.
-    \\
-    \\Options (every <value> option also accepts --option=<value>):
-    \\  --output-format <fmt>           text | json | stream-json (default: text).
-    \\                                  stream-json needs --verbose and emits
-    \\                                  session-transcript JSONL events plus a
-    \\                                  claude -p-shaped result envelope
-    \\  --model <name>                  Forwarded to `claude --model`
-    \\  --allowedTools <rule>...        Permission-rule allow list (repeatable,
-    \\                                  variadic; alias --allowed-tools;
-    \\                                  --allowedTools=<rule> takes one)
-    \\  --disallowedTools <rule>...     Permission-rule deny list (repeatable,
-    \\                                  variadic; alias --disallowed-tools)
-    \\  --permission-mode <mode>        acceptEdits|auto|bypassPermissions|manual|default|dontAsk|plan
-    \\  --dangerously-skip-permissions  Bypass permission prompts
-    \\  --system-prompt <text>          Override the default system prompt
-    \\  --append-system-prompt <text>   Append to the default system prompt
-    \\  --add-dir <dir>...              Additional allowed directories (repeatable,
-    \\                                  variadic; use --add-dir=<dir> for a dir
-    \\                                  starting with `-`)
-    \\                                  A variadic flag takes every following
-    \\                                  token up to the next flag or `--`: put
-    \\                                  PROMPT first or after `--`
-    \\  --mcp-config <cfg>...           MCP server config files / JSON (repeatable,
-    \\                                  variadic; --mcp-config=<cfg> takes one)
-    \\  --setting-sources <sources>     Comma-separated: user,project,local
-    \\  --resume, -r <id>               Resume a session
-    \\  --continue, -c                  Continue the most recent session
-    \\  --session-id <uuid>             Use a specific session UUID
-    \\  --name, -n <name>               Session display name; forwarded to `claude`
-    \\  --cwd <path>                    Working directory for `claude`
-    \\  --input-file <path>             Read prompt from a file
-    \\  --verbose                       Verbose output
-    \\  --timeout <seconds>             One-shot: wall-time cap for the whole run.
-    \\                                  Daemon: cap on the initial SessionStart
-    \\                                  wait only. 0 disables. (default: 300)
-    \\  --idle-timeout <seconds>        Daemon-mode idle progress watchdog:
-    \\                                  kill if no PTY output for this long
-    \\                                  while busy. 0 disables. (default: 180)
-    \\  --transcript-idle-timeout <seconds>
-    \\                                  Daemon: abort if the transcript stops growing.
-    \\                                  One-shot: abort if transcript and PTY activity stop
-    \\                                  for this long while busy. 0 disables.
-    \\                                  (default: 600)
-    \\  --extra-hook <Event>=<cmd>      Add a hook command to the generated
-    \\                                  settings (repeatable)
-    \\  --setting-json <json>           JSON object merged into the generated
-    \\                                  settings (`hooks` key excluded)
-    \\  --debug                         Wrapper debug logs to stderr
-    \\  --                              End of options; remaining tokens go to PROMPT
-    \\  -h, --help                      Print this help
-    \\  -v, --version                   Print version
-    \\
-    \\Unrecognized flags are forwarded verbatim to `claude`. The wrapper rejects,
-    \\including their `<flag>=<value>` forms:
-    \\  `-p`/`--print`                  claude-p emulates print mode itself
-    \\  `--settings`                    claude-p injects its own to register the
-    \\                                  Stop hook; use --extra-hook/--setting-json
-    \\  `--bare`/`--safe-mode`          Claude Code skips `--settings` hooks
-    \\  `--no-session-persistence`      claude-p reads the session transcript
-    \\  `--input-format`, `--json-schema`, `--max-budget-usd`
-    \\                                  print-mode-only; the interactive session
-    \\                                  would silently ignore them
-    \\  `--max-turns`, `--fallback-model`, `--include-partial-messages`,
-    \\  `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`
-    \\                                  print-mode-only; claude-p does not enforce
-    \\                                  or emit them
-    \\
-;
+const help_text = @embedFile("args_help.txt");
 
 /// Return the static `--help` usage text for `claude-p`.
 pub fn helpText() []const u8 {
+    std.debug.assert(help_text.len > 0);
     return help_text;
 }
 
@@ -339,6 +256,7 @@ const FlagMatch = struct {
 
 /// Match `a` against `names` as `<name>` or `<name>=<value>`.
 fn matchFlag(a: []const u8, names: anytype) ?FlagMatch {
+    std.debug.assert(names.len > 0);
     for (names, 0..) |n, idx| {
         const name: []const u8 = if (@TypeOf(n) == []const u8) n else n.name;
         if (std.mem.eql(u8, a, name)) return .{ .index = idx, .inline_value = null };
@@ -426,6 +344,129 @@ pub fn parse(allocator: std.mem.Allocator, argv_in: []const []const u8) ParseErr
     return parseWithDiag(allocator, argv_in, null);
 }
 
+fn applyBoolFlag(opts: *Options, a: []const u8) bool {
+    std.debug.assert(@intFromPtr(opts) != 0);
+    if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+        opts.show_help = true;
+    } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--version")) {
+        opts.show_version = true;
+    } else if (std.mem.eql(u8, a, "--continue") or std.mem.eql(u8, a, "-c")) {
+        opts.cont = true;
+    } else if (std.mem.eql(u8, a, "--dangerously-skip-permissions")) {
+        opts.dangerously_skip_permissions = true;
+    } else if (std.mem.eql(u8, a, "--verbose")) {
+        opts.verbose = true;
+    } else if (std.mem.eql(u8, a, "--debug")) {
+        opts.debug = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+fn parseKnownFlag(
+    allocator: std.mem.Allocator,
+    opts: *Options,
+    argv: []const []const u8,
+    idx: *usize,
+    diag: *ParseDiag,
+) ParseError!bool {
+    std.debug.assert(idx.* < argv.len);
+    const a = argv[idx.*];
+    if (applyBoolFlag(opts, a)) return true;
+    if (matchFlag(a, value_flag_table)) |m| {
+        const v = m.inline_value orelse blk: {
+            idx.* += 1;
+            if (idx.* >= argv.len) return fail(diag, a, ParseError.MissingValue);
+            break :blk argv[idx.*];
+        };
+        applyValue(allocator, opts, value_flag_table[m.index].flag, v) catch |err| {
+            if (err != ParseError.OutOfMemory) diag.offending = v;
+            return err;
+        };
+        return true;
+    }
+    if (matchFlag(a, variadic_flags)) |m| {
+        const out = if (m.index == 0) &opts.add_dirs else &opts.mcp_configs;
+        if (m.inline_value) |v| {
+            try out.append(allocator, v);
+        } else {
+            idx.* = consumeVariadicInto(allocator, argv, idx.*, out, null) catch |err| {
+                if (err != ParseError.OutOfMemory) diag.offending = a;
+                return err;
+            };
+        }
+        return true;
+    }
+    if (matchFlag(a, tool_rule_flags)) |m| {
+        const canonical = tool_rule_flags[m.index].canonical;
+        if (m.inline_value) |v| {
+            try opts.passthrough.append(allocator, canonical);
+            try opts.passthrough.append(allocator, v);
+        } else {
+            idx.* = consumeVariadicInto(allocator, argv, idx.*, &opts.passthrough, canonical) catch |err| {
+                if (err != ParseError.OutOfMemory) diag.offending = a;
+                return err;
+            };
+        }
+        return true;
+    }
+    return false;
+}
+
+fn parsePassthroughOrPositional(
+    allocator: std.mem.Allocator,
+    opts: *Options,
+    argv: []const []const u8,
+    idx: *usize,
+    diag: *ParseDiag,
+) ParseError!void {
+    std.debug.assert(idx.* < argv.len);
+    const a = argv[idx.*];
+    if (isRejectedFlag(a)) return fail(diag, a, ParseError.UnsupportedFlag);
+    if (isForwardedValueFlag(a)) {
+        if (idx.* + 1 >= argv.len) return fail(diag, a, ParseError.MissingValue);
+        try opts.passthrough.append(allocator, a);
+        idx.* += 1;
+        try opts.passthrough.append(allocator, argv[idx.*]);
+        return;
+    }
+    if (std.mem.startsWith(u8, a, "--")) {
+        try opts.passthrough.append(allocator, a);
+        const has_inline_value = std.mem.indexOfScalar(u8, a, '=') != null;
+        if (!has_inline_value and !isKnownBoolean(a)) {
+            if (idx.* + 1 < argv.len and !std.mem.startsWith(u8, argv[idx.* + 1], "-")) {
+                idx.* += 1;
+                try opts.passthrough.append(allocator, argv[idx.*]);
+            }
+        }
+        return;
+    }
+    if (std.mem.startsWith(u8, a, "-") and a.len > 1) {
+        try opts.passthrough.append(allocator, a);
+    } else if (opts.prompt == null) {
+        opts.prompt = a;
+    } else {
+        return ParseError.UnknownFlag;
+    }
+}
+
+fn validateParsed(opts: *const Options, diag: *ParseDiag) ParseError!void {
+    std.debug.assert(@intFromPtr(opts) != 0);
+    if (opts.is_daemon and (opts.prompt != null or opts.input_file != null)) {
+        if (opts.input_file != null) return fail(diag, "--input-file", ParseError.UnknownFlag);
+        return ParseError.UnknownFlag;
+    }
+    if (opts.is_daemon and opts.output_format_explicit and opts.output_format != .stream_json) {
+        return fail(diag, "--output-format", ParseError.UnsupportedFlag);
+    }
+    if (!opts.show_help and !opts.show_version and !opts.is_daemon) {
+        if (opts.output_format == .stream_json and !opts.verbose) {
+            return fail(diag, "stream-json", ParseError.StreamJsonRequiresVerbose);
+        }
+    }
+}
+
 /// `parse`, also recording the offending token in `diag_out` on error.
 pub fn parseWithDiag(
     allocator: std.mem.Allocator,
@@ -439,9 +480,6 @@ pub fn parseWithDiag(
     var opts: Options = .{};
     errdefer opts.deinit(allocator);
 
-    // Subcommand: if the first token is `daemon`, drop into long-lived
-    // multi-turn mode. The daemon takes its prompts from stdin frames, so a
-    // positional prompt or `--input-file` is rejected after the loop.
     var argv: []const []const u8 = argv_in;
     if (argv_in.len > 0 and std.mem.eql(u8, argv_in[0], "daemon")) {
         opts.is_daemon = true;
@@ -451,127 +489,24 @@ pub fn parseWithDiag(
     var seen_separator = false;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
+        std.debug.assert(i < argv.len);
         const a = argv[i];
-
-        // After `--`, every remaining token is positional. Claude itself
-        // honors this; we mirror it so users can disambiguate prompts that
-        // could otherwise be eaten by a preceding variadic flag.
         if (seen_separator) {
             if (opts.prompt == null) {
                 opts.prompt = a;
                 continue;
-            } else {
-                return ParseError.UnknownFlag;
             }
+            return ParseError.UnknownFlag;
         }
         if (std.mem.eql(u8, a, "--")) {
             seen_separator = true;
             continue;
         }
-
-        if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
-            opts.show_help = true;
-        } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--version")) {
-            opts.show_version = true;
-        } else if (std.mem.eql(u8, a, "--continue") or std.mem.eql(u8, a, "-c")) {
-            opts.cont = true;
-        } else if (std.mem.eql(u8, a, "--dangerously-skip-permissions")) {
-            opts.dangerously_skip_permissions = true;
-        } else if (std.mem.eql(u8, a, "--verbose")) {
-            opts.verbose = true;
-        } else if (std.mem.eql(u8, a, "--debug")) {
-            opts.debug = true;
-        } else if (matchFlag(a, value_flag_table)) |m| {
-            const v = m.inline_value orelse blk: {
-                i += 1;
-                if (i >= argv.len) return fail(diag, a, ParseError.MissingValue);
-                break :blk argv[i];
-            };
-            applyValue(allocator, &opts, value_flag_table[m.index].flag, v) catch |err| {
-                if (err != ParseError.OutOfMemory) diag.offending = v;
-                return err;
-            };
-        } else if (matchFlag(a, variadic_flags)) |m| {
-            const out = if (m.index == 0) &opts.add_dirs else &opts.mcp_configs;
-            if (m.inline_value) |v| {
-                // commander: `--add-dir=<v>` takes exactly one value and
-                // does not open a variadic run.
-                try out.append(allocator, v);
-            } else {
-                i = consumeVariadicInto(allocator, argv, i, out, null) catch |err| {
-                    if (err != ParseError.OutOfMemory) diag.offending = a;
-                    return err;
-                };
-            }
-        } else if (matchFlag(a, tool_rule_flags)) |m| {
-            const canonical = tool_rule_flags[m.index].canonical;
-            if (m.inline_value) |v| {
-                try opts.passthrough.append(allocator, canonical);
-                try opts.passthrough.append(allocator, v);
-            } else {
-                i = consumeVariadicInto(allocator, argv, i, &opts.passthrough, canonical) catch |err| {
-                    if (err != ParseError.OutOfMemory) diag.offending = a;
-                    return err;
-                };
-            }
-        } else if (isRejectedFlag(a)) {
-            // See `isRejectedFlag`. Reject loudly rather than forward a flag
-            // that disables or fights the hook-based completion signal.
-            return fail(diag, a, ParseError.UnsupportedFlag);
-        } else if (isForwardedValueFlag(a)) {
-            // See `forwarded_value_flags`: the value is never the prompt.
-            if (i + 1 >= argv.len) return fail(diag, a, ParseError.MissingValue);
-            try opts.passthrough.append(allocator, a);
-            i += 1;
-            try opts.passthrough.append(allocator, argv[i]);
-        } else if (std.mem.startsWith(u8, a, "--")) {
-            // Unknown long option: forward verbatim. A `--flag=value` token
-            // carries its own value, and known boolean flags take none; in
-            // both cases the next token stays where it is (it may be the
-            // prompt). Anything else greedily takes one following non-dash
-            // token (works for `--flag value` shaped flags).
-            try opts.passthrough.append(allocator, a);
-            const has_inline_value = std.mem.indexOfScalar(u8, a, '=') != null;
-            if (!has_inline_value and !isKnownBoolean(a)) {
-                if (i + 1 < argv.len and !std.mem.startsWith(u8, argv[i + 1], "-")) {
-                    i += 1;
-                    try opts.passthrough.append(allocator, argv[i]);
-                }
-            }
-        } else if (std.mem.startsWith(u8, a, "-") and a.len > 1) {
-            // Short flag — forward.
-            try opts.passthrough.append(allocator, a);
-        } else if (opts.prompt == null) {
-            opts.prompt = a;
-        } else {
-            // A second positional: we accept exactly one prompt.
-            return ParseError.UnknownFlag;
-        }
+        if (try parseKnownFlag(allocator, &opts, argv, &i, diag)) continue;
+        try parsePassthroughOrPositional(allocator, &opts, argv, &i, diag);
     }
 
-    if (opts.is_daemon and (opts.prompt != null or opts.input_file != null)) {
-        // Daemon prompts arrive as stdin frames; silently ignoring an
-        // up-front prompt would drop the user's input.
-        if (opts.input_file != null) return fail(diag, "--input-file", ParseError.UnknownFlag);
-        return ParseError.UnknownFlag;
-    }
-    if (opts.is_daemon and opts.output_format_explicit and opts.output_format != .stream_json) {
-        // The daemon always writes stream-json; accepting `text`/`json`
-        // would silently hand the caller a format it did not ask for.
-        return fail(diag, "--output-format", ParseError.UnsupportedFlag);
-    }
-
-    // Match Claude's print-mode combination rule. Claude errors with
-    // "When using --print, --output-format=stream-json requires --verbose".
-    // We always emulate --print, so the same rule applies. --help/--version
-    // short-circuit before any work, so leave them alone. Daemon mode is
-    // exempt: its output is always stream-json.
-    if (!opts.show_help and !opts.show_version and !opts.is_daemon) {
-        if (opts.output_format == .stream_json and !opts.verbose) {
-            return fail(diag, "stream-json", ParseError.StreamJsonRequiresVerbose);
-        }
-    }
-
+    try validateParsed(&opts, diag);
     return opts;
 }
 
@@ -591,9 +526,11 @@ fn consumeVariadicInto(
     out: *std.ArrayList([]const u8),
     pair_flag: ?[]const u8,
 ) ParseError!usize {
+    std.debug.assert(start < argv.len);
     var i = start + 1;
     if (i >= argv.len or std.mem.startsWith(u8, argv[i], "-")) return ParseError.MissingValue;
     while (true) {
+        std.debug.assert(i < argv.len);
         if (pair_flag) |f| try out.append(allocator, f);
         try out.append(allocator, argv[i]);
         if (i + 1 >= argv.len or std.mem.startsWith(u8, argv[i + 1], "-")) return i;

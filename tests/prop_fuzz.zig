@@ -13,6 +13,7 @@ test {
     _ = @import("prop/transcript_stream_prop.zig");
     _ = @import("prop/args_prop.zig");
     _ = @import("prop/daemon_emit_prop.zig");
+    _ = @import("prop/daemon_protocol_turn_prop.zig");
     _ = @import("prop/daemon_runtime_fuzz.zig");
     _ = @import("prop/stream_transcript_deep_fuzz.zig");
     _ = @import("prop/runtime_concurrency_fuzz.zig");

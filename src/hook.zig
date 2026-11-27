@@ -96,6 +96,7 @@ pub fn buildScript(
     fifo_path: []const u8,
     nonce: []const u8,
 ) error{OutOfMemory}![]u8 {
+    std.debug.assert(relay_events.len > 0);
     const quoted_fifo = try shellSingleQuote(allocator, fifo_path);
     defer allocator.free(quoted_fifo);
     const quoted_nonce = try shellSingleQuote(allocator, nonce);
@@ -122,7 +123,9 @@ pub fn buildScript(
 fn shellSingleQuote(allocator: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]u8 {
     const escaped = try std.mem.replaceOwned(u8, allocator, text, "'", "'\\''");
     defer allocator.free(escaped);
-    return std.fmt.allocPrint(allocator, "'{s}'", .{escaped});
+    const quoted = try std.fmt.allocPrint(allocator, "'{s}'", .{escaped});
+    std.debug.assert(quoted.len >= 2 and quoted[0] == '\'' and quoted[quoted.len - 1] == '\'');
+    return quoted;
 }
 
 /// The absolute directory that holds per-run harness directories: `$TMPDIR`,
@@ -155,9 +158,11 @@ fn makeExclusiveTmpDir(
     pid: i32,
     nextSuffix: *const fn () u64,
 ) ![]u8 {
+    std.debug.assert(root.len > 0 and max_tmp_dir_attempts > 0);
     var attempt: usize = 0;
     while (true) {
         attempt += 1;
+        std.debug.assert(attempt <= max_tmp_dir_attempts);
         const tmp_dir = try std.fmt.allocPrint(
             allocator,
             "{s}/claude-p-{d}-{x:0>16}",
@@ -195,6 +200,7 @@ pub fn createWithOptions(allocator: std.mem.Allocator, opts: CreateOptions) !Hoo
     var nonce_bytes: [8]u8 = undefined;
     std.crypto.random.bytes(&nonce_bytes);
     const nonce = std.fmt.bytesToHex(nonce_bytes, .lower);
+    std.debug.assert(nonce.len == nonce_len and isNonceShaped(&nonce));
 
     const pid: i32 = @intCast(std.posix.system.getpid());
     const tmp_dir = try makeExclusiveTmpDir(allocator, root, pid, cryptoSuffix);
@@ -250,6 +256,7 @@ fn needsShellQuoting(path: []const u8) bool {
 }
 
 fn formatRelayCommand(allocator: std.mem.Allocator, script_path: []const u8, event: []const u8) ![]u8 {
+    std.debug.assert(event.len > 0);
     if (!needsShellQuoting(script_path)) {
         return std.fmt.allocPrint(allocator, "{s} {s}", .{ script_path, event });
     }
@@ -322,6 +329,7 @@ pub fn buildSettingsJson(
         try cmds.append(scratch, cmd);
         try events.put(scratch, ev, cmds);
     }
+    std.debug.assert(events.count() == relay_events.len);
     for (opts.extra_hooks) |eh| {
         const gop = try events.getOrPut(scratch, eh.event);
         if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -397,6 +405,7 @@ fn writeSettingsJson(
 }
 
 fn writeMatcherEntry(js: *std.json.Stringify, command: []const u8) !void {
+    std.debug.assert(command.len > 0);
     try js.beginObject();
     try js.objectField("matcher");
     try js.write("*");
@@ -469,11 +478,13 @@ fn trimLineEnd(raw: []const u8) []const u8 {
     var line = raw;
     if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
     if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+    std.debug.assert(line.len <= raw.len);
     return line;
 }
 
 fn splitEventPayload(line: []const u8) ?HookLine {
     const tab = std.mem.indexOfScalar(u8, line, '\t') orelse return null;
+    std.debug.assert(tab < line.len);
     return .{
         .event = HookEvent.fromString(line[0..tab]),
         .payload = line[tab + 1 ..],
@@ -549,6 +560,7 @@ pub fn extractErrorMessageAlloc(allocator: std.mem.Allocator, payload_json: []co
 }
 
 fn extractFirstMessage(allocator: std.mem.Allocator, payload_json: []const u8, fields: []const []const u8) !?[]u8 {
+    std.debug.assert(fields.len > 0);
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
@@ -573,6 +585,7 @@ fn extractStringField(
     payload_json: []const u8,
     field: []const u8,
 ) !?[]u8 {
+    std.debug.assert(field.len > 0);
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| switch (err) {

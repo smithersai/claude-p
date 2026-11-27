@@ -28,8 +28,11 @@ fn monotonicNowNs() u64 {
 
 const LaterSignal = enum { ignore, escalate };
 
+fn ignoreIoErr(_: anyerror) void {}
+
 /// What to do with a signal that arrives after the first one.
 fn laterSignalAction(first_ns: u64, now_ns: u64) LaterSignal {
+    std.debug.assert(signal_escalate_window_ns > 0);
     // 0: the first handler has not stamped its time yet, so this one is a
     // near-simultaneous duplicate.
     if (first_ns == 0) return .ignore;
@@ -37,6 +40,7 @@ fn laterSignalAction(first_ns: u64, now_ns: u64) LaterSignal {
 }
 
 fn onSignal(sig: i32) callconv(.c) void {
+    std.debug.assert(sig > 0);
     if (received_signal.cmpxchgStrong(0, @intCast(sig), .seq_cst, .seq_cst) == null) {
         first_signal_ns.store(@max(monotonicNowNs(), 1), .seq_cst);
         if (signal_mode_daemon.load(.seq_cst)) {
@@ -51,9 +55,7 @@ fn onSignal(sig: i32) callconv(.c) void {
         .escalate => {
             // The graceful unwind is stuck; die the default way.
             resetSignal(sig);
-            std.posix.raise(@intCast(sig)) catch |err| switch (err) {
-                else => {},
-            };
+            std.posix.raise(@intCast(sig)) catch |err| ignoreIoErr(err);
         },
     }
 }
@@ -83,19 +85,17 @@ fn installSignalHandlers(daemon: bool) void {
 fn exitIfSignaled() void {
     const sig = received_signal.load(.seq_cst);
     if (sig == 0) return;
-    if (stdout_writer != null) stdoutWriter().flush() catch |err| switch (err) {
-        else => {},
-    };
-    stderrWriter().flush() catch |err| switch (err) {
-        else => {},
-    };
+    if (stdout_writer != null) stdoutWriter().flush() catch |err| ignoreIoErr(err);
+    stderrWriter().flush() catch |err| ignoreIoErr(err);
     std.process.exit(@intCast(128 + sig));
 }
 
 /// `--timeout`/session-start seconds to milliseconds; 0 disables the cap.
 fn timeoutMs(seconds: u32) u64 {
     if (seconds == 0) return std.math.maxInt(u64);
-    return @as(u64, seconds) * 1000;
+    const ms = @as(u64, seconds) * 1000;
+    std.debug.assert(ms >= 1000);
+    return ms;
 }
 
 /// What is left of a `timeoutMs` budget after `elapsed_ns`. A disabled
@@ -103,7 +103,9 @@ fn timeoutMs(seconds: u32) u64 {
 /// timeout itself.
 fn remainingTimeoutMs(total_ms: u64, elapsed_ns: u64) u64 {
     if (total_ms == std.math.maxInt(u64)) return total_ms;
-    return @max(total_ms -| elapsed_ns / std.time.ns_per_ms, 1);
+    const rem = @max(total_ms -| elapsed_ns / std.time.ns_per_ms, 1);
+    std.debug.assert(rem >= 1);
+    return rem;
 }
 
 const max_prompt_bytes = 16 * 1024 * 1024;
@@ -146,12 +148,8 @@ fn composePrompt(allocator: std.mem.Allocator, stdin_text: []const u8, prompt: [
 /// Print `error: <msg>` to stderr and exit 2 (usage / input error).
 fn usageExit(comptime fmt: []const u8, fmt_args: anytype) noreturn {
     const w = stderrWriter();
-    w.print("error: " ++ fmt ++ "\n", fmt_args) catch |err| switch (err) {
-        else => {},
-    };
-    w.flush() catch |err| switch (err) {
-        else => {},
-    };
+    w.print("error: " ++ fmt ++ "\n", fmt_args) catch |err| ignoreIoErr(err);
+    w.flush() catch |err| ignoreIoErr(err);
     std.process.exit(2);
 }
 
@@ -186,6 +184,7 @@ pub const BoundedReadOptions = struct {
 const bounded_read_slice_ms: u64 = 100;
 
 fn msUntil(now_ns: u64, target_ns: u64) u64 {
+    std.debug.assert(target_ns > now_ns);
     return (target_ns - now_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
 }
 
@@ -193,6 +192,7 @@ fn msUntil(now_ns: u64, target_ns: u64) u64 {
 /// deadline, or a cancel request. Each `read` follows a ready `poll`, so an
 /// open pipe that stops sending cannot hang the caller.
 pub fn readBounded(allocator: std.mem.Allocator, fd: std.posix.fd_t, o: BoundedReadOptions) !BoundedRead {
+    std.debug.assert(bounded_read_slice_ms > 0);
     var list: std.ArrayList(u8) = .{};
     defer list.deinit(allocator);
     const start_ns = monotonicNowNs();
@@ -235,7 +235,13 @@ pub fn readBounded(allocator: std.mem.Allocator, fd: std.posix.fd_t, o: BoundedR
 /// `first_byte_grace_ms` passed with nothing received. Exits 124 when the
 /// deadline passes before EOF: running a prefix of the piped input as the
 /// prompt would be silently wrong.
-fn readStdin(allocator: std.mem.Allocator, first_byte_grace_ms: ?u64, deadline_ns: ?u64, timeout_seconds: u32) ?[]u8 {
+fn readStdin(
+    allocator: std.mem.Allocator,
+    first_byte_grace_ms: ?u64,
+    deadline_ns: ?u64,
+    timeout_seconds: u32,
+) ?[]u8 {
+    std.debug.assert(max_prompt_bytes > 0);
     const outcome = readBounded(allocator, std.fs.File.stdin().handle, .{
         .max_bytes = max_prompt_bytes,
         .first_byte_grace_ms = first_byte_grace_ms,
@@ -260,18 +266,15 @@ fn readStdin(allocator: std.mem.Allocator, first_byte_grace_ms: ?u64, deadline_n
                     "received {d} bytes and did not run the incomplete prompt. " ++
                     "Close the pipe, redirect stdin (< /dev/null), or raise --timeout\n",
                 .{ timeout_seconds, received },
-            ) catch |err| switch (err) {
-                else => {},
-            };
-            w.flush() catch |err| switch (err) {
-                else => {},
-            };
+            ) catch |err| ignoreIoErr(err);
+            w.flush() catch |err| ignoreIoErr(err);
             std.process.exit(124);
         },
     }
 }
 
 fn readInputFile(allocator: std.mem.Allocator, path: []const u8) []u8 {
+    std.debug.assert(path.len > 0);
     const f = std.fs.cwd().openFile(path, .{}) catch |err|
         usageExit("cannot read --input-file '{s}': {s}", .{ path, @errorName(err) });
     defer f.close();
@@ -279,125 +282,95 @@ fn readInputFile(allocator: std.mem.Allocator, path: []const u8) []u8 {
         usageExit("cannot read --input-file '{s}': {s}", .{ path, @errorName(err) });
 }
 
-/// Entry point for the `claude-p` CLI binary (one-shot and daemon modes).
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const argv_raw = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv_raw);
-    const argv = argv_raw[1..];
-    const start_ns = monotonicNowNs();
-
-    var diag: claude_p.args.ParseDiag = .{};
-    var opts = claude_p.args.parseWithDiag(allocator, argv, &diag) catch |err| {
-        try printError(err, diag.offending);
-        std.process.exit(2);
+fn runDaemon(allocator: std.mem.Allocator, opts: *const claude_p.args.Options) !noreturn {
+    std.debug.assert(opts.is_daemon);
+    const daemon_opts: claude_p.daemon.Options = .{
+        .model = opts.model,
+        .allowed_tools = opts.allowed_tools,
+        .skip_permissions = opts.dangerously_skip_permissions,
+        .resume_session = opts.resume_session,
+        .cont = opts.cont,
+        .session_id = opts.session_id,
+        .cwd = opts.cwd,
+        .extra_args = opts.passthrough.items,
+        .system_prompt = opts.system_prompt,
+        .append_system_prompt = opts.append_system_prompt,
+        .permission_mode = opts.permission_mode,
+        .disallowed_tools = opts.disallowed_tools,
+        .fallback_model = opts.fallback_model,
+        .setting_sources = opts.setting_sources,
+        .add_dirs = opts.add_dirs.items,
+        .mcp_configs = opts.mcp_configs.items,
+        .verbose = opts.verbose,
+        .session_start_timeout_ms = timeoutMs(opts.timeout_seconds),
+        .idle_progress_timeout_ms = @as(u64, opts.idle_timeout_seconds) * 1000,
+        .transcript_idle_timeout_ms = @as(u64, opts.transcript_idle_timeout_seconds) * 1000,
+        .extra_hooks = opts.extra_hooks.items,
+        .extra_settings_json = opts.extra_settings_json,
+        .debug = opts.debug,
     };
-    defer opts.deinit(allocator);
-
-    if (opts.show_help) {
-        try stdoutWriter().writeAll(claude_p.args.helpText());
-        try stdoutWriter().flush();
-        return;
-    }
-    if (opts.show_version) {
-        try stdoutWriter().print("claude-p {f}\n", .{claude_p.version});
-        try stdoutWriter().flush();
-        return;
-    }
-
-    if (opts.is_daemon) {
-        const daemon_opts: claude_p.daemon.Options = .{
-            .model = opts.model,
-            .allowed_tools = opts.allowed_tools,
-            .skip_permissions = opts.dangerously_skip_permissions,
-            .resume_session = opts.resume_session,
-            .cont = opts.cont,
-            .session_id = opts.session_id,
-            .cwd = opts.cwd,
-            .extra_args = opts.passthrough.items,
-            .system_prompt = opts.system_prompt,
-            .append_system_prompt = opts.append_system_prompt,
-            .permission_mode = opts.permission_mode,
-            .disallowed_tools = opts.disallowed_tools,
-            .fallback_model = opts.fallback_model,
-            .setting_sources = opts.setting_sources,
-            .add_dirs = opts.add_dirs.items,
-            .mcp_configs = opts.mcp_configs.items,
-            .verbose = opts.verbose,
-            .session_start_timeout_ms = timeoutMs(opts.timeout_seconds),
-            .idle_progress_timeout_ms = @as(u64, opts.idle_timeout_seconds) * 1000,
-            .transcript_idle_timeout_ms = @as(u64, opts.transcript_idle_timeout_seconds) * 1000,
-            .extra_hooks = opts.extra_hooks.items,
-            .extra_settings_json = opts.extra_settings_json,
-            .debug = opts.debug,
-        };
-        installSignalHandlers(true);
-        const code = claude_p.daemon.run(allocator, daemon_opts) catch |err| {
-            exitIfSignaled();
-            try reportRunError("claude-p daemon", err);
-            std.process.exit(exitCodeForRunError(err));
-        };
+    installSignalHandlers(true);
+    const code = claude_p.daemon.run(allocator, daemon_opts) catch |err| {
         exitIfSignaled();
-        std.process.exit(code);
-    }
+        try reportRunError("claude-p daemon", err);
+        std.process.exit(exitCodeForRunError(err));
+    };
+    exitIfSignaled();
+    std.process.exit(code);
+}
 
-    // Resolve the prompt: positional (optionally prefixed by piped stdin),
-    // --input-file, or stdin. Read failures are input errors: exit 2.
-    var prompt_buf: ?[]u8 = null;
-    defer if (prompt_buf) |p| allocator.free(p);
-
-    // Installed before any stdin wait so SIGINT/SIGTERM cancels it. `run`
-    // returns `Interrupted` at once if a signal lands before it starts.
-    installSignalHandlers(false);
-    const run_timeout_ms = timeoutMs(opts.timeout_seconds);
-    const stdin_deadline_ns: ?u64 = if (opts.timeout_seconds == 0)
-        null
-    else
-        start_ns + run_timeout_ms * std.time.ns_per_ms;
-
+fn resolvePrompt(
+    allocator: std.mem.Allocator,
+    opts: *const claude_p.args.Options,
+    stdin_deadline_ns: ?u64,
+    prompt_buf: *?[]u8,
+) ![]const u8 {
+    std.debug.assert(prompt_buf.* == null);
     const stdin_is_tty = std.posix.isatty(std.fs.File.stdin().handle);
-    const prompt: []const u8 = switch (promptSource(opts.prompt != null, opts.input_file != null, stdin_is_tty)) {
+    return switch (promptSource(opts.prompt != null, opts.input_file != null, stdin_is_tty)) {
         .conflict => usageExit("pass the prompt as a positional argument or with --input-file, not both", .{}),
-        .tty_empty => usageExit("empty prompt (positional, --input-file, or piped stdin required; stdin is a terminal)", .{}),
+        .tty_empty => usageExit(
+            "empty prompt (positional, --input-file, or piped stdin required; stdin is a terminal)",
+            .{},
+        ),
         .positional => opts.prompt.?,
         .positional_with_stdin => blk: {
             const piped = readStdin(allocator, stdin_grace_ms, stdin_deadline_ns, opts.timeout_seconds) orelse {
                 const w = stderrWriter();
-                w.print("warning: no stdin data received in {d}s, proceeding without it; redirect stdin (< /dev/null) to skip the wait\n", .{stdin_grace_ms / 1000}) catch |err| switch (err) {
-                    else => {},
-                };
-                w.flush() catch |err| switch (err) {
-                    else => {},
-                };
+                w.print(
+                    "warning: no stdin data received in {d}s, proceeding without it; " ++
+                        "redirect stdin (< /dev/null) to skip the wait\n",
+                    .{stdin_grace_ms / 1000},
+                ) catch |err| ignoreIoErr(err);
+                w.flush() catch |err| ignoreIoErr(err);
                 break :blk opts.prompt.?;
             };
             defer allocator.free(piped);
-            prompt_buf = try composePrompt(allocator, piped, opts.prompt.?);
-            break :blk prompt_buf.?;
+            prompt_buf.* = try composePrompt(allocator, piped, opts.prompt.?);
+            break :blk prompt_buf.*.?;
         },
         .input_file => blk: {
-            prompt_buf = readInputFile(allocator, opts.input_file.?);
-            break :blk std.mem.trimRight(u8, prompt_buf.?, "\r\n");
+            prompt_buf.* = readInputFile(allocator, opts.input_file.?);
+            break :blk std.mem.trimRight(u8, prompt_buf.*.?, "\r\n");
         },
         .stdin => blk: {
-            // No grace period: stdin is the only prompt source.
-            prompt_buf = readStdin(allocator, null, stdin_deadline_ns, opts.timeout_seconds).?;
-            break :blk std.mem.trimRight(u8, prompt_buf.?, "\r\n");
+            prompt_buf.* = readStdin(allocator, null, stdin_deadline_ns, opts.timeout_seconds).?;
+            break :blk std.mem.trimRight(u8, prompt_buf.*.?, "\r\n");
         },
     };
+}
 
-    if (prompt.len == 0) usageExit("empty prompt (positional, --input-file, or stdin required)", .{});
-
-    // For stream-json output, hand stdout to the driver so transcript lines
-    // can be written live as `claude` flushes them. Other formats accumulate
-    // and emit once at the end.
+fn runOneShot(
+    allocator: std.mem.Allocator,
+    opts: *const claude_p.args.Options,
+    prompt: []const u8,
+    start_ns: u64,
+    run_timeout_ms: u64,
+) !noreturn {
+    std.debug.assert(prompt.len > 0);
     const stdout = stdoutWriter();
     const stream_writer: ?*std.Io.Writer =
         if (opts.output_format == .stream_json) stdout else null;
-
     const run_opts: claude_p.Options = .{
         .prompt = prompt,
         .output_format = opts.output_format,
@@ -420,7 +393,6 @@ pub fn main() !void {
         .mcp_configs = opts.mcp_configs.items,
         .verbose = opts.verbose,
         .transcript_idle_timeout_ms = @as(u64, opts.transcript_idle_timeout_seconds) * 1000,
-        // Time spent reading the prompt counts against `--timeout`.
         .timeout_ms = remainingTimeoutMs(run_timeout_ms, monotonicNowNs() -| start_ns),
         .debug = opts.debug,
         .stream_writer = stream_writer,
@@ -435,24 +407,58 @@ pub fn main() !void {
     };
     defer result.deinit(allocator);
     exitIfSignaled();
-
-    // Result.write is a no-op when stream-json was already streamed. A
-    // failed write is a runtime error (2); exit 1 means assistant `is_error`.
     result.write(allocator, stdout, opts.output_format) catch |err| outputFailureExit(err);
     stdout.flush() catch |err| outputFailureExit(err);
-
     std.process.exit(result.exitCode());
+}
+
+/// Entry point for the `claude-p` CLI binary (one-shot and daemon modes).
+pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv_raw = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv_raw);
+    const start_ns = monotonicNowNs();
+
+    var diag: claude_p.args.ParseDiag = .{};
+    var opts = claude_p.args.parseWithDiag(allocator, argv_raw[1..], &diag) catch |err| {
+        try printError(err, diag.offending);
+        std.process.exit(2);
+    };
+    defer opts.deinit(allocator);
+
+    if (opts.show_help) {
+        try stdoutWriter().writeAll(claude_p.args.helpText());
+        try stdoutWriter().flush();
+        return;
+    }
+    if (opts.show_version) {
+        try stdoutWriter().print("claude-p {f}\n", .{claude_p.version});
+        try stdoutWriter().flush();
+        return;
+    }
+    if (opts.is_daemon) try runDaemon(allocator, &opts);
+
+    var prompt_buf: ?[]u8 = null;
+    defer if (prompt_buf) |p| allocator.free(p);
+    installSignalHandlers(false);
+    const run_timeout_ms = timeoutMs(opts.timeout_seconds);
+    const stdin_deadline_ns: ?u64 = if (opts.timeout_seconds == 0)
+        null
+    else
+        start_ns + run_timeout_ms * std.time.ns_per_ms;
+    const prompt = try resolvePrompt(allocator, &opts, stdin_deadline_ns, &prompt_buf);
+    if (prompt.len == 0) usageExit("empty prompt (positional, --input-file, or stdin required)", .{});
+    try runOneShot(allocator, &opts, prompt, start_ns, run_timeout_ms);
 }
 
 /// The result could not be written to stdout (closed pipe, full disk).
 fn outputFailureExit(err: anyerror) noreturn {
     const w = stderrWriter();
-    w.print("claude-p: cannot write the result to stdout: {s}\n", .{@errorName(err)}) catch |write_err| switch (write_err) {
-        else => {},
-    };
-    w.flush() catch |flush_err| switch (flush_err) {
-        else => {},
-    };
+    w.print("claude-p: cannot write the result to stdout: {s}\n", .{@errorName(err)}) catch |e| ignoreIoErr(e);
+    w.flush() catch |e| ignoreIoErr(e);
     std.process.exit(2);
 }
 
@@ -515,23 +521,32 @@ fn exitCodeForRunError(err: anyerror) u8 {
 /// Actionable stderr text for known run errors; null means print the name.
 fn runErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.SessionStartTimeout => "timed out waiting for claude to start (SessionStart hook never fired); raise --timeout or run with --debug",
-        error.StopTimeout => "timed out waiting for claude to finish the turn (Stop hook never fired); raise --timeout",
+        error.SessionStartTimeout => "timed out waiting for claude to start (SessionStart hook never fired); " ++
+            "raise --timeout or run with --debug",
+        error.StopTimeout => "timed out waiting for claude to finish the turn (Stop hook never fired); " ++
+            "raise --timeout",
         error.IdleTimeout => "no PTY output while busy for --idle-timeout; claude appears hung",
         error.TranscriptStalled => "transcript stopped growing while busy for --transcript-idle-timeout",
         error.PromptNotAccepted => "claude never accepted the typed prompt; check for a blocking dialog with --debug",
-        error.PromptTruncated => "claude received a truncated prompt; pass long prompts via --input-file or stdin and retry",
+        error.PromptTruncated => "claude received a truncated prompt; " ++
+            "pass long prompts via --input-file or stdin and retry",
         error.Interrupted => "interrupted by a signal",
-        error.PermissionPromptBlocked => "claude needs a permission decision; configure an allowed tool or a PermissionRequest hook and retry",
-        error.InvalidOptions => "check the supplied options against claude-p --help and remove unsupported print-mode flags",
+        error.PermissionPromptBlocked => "claude needs a permission decision; " ++
+            "configure an allowed tool or a PermissionRequest hook and retry",
+        error.InvalidOptions => "check the supplied options against claude-p --help " ++
+            "and remove unsupported print-mode flags",
         error.InvalidCwd => "--cwd is not an accessible directory",
-        error.UnexpectedStartupDialog => "claude displayed a security warning dialog that was not authorized by your flags; pass --dangerously-skip-permissions or --dangerously-load-development-channels if intended",
-        error.InvalidExtraSettings => "--setting-json must be a JSON object nested at most 128 levels and each --extra-hook needs a non-empty UTF-8 event and command",
+        error.UnexpectedStartupDialog => "claude displayed a security warning dialog that was not authorized " ++
+            "by your flags; pass --dangerously-skip-permissions or " ++
+            "--dangerously-load-development-channels if intended",
+        error.InvalidExtraSettings => "--setting-json must be a JSON object nested at most 128 levels " ++
+            "and each --extra-hook needs a non-empty UTF-8 event and command",
         else => null,
     };
 }
 
 fn reportRunError(prefix: []const u8, err: anyerror) !void {
+    std.debug.assert(prefix.len > 0);
     const w = stderrWriter();
     if (runErrorMessage(err)) |msg| {
         try w.print("{s}: {s}: {s}\n", .{ prefix, @errorName(err), msg });
@@ -539,6 +554,21 @@ fn reportRunError(prefix: []const u8, err: anyerror) !void {
         try w.print("{s}: {s}\n", .{ prefix, @errorName(err) });
     }
     try w.flush();
+}
+
+var stdout_buf: [4096]u8 = undefined;
+var stderr_buf: [4096]u8 = undefined;
+var stdout_writer: ?std.fs.File.Writer = null;
+var stderr_writer: ?std.fs.File.Writer = null;
+
+fn stdoutWriter() *std.Io.Writer {
+    if (stdout_writer == null) stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    return &stdout_writer.?.interface;
+}
+
+fn stderrWriter() *std.Io.Writer {
+    if (stderr_writer == null) stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    return &stderr_writer.?.interface;
 }
 
 // Keep this test first: in child mode it must run before any other.
@@ -670,19 +700,6 @@ test "onSignal: the first signal requests an interrupt; an immediate duplicate d
     try t.expectEqual(@as(u32, std.posix.SIG.INT), received_signal.load(.seq_cst));
 }
 
-const PipeWriter = struct {
-    fn slow(fd: std.posix.fd_t) void {
-        _ = std.posix.write(fd, "a") catch |err| switch (err) {
-            else => {},
-        };
-        std.Thread.sleep(150 * std.time.ns_per_ms);
-        _ = std.posix.write(fd, "b") catch |err| switch (err) {
-            else => {},
-        };
-        std.posix.close(fd);
-    }
-};
-
 test "readBounded: closed stdin is silent with a positional prompt" {
     const t = std.testing;
     const invalid_fd = std.math.maxInt(std.posix.fd_t);
@@ -748,6 +765,14 @@ test "readBounded: with no grace, a silent pipe times out with 0 bytes" {
 
 test "readBounded: the grace applies to the first byte only" {
     const t = std.testing;
+    const PipeWriter = struct {
+        fn slow(fd: std.posix.fd_t) void {
+            _ = std.posix.write(fd, "a") catch {};
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+            _ = std.posix.write(fd, "b") catch {};
+            std.posix.close(fd);
+        }
+    };
     const p = try std.posix.pipe();
     defer std.posix.close(p[0]);
     // The writer pauses 150 ms mid-stream, longer than the 50 ms grace.
@@ -790,38 +815,31 @@ test "readBounded: more than max_bytes is too_large" {
     try t.expectEqualStrings("hell", exact.complete);
 }
 
-// ---------------------------------------------------------------------------
-// Process-group SIGINT through the npm launcher (M1/H09)
-// ---------------------------------------------------------------------------
-
-fn countHarnessDirs(dir: std.fs.Dir) !usize {
-    var it = dir.iterate();
-    var n: usize = 0;
-    while (try it.next()) |entry| {
-        if (std.mem.startsWith(u8, entry.name, "claude-p-")) n += 1;
-    }
-    return n;
-}
-
-const GroupKiller = struct {
-    pgid: std.posix.pid_t,
-    done: std.atomic.Value(bool) = .init(false),
-
-    /// SIGKILL the group if the launcher has not exited within 30 s, so a
-    /// stuck unwind fails the test instead of hanging it.
-    fn run(self: *GroupKiller) void {
-        for (0..300) |_| {
-            if (self.done.load(.seq_cst)) return;
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
-        std.posix.kill(-self.pgid, std.posix.SIG.KILL) catch |err| switch (err) {
-            else => {},
-        };
-    }
-};
-
 test "launcher: SIGINT to the process group unwinds claude-p, exits 130, and leaves no temp dir" {
     const t = std.testing;
+    const Helper = struct {
+        fn countHarnessDirs(dir: std.fs.Dir) !usize {
+            var it = dir.iterate();
+            var n: usize = 0;
+            while (try it.next()) |entry| {
+                if (std.mem.startsWith(u8, entry.name, "claude-p-")) n += 1;
+            }
+            return n;
+        }
+    };
+    const GroupKiller = struct {
+        pgid: std.posix.pid_t,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            for (0..300) |_| {
+                if (self.done.load(.seq_cst)) return;
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+            }
+            std.posix.kill(-self.pgid, std.posix.SIG.KILL) catch {};
+        }
+    };
+    const countHarnessDirs = Helper.countHarnessDirs;
     if (std.posix.getenv(pgroup_child_env) != null) return;
     const platform = switch (builtin.os.tag) {
         .macos => "darwin",
@@ -992,20 +1010,4 @@ test "exhaustive: every driver.RunError and daemon.RunError maps to exit code 2 
             }
         }
     }
-}
-// std.fs.File.stdout() / .stderr() return a File; we need a Writer to use the
-// std.Io.Writer interface.
-var stdout_buf: [4096]u8 = undefined;
-var stderr_buf: [4096]u8 = undefined;
-var stdout_writer: ?std.fs.File.Writer = null;
-var stderr_writer: ?std.fs.File.Writer = null;
-
-fn stdoutWriter() *std.Io.Writer {
-    if (stdout_writer == null) stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
-    return &stdout_writer.?.interface;
-}
-
-fn stderrWriter() *std.Io.Writer {
-    if (stderr_writer == null) stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
-    return &stderr_writer.?.interface;
 }

@@ -1,0 +1,85 @@
+Usage: claude-p [OPTIONS] [PROMPT]
+       claude-p daemon [OPTIONS]
+
+Default mode: one-shot. Emulates `claude -p` by driving the interactive
+`claude` binary inside an in-process zmux PTY and capturing the final
+assistant message via a Stop hook.
+
+Prompt sources: PROMPT, --input-file <path> (not both), or piped stdin.
+With PROMPT and piped stdin, the prompt sent is `<stdin>\n\n<PROMPT>`.
+Without PROMPT or --input-file, stdin must be piped (a TTY is an error).
+
+Daemon mode (prepend `daemon` as the first arg): long-lived multi-turn
+wrapper. Reads `{"type":"user","message":{"role":"user","content":"..."}}`
+JSONL frames from stdin. Per turn it writes to stdout
+session-transcript JSONL events plus a claude -p-shaped result envelope
+(event lines use Claude Code transcript schema, not full native
+claude -p stream-json wire parity).
+Daemon mode rejects PROMPT and --input-file. Its output is always
+stream-json, so it also rejects --output-format text and json.
+
+Options (every <value> option also accepts --option=<value>):
+  --output-format <fmt>           text | json | stream-json (default: text).
+                                  stream-json needs --verbose and emits
+                                  session-transcript JSONL events plus a
+                                  claude -p-shaped result envelope
+  --model <name>                  Forwarded to `claude --model`
+  --allowedTools <rule>...        Permission-rule allow list (repeatable,
+                                  variadic; alias --allowed-tools;
+                                  --allowedTools=<rule> takes one)
+  --disallowedTools <rule>...     Permission-rule deny list (repeatable,
+                                  variadic; alias --disallowed-tools)
+  --permission-mode <mode>        acceptEdits|auto|bypassPermissions|manual|default|dontAsk|plan
+  --dangerously-skip-permissions  Bypass permission prompts
+  --system-prompt <text>          Override the default system prompt
+  --append-system-prompt <text>   Append to the default system prompt
+  --add-dir <dir>...              Additional allowed directories (repeatable,
+                                  variadic; use --add-dir=<dir> for a dir
+                                  starting with `-`)
+                                  A variadic flag takes every following
+                                  token up to the next flag or `--`: put
+                                  PROMPT first or after `--`
+  --mcp-config <cfg>...           MCP server config files / JSON (repeatable,
+                                  variadic; --mcp-config=<cfg> takes one)
+  --setting-sources <sources>     Comma-separated: user,project,local
+  --resume, -r <id>               Resume a session
+  --continue, -c                  Continue the most recent session
+  --session-id <uuid>             Use a specific session UUID
+  --name, -n <name>               Session display name; forwarded to `claude`
+  --cwd <path>                    Working directory for `claude`
+  --input-file <path>             Read prompt from a file
+  --verbose                       Verbose output
+  --timeout <seconds>             One-shot: wall-time cap for the whole run.
+                                  Daemon: cap on the initial SessionStart
+                                  wait only. 0 disables. (default: 300)
+  --idle-timeout <seconds>        Daemon-mode idle progress watchdog:
+                                  kill if no PTY output for this long
+                                  while busy. 0 disables. (default: 180)
+  --transcript-idle-timeout <seconds>
+                                  Daemon: abort if the transcript stops growing.
+                                  One-shot: abort if transcript and PTY activity stop
+                                  for this long while busy. 0 disables.
+                                  (default: 600)
+  --extra-hook <Event>=<cmd>      Add a hook command to the generated
+                                  settings (repeatable)
+  --setting-json <json>           JSON object merged into the generated
+                                  settings (`hooks` key excluded)
+  --debug                         Wrapper debug logs to stderr
+  --                              End of options; remaining tokens go to PROMPT
+  -h, --help                      Print this help
+  -v, --version                   Print version
+
+Unrecognized flags are forwarded verbatim to `claude`. The wrapper rejects,
+including their `<flag>=<value>` forms:
+  `-p`/`--print`                  claude-p emulates print mode itself
+  `--settings`                    claude-p injects its own to register the
+                                  Stop hook; use --extra-hook/--setting-json
+  `--bare`/`--safe-mode`          Claude Code skips `--settings` hooks
+  `--no-session-persistence`      claude-p reads the transcript
+  `--input-format`, `--json-schema`, `--max-budget-usd`
+                                  print-mode-only; the interactive session
+                                  would silently ignore them
+  `--max-turns`, `--fallback-model`, `--include-partial-messages`,
+  `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`
+                                  print-mode-only; claude-p does not enforce
+                                  or emit them

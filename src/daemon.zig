@@ -26,9 +26,11 @@ const zmux = @import("zmux");
 
 const driver_mod = @import("driver.zig");
 const hook_mod = @import("hook.zig");
-const transcript_mod = @import("transcript.zig");
 const emit_mod = @import("emit.zig");
-const stream_mod = @import("stream.zig");
+/// NDJSON input framing, watchdog predicates, and wire emitters.
+pub const protocol = @import("daemon/protocol.zig");
+/// Per-turn transcript cursor, pending Stop confirmation, and paste state.
+pub const turn = @import("daemon/turn.zig");
 
 /// Options for daemon mode. Subset of `driver.Options` — no prompt, no
 /// output-format choice (always stream-json), no max-turns (the wrapper is
@@ -55,17 +57,11 @@ pub const Options = struct {
     cols: u16 = 120,
     rows: u16 = 40,
     debug: bool = false,
-    /// Wall-time cap for the *initial* SessionStart wait. After that the
-    /// daemon runs until stdin EOF or the child exits.
+    /// Wall-time cap for the *initial* SessionStart wait.
     session_start_timeout_ms: u64 = 300_000,
-    /// While busy, kill the session if no PTY output has been observed for
-    /// this long. Detects a genuinely hung Ink TUI (Stop hook never fires)
-    /// without false-killing long turns that keep emitting tool progress.
-    /// Set to 0 to disable.
+    /// While busy, kill the session if no PTY output is observed for this long.
     idle_progress_timeout_ms: u64 = 180_000,
-    /// While busy, kill the session if the transcript file has not grown for
-    /// this long. Unlike `idle_progress_timeout_ms`, a ticking spinner does
-    /// not reset it: only real transcript bytes count. Set to 0 to disable.
+    /// While busy, kill the session if the transcript stops growing for this long.
     transcript_idle_timeout_ms: u64 = 600_000,
     /// Extra hooks merged into the generated settings (see `hook.zig`).
     extra_hooks: []const hook_mod.ExtraHook = &.{},
@@ -81,84 +77,54 @@ pub const RunError = error{
 } || std.mem.Allocator.Error;
 
 /// Lifecycle state of the persistent multi-turn daemon.
-pub const State = enum {
-    /// Spawned, waiting for SessionStart hook.
-    waiting_for_ready,
-    /// SessionStart fired, transcript opened, awaiting prompt from stdin.
-    idle,
-    /// Prompt typed, awaiting Stop hook.
-    busy,
-};
+pub const State = protocol.State;
+/// How long to wait for a Stop hook after sending ESC for an interrupt frame.
+pub const interrupt_window_ms = protocol.interrupt_window_ms;
+/// Decide whether a busy turn has stalled due to no PTY output.
+pub const idleTimedOut = protocol.idleTimedOut;
+/// Decide whether a busy turn has stalled because the transcript stopped growing.
+pub const transcriptStalled = protocol.transcriptStalled;
+/// Decide whether a Stop hook arriving while busy belongs to the active turn.
+pub const stopBelongsToTurn = protocol.stopBelongsToTurn;
+/// Signal the running daemon session to interrupt cleanly.
+pub const requestInterrupt = driver_mod.requestInterrupt;
+/// Milliseconds from `start_ns` to `now_ns`, clamped at 0 and saturated at `maxInt(u64)`.
+pub const elapsedMs = protocol.elapsedMs;
+/// Extract the user-message content from a hub-style stdin frame.
+pub const parseUserMessageContent = protocol.parseUserMessageContent;
+/// Parse one stdin line, emitting a protocol error frame on invalid input.
+pub const readInputFrame = protocol.readInputFrame;
+/// True if `line` is a `{"type":"ping"}` health-probe frame.
+pub const isPingFrame = protocol.isPingFrame;
+/// True if `line` is a `{"type":"interrupt"}` frame.
+pub const isInterruptFrame = protocol.isInterruptFrame;
+/// Read the byte range `[start_pos..end_pos)` from a file via `pread`.
+pub const readFileRange = turn.readFileRange;
+/// Emit a minimal `system:init` envelope once `SessionStart` fires.
+pub const emitSystemInit = protocol.emitSystemInit;
+/// Emit a `{"type":"pong","ts":<unix_ms>}` health-probe reply.
+pub const emitPong = protocol.emitPong;
+/// Compute the periodic PTY diagnostic trace interval in nanoseconds, or null when disabled.
+pub const ptyTraceInterval = protocol.ptyTraceInterval;
 
-/// Decide whether a busy turn has stalled: no PTY output for longer than the
-/// idle-progress timeout. Only meaningful while `.busy` — `.idle` /
-/// `.waiting_for_ready` never time out here (an idle daemon legitimately
-/// produces no PTY output while waiting for the next prompt).
-///
-/// `last_output_ns == 0` (no output observed yet) never trips. The caller
-/// MUST reset `last_output_ns` to "now" when transitioning idle→busy;
-/// otherwise a long idle period leaves a stale timestamp that trips this on
-/// the very first busy loop even though the child is healthy and simply hasn't
-/// had time to respond to the new prompt yet.
-pub fn idleTimedOut(state: State, last_output_ns: i64, now_ns: i128, timeout_ms: u64) bool {
-    return progressTimedOut(state, last_output_ns, now_ns, timeout_ms);
-}
-
-/// Decide whether a busy turn has stalled: the transcript file has not grown
-/// for longer than the transcript-idle timeout. Spinner-immune counterpart of
-/// `idleTimedOut`: Ink repaints keep PTY bytes flowing during a wedged turn,
-/// but only real progress appends transcript bytes.
-///
-/// Same rules as `idleTimedOut`: only `.busy` can trip, `timeout_ms == 0`
-/// disables, and `last_transcript_advance_ns == 0` (no baseline) never trips.
-/// The caller MUST reset the baseline to "now" on the idle→busy transition
-/// and again each time the tailer reads new transcript bytes.
-pub fn transcriptStalled(state: State, last_transcript_advance_ns: i64, now_ns: i128, timeout_ms: u64) bool {
-    return progressTimedOut(state, last_transcript_advance_ns, now_ns, timeout_ms);
-}
-
-fn progressTimedOut(state: State, last_ns: i64, now_ns: i128, timeout_ms: u64) bool {
-    if (state != .busy or last_ns == 0 or timeout_ms == 0) return false;
-    // Compare against the first expired millisecond. The deadline fits i128
-    // for every i64 baseline and u64 timeout, even at either clock extreme.
-    const deadline = @as(i128, last_ns) + (@as(i128, timeout_ms) + 1) * std.time.ns_per_ms;
-    return now_ns >= deadline;
-}
-
-/// How long to wait for a `Stop` hook after sending ESC for an `interrupt`
-/// frame before reporting the turn as interrupted.
-pub const interrupt_window_ms: u64 = 1500;
-
-/// Decide whether a `Stop` hook that arrives while busy ends the current
-/// turn. After an interrupted turn the daemon returns to idle without waiting
-/// for that turn's `Stop`, so a late one can arrive after the next prompt was
-/// typed. Only the new prompt acknowledgement distinguishes that Stop from
-/// residual transcript writes belonging to the interrupted turn.
-pub fn stopBelongsToTurn(state: State, prompt_acked: bool) bool {
-    return state == .busy and prompt_acked;
-}
+const interrupted = driver_mod.isInterrupted;
+const LineBuffer = protocol.LineBuffer;
+const TurnTranscript = turn.TurnTranscript;
+const PendingStop = turn.PendingStop;
+const PendingPaste = turn.PendingPaste;
+const writeFailureExit = protocol.writeFailureExit;
+const emitTurnResult = turn.emitTurnResult;
+const pumpTranscript = turn.pumpTranscript;
+const max_queued_prompts = 64;
+const max_queued_bytes = 64 * 1024 * 1024;
 
 fn monotonicNs() i64 {
     return @intCast(driver_mod.monotonicNs());
 }
 
-/// Signal the running daemon session to interrupt cleanly.
-pub const requestInterrupt = driver_mod.requestInterrupt;
-const interrupted = driver_mod.isInterrupted;
-
-/// Milliseconds from `start_ns` to `now_ns`, clamped at 0 and saturated at
-/// `maxInt(u64)`. The difference is taken in u128 so no pair of i128 clock
-/// values can overflow.
-pub fn elapsedMs(start_ns: i128, now_ns: i128) u64 {
-    if (now_ns <= start_ns) return 0;
-    const diff_ns: u128 = @as(u128, @bitCast(now_ns)) -% @as(u128, @bitCast(start_ns));
-    return std.math.cast(u64, diff_ns / std.time.ns_per_ms) orelse std.math.maxInt(u64);
-}
-
-/// Translate daemon Options to a driver.Options (which buildArgv takes).
-/// Prompt stays empty — buildArgv never reads it, and the daemon never
-/// passes a prompt on argv anyway.
+/// Translate daemon Options to a `driver.Options` (which `buildArgv` takes).
 pub fn toDriverOptions(opts: Options) driver_mod.Options {
+    std.debug.assert(opts.cols > 0 and opts.rows > 0);
     return .{
         .prompt = "",
         .output_format = .stream_json,
@@ -193,530 +159,22 @@ pub fn toDriverOptions(opts: Options) driver_mod.Options {
 
 fn trace(opts: Options, start: i128, label: []const u8) void {
     if (!opts.debug) return;
-    const now: i128 = monotonicNs();
-    const elapsed_ms: i64 = @intCast(@divTrunc(now - start, std.time.ns_per_ms));
+    const elapsed_ms: i64 = @intCast(@divTrunc(@as(i128, monotonicNs()) - start, std.time.ns_per_ms));
     std.debug.print("[claude-p-daemon +{d}ms] {s}\n", .{ elapsed_ms, label });
 }
 
 fn traceFmt(opts: Options, start: i128, comptime fmt: []const u8, args: anytype) void {
     if (!opts.debug) return;
-    const now: i128 = monotonicNs();
-    const elapsed_ms: i64 = @intCast(@divTrunc(now - start, std.time.ns_per_ms));
+    const elapsed_ms: i64 = @intCast(@divTrunc(@as(i128, monotonicNs()) - start, std.time.ns_per_ms));
     std.debug.print("[claude-p-daemon +{d}ms] ", .{elapsed_ms});
     std.debug.print(fmt, args);
     std.debug.print("\n", .{});
-}
-
-/// Extract the user-message content from a hub-style stdin frame:
-/// `{"type":"user","message":{"role":"user","content":"..."}}`
-/// Also accepts `{"type":"user","content":"..."}` for convenience.
-/// Returned slice is heap-allocated.
-pub fn parseUserMessageContent(allocator: std.mem.Allocator, line: []const u8) !?[]u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return null;
-    const obj = parsed.value.object;
-    const tval = obj.get("type") orelse return null;
-    if (tval != .string) return null;
-    if (!std.mem.eql(u8, tval.string, "user")) return null;
-
-    return extractContent(allocator, obj) catch |err| switch (err) {
-        error.UnsupportedContentBlock => null,
-        error.OutOfMemory => return err,
-    };
-}
-
-fn extractContent(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?[]u8 {
-    const content = if (obj.get("message")) |message| blk: {
-        if (message != .object) return null;
-        if (message.object.get("role")) |role| {
-            if (role != .string or !std.mem.eql(u8, role.string, "user")) return null;
-        }
-        break :blk message.object.get("content") orelse return null;
-    } else obj.get("content") orelse return null;
-    if (content == .string) return try allocator.dupe(u8, content.string);
-    if (content != .array) return null;
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(allocator);
-    for (content.array.items) |item| {
-        if (item != .object) return error.UnsupportedContentBlock;
-        const kind = item.object.get("type") orelse return error.UnsupportedContentBlock;
-        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) return error.UnsupportedContentBlock;
-        const text = item.object.get("text") orelse return error.UnsupportedContentBlock;
-        if (text != .string) return error.UnsupportedContentBlock;
-        try buf.appendSlice(allocator, text.string);
-    }
-    return try buf.toOwnedSlice(allocator);
-}
-
-const InputFrame = union(enum) {
-    ping,
-    interrupt,
-    user: []u8,
-};
-
-/// Parse one stdin line. Blank lines and rejected frames never enter the queue.
-pub fn readInputFrame(allocator: std.mem.Allocator, writer: *std.Io.Writer, line: []const u8) !?InputFrame {
-    if (std.mem.trim(u8, line, " \t\r").len == 0) return null;
-    return parseInputFrame(allocator, line) catch |err| {
-        const reason = switch (err) {
-            error.InvalidJson => "invalid_json",
-            error.InvalidUserMessage => "invalid_user_message",
-            error.UnsupportedContentBlock => "unsupported_content_block",
-            error.UnsupportedFrameType => "unsupported_frame_type",
-            error.OutOfMemory => return err,
-        };
-        try emit_mod.writeProtocolError(writer, reason);
-        return null;
-    };
-}
-
-fn parseInputFrame(allocator: std.mem.Allocator, line: []const u8) !InputFrame {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidJson,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.UnsupportedFrameType;
-    const obj = parsed.value.object;
-    const kind = obj.get("type") orelse return error.UnsupportedFrameType;
-    if (kind != .string) return error.UnsupportedFrameType;
-    if (std.mem.eql(u8, kind.string, "ping")) return .ping;
-    if (std.mem.eql(u8, kind.string, "interrupt")) return .interrupt;
-    if (!std.mem.eql(u8, kind.string, "user")) return error.UnsupportedFrameType;
-    const content = try extractContent(allocator, obj) orelse return error.InvalidUserMessage;
-    if (content.len > 0) return .{ .user = content };
-    allocator.free(content);
-    return error.InvalidUserMessage;
-}
-
-const max_queued_prompts = 64;
-const max_queued_bytes = 64 * 1024 * 1024;
-
-/// Incrementally frame NDJSON from a nonblocking fd. Report an oversized line
-/// once, then discard through its delimiter without losing subsequent frames.
-const LineBuffer = struct {
-    const limit = 16 * 1024 * 1024;
-    const Event = union(enum) { line: []const u8, oversized };
-    bytes: std.ArrayList(u8) = .{},
-    discarding: bool = false,
-    delivered: bool = false,
-
-    fn next(self: *LineBuffer, allocator: std.mem.Allocator, chunk: *[]const u8, eof: bool) !?Event {
-        if (self.delivered) {
-            self.bytes.clearRetainingCapacity();
-            self.delivered = false;
-        }
-        while (chunk.len > 0) {
-            const nl = std.mem.indexOfScalar(u8, chunk.*, '\n');
-            const part = chunk.*[0 .. nl orelse chunk.len];
-            chunk.* = chunk.*[part.len + @intFromBool(nl != null) ..];
-            if (self.discarding) {
-                self.discarding = nl == null;
-                continue;
-            }
-            if (part.len > limit - self.bytes.items.len) {
-                self.bytes.clearRetainingCapacity();
-                self.discarding = nl == null;
-                return .oversized;
-            }
-            const needed = self.bytes.items.len + part.len;
-            if (needed > self.bytes.capacity) {
-                try self.bytes.ensureTotalCapacityPrecise(allocator, @min(limit, @max(needed, self.bytes.capacity * 2)));
-            }
-            self.bytes.appendSliceAssumeCapacity(part);
-            if (nl != null) {
-                self.delivered = true;
-                return .{ .line = self.bytes.items };
-            }
-        }
-        if (eof and self.bytes.items.len > 0) {
-            self.delivered = true;
-            return .{ .line = self.bytes.items };
-        }
-        return null;
-    }
-};
-
-/// True if `line` is a JSON object whose `type` field equals `frame_type`.
-fn isFrameOfType(allocator: std.mem.Allocator, line: []const u8, frame_type: []const u8) bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
-        .ignore_unknown_fields = true,
-    }) catch return false;
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const tval = parsed.value.object.get("type") orelse return false;
-    if (tval != .string) return false;
-    return std.mem.eql(u8, tval.string, frame_type);
-}
-
-/// True if `line` is a `{"type":"ping"}` health-probe frame. Cheap classifier
-/// run before `parseUserMessageContent` in the stdin loop so a ping is answered
-/// with a `pong` and never queued as a prompt (see SPEC §2.7).
-pub fn isPingFrame(allocator: std.mem.Allocator, line: []const u8) bool {
-    return isFrameOfType(allocator, line, "ping");
-}
-
-/// True if `line` is a `{"type":"interrupt"}` frame: the hub asks the daemon
-/// to stop the turn in flight and keep the session (see SPEC §2.7).
-pub fn isInterruptFrame(allocator: std.mem.Allocator, line: []const u8) bool {
-    return isFrameOfType(allocator, line, "interrupt");
-}
-
-/// Read the byte range [start_pos..end_pos) from a file via pread. Caller
-/// owns the returned slice.
-pub fn readFileRange(allocator: std.mem.Allocator, file: std.fs.File, start_pos: u64, end_pos: u64) ![]u8 {
-    const len = std.math.cast(usize, end_pos -| start_pos) orelse return error.OutOfMemory;
-    const buf = try allocator.alloc(u8, len);
-    errdefer allocator.free(buf);
-    const done = try file.preadAll(buf, start_pos);
-    return if (done == len) buf else try allocator.realloc(buf, done);
-}
-
-/// A cursor belongs to one file and one turn. A missing boundary leaves
-/// streaming suspended until the active prompt can be located in that file.
-const TurnTranscript = struct {
-    path: ?[]u8 = null,
-    tailer: ?stream_mod.Tailer = null,
-    inode: ?std.fs.File.INode = null,
-    start: ?u64 = null,
-    size: u64 = 0,
-    initial_resume: bool,
-    first_turn: bool = true,
-    allow_zero_offset: bool = false,
-    searched_size: ?u64 = null,
-    minimum_prompt_offset: u64 = 0,
-
-    fn reset(self: *TurnTranscript) void {
-        if (self.tailer) |*t| t.deinit();
-        self.tailer = null;
-        self.inode = null;
-        self.allow_zero_offset = false;
-        self.start = null;
-        self.size = 0;
-        self.searched_size = null;
-        self.minimum_prompt_offset = 0;
-    }
-
-    fn deinit(self: *TurnTranscript, allocator: std.mem.Allocator) void {
-        self.reset();
-        if (self.path) |p| allocator.free(p);
-    }
-
-    fn observePath(self: *TurnTranscript, allocator: std.mem.Allocator, payload: []const u8) !void {
-        const path = try driver_mod.extractSafeTranscriptPath(allocator, payload) orelse return;
-        if (self.path) |old| {
-            if (std.mem.eql(u8, old, path)) {
-                allocator.free(path);
-                return;
-            }
-            allocator.free(old);
-        }
-        self.reset();
-        self.path = path;
-    }
-
-    fn begin(self: *TurnTranscript, allocator: std.mem.Allocator, after_interrupt: bool) void {
-        const fresh = self.first_turn and !self.initial_resume and !after_interrupt;
-        self.first_turn = false;
-        self.reset();
-        const path = self.path orelse return;
-        var t = stream_mod.Tailer.open(allocator, path) catch |err| {
-            self.allow_zero_offset = err == error.FileNotFound and fresh;
-            return;
-        };
-        const stat = t.file.stat() catch {
-            t.deinit();
-            return;
-        };
-        self.inode = stat.inode;
-        self.size = stat.size;
-        self.initial_resume = false;
-        if (after_interrupt) {
-            // Late output can follow this snapshot. Wait for the new user
-            // record or finish from Stop alone if Claude never writes one.
-            self.minimum_prompt_offset = stat.size;
-            t.deinit();
-            return;
-        }
-        self.start = stat.size;
-        t.pos = stat.size;
-        self.tailer = t;
-    }
-
-    fn refresh(self: *TurnTranscript, allocator: std.mem.Allocator, prompt: []const u8, recover: bool) void {
-        const path = self.path orelse return;
-        const file = transcript_mod.openTranscriptRegularFile(path) catch |err| {
-            if (err != error.FileNotFound or self.inode != null) self.reset();
-            return;
-        };
-        defer file.close();
-        const stat = file.stat() catch return;
-        if ((self.inode != null and self.inode != stat.inode) or stat.size < self.size or
-            (self.tailer != null and stat.size < self.tailer.?.pos)) self.reset();
-        self.size = stat.size;
-        self.inode = stat.inode;
-        if (self.tailer != null or !recover or self.searched_size == stat.size) return;
-        self.searched_size = stat.size;
-        const offset = driver_mod.findPromptTurnOffset(allocator, path, prompt) orelse
-            if (self.allow_zero_offset) @as(u64, 0) else return;
-        if (offset < self.minimum_prompt_offset) return;
-        var t = stream_mod.Tailer.open(allocator, path) catch return;
-        const opened = t.file.stat() catch {
-            t.deinit();
-            return;
-        };
-        if (opened.inode != stat.inode or opened.size < stat.size) {
-            t.deinit();
-            return;
-        }
-        self.start = offset;
-        self.initial_resume = false;
-        t.pos = offset;
-        self.tailer = t;
-    }
-};
-
-const PendingStop = struct {
-    payload: []u8,
-    deadline: i128,
-    inode: ?std.fs.File.INode,
-    scan_pos: u64,
-
-    fn status(self: *PendingStop, allocator: std.mem.Allocator, transcript: *TurnTranscript, prompt: []const u8) !driver_mod.StopSummaryStatus {
-        if (self.inode != transcript.inode or self.scan_pos > transcript.size) {
-            self.scan_pos = transcript.start orelse transcript.size;
-            self.inode = transcript.inode;
-        }
-        if (transcript.size <= self.scan_pos) return .none;
-        const file = transcript_mod.openTranscriptRegularFile(transcript.path orelse return .none) catch return .none;
-        defer file.close();
-        if ((file.stat() catch return .none).inode != self.inode) return .none;
-        const last = try hook_mod.extractLastAssistantMessage(allocator, self.payload);
-        defer if (last) |text| allocator.free(text);
-        return driver_mod.scanStopRecords(allocator, file, &self.scan_pos, transcript.size, last, prompt) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => .none,
-        };
-    }
-};
-
-const PendingPaste = struct {
-    chunker: driver_mod.PasteChunker,
-    stage: enum { chunks, enter_debounce } = .chunks,
-    next_at_ns: i128 = 0,
-    is_reinject: bool,
-
-    fn init(text: []const u8, is_reinject: bool) PendingPaste {
-        return .{ .chunker = .{ .text = text }, .is_reinject = is_reinject };
-    }
-
-    // Advance one scheduled write, leaving the main loop free between writes.
-    fn advance(self: *PendingPaste, session: *zmux.NativeSession) !bool {
-        const now: i128 = monotonicNs();
-        if (now < self.next_at_ns) return false;
-        switch (self.stage) {
-            .chunks => {
-                if (self.chunker.pos == 0) try session.writeInput(driver_mod.paste_start);
-                var buf: [driver_mod.paste_chunk_bytes]u8 = undefined;
-                if (self.chunker.next(&buf)) |chunk| {
-                    try session.writeInput(chunk);
-                    self.next_at_ns = now + driver_mod.paste_chunk_gap_ms * std.time.ns_per_ms;
-                } else {
-                    try session.writeInput(driver_mod.paste_end);
-                    self.stage = .enter_debounce;
-                    self.next_at_ns = now + driver_mod.ink_enter_debounce_ms * std.time.ns_per_ms;
-                }
-                return false;
-            },
-            .enter_debounce => {
-                try session.writeInput("\r");
-                return true;
-            },
-        }
-    }
-
-    fn cancel(self: PendingPaste, session: *zmux.NativeSession) !void {
-        if (self.stage == .chunks and self.chunker.pos != 0) try session.writeInput(driver_mod.paste_end);
-        try session.writeInput("\x15");
-    }
-};
-
-fn clearStop(allocator: std.mem.Allocator, pending: *?PendingStop) void {
-    if (pending.*) |stop| allocator.free(stop.payload);
-    pending.* = null;
-}
-
-fn emitTurnResult(
-    allocator: std.mem.Allocator,
-    writer: *std.Io.Writer,
-    transcript: *TurnTranscript,
-    prompt: []const u8,
-    stop_payload: []const u8,
-    failed: bool,
-    turn_start_ns: i128,
-    session_id: []const u8,
-) !void {
-    const stop_last = try hook_mod.extractLastAssistantMessage(allocator, stop_payload);
-    defer if (stop_last) |last| allocator.free(last);
-    var summary: ?transcript_mod.Summary = null;
-    defer if (summary) |*c| c.deinit(allocator);
-    var parsed_pos: ?u64 = null;
-    for (0..30) |attempt| {
-        const inode = transcript.inode;
-        const start = transcript.start;
-        transcript.refresh(allocator, prompt, true);
-        if (inode != transcript.inode or start != transcript.start or
-            (parsed_pos != null and transcript.size < parsed_pos.?))
-        {
-            if (summary) |*c| c.deinit(allocator);
-            summary = null;
-            parsed_pos = null;
-        }
-        const t = if (transcript.tailer) |*t| t else {
-            // Allow a final user record to flush before giving up on a known
-            // path whose turn boundary is still unknown.
-            if (transcript.path == null or attempt + 1 == 30) break;
-            std.Thread.sleep(25 * std.time.ns_per_ms);
-            continue;
-        };
-        _ = try pumpTranscript(t, writer);
-        if (parsed_pos != t.pos and t.pos > transcript.start.? and t.pos - transcript.start.? <= 64 * 1024 * 1024) {
-            parsed_pos = t.pos;
-            const bytes = readFileRange(allocator, t.file, transcript.start.?, t.pos) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => break,
-            };
-            defer allocator.free(bytes);
-            if (transcript_mod.parseWithOptions(allocator, bytes, .{ .keep_replay = false, .stop_text = if (failed) null else stop_last })) |parsed| {
-                if (summary) |*c| c.deinit(allocator);
-                summary = parsed;
-                if (failed or ((parsed.final_text.len > 0 or parsed.is_error) and driver_mod.finalTextMatchesStop(parsed.final_text, stop_last))) break;
-            } else |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {},
-            }
-        }
-        if (attempt + 1 < 30) std.Thread.sleep(25 * std.time.ns_per_ms);
-    }
-    if (transcript.tailer) |*t| try t.flushPartial(writer);
-    const duration = elapsedMs(turn_start_ns, monotonicNs());
-    if (failed) {
-        if (summary) |*s| {
-            if (try hook_mod.extractErrorMessageAlloc(allocator, stop_payload)) |message| {
-                if (std.mem.trim(u8, message, " \t\r\n").len > 0) {
-                    allocator.free(s.final_text);
-                    s.final_text = message;
-                } else allocator.free(message);
-            }
-            s.is_error = true;
-            if (s.subtype) |old| allocator.free(old);
-            s.subtype = null; // emitJson supplies error_during_execution
-        } else {
-            summary = try driver_mod.synthesizeStopFailureSummary(allocator, stop_payload);
-        }
-    } else if (summary) |*s| {
-        try driver_mod.preferStopText(allocator, s, stop_last);
-    } else if (stop_last) |last| {
-        if (std.mem.trim(u8, last, " \t\r\n").len > 0) {
-            const sid = try hook_mod.extractSessionId(allocator, stop_payload);
-            defer if (sid) |id| allocator.free(id);
-            const fallback: transcript_mod.Summary = .{
-                .session_id = @constCast(sid orelse session_id),
-                .final_text = last,
-                .num_turns = 1,
-                .is_error = false,
-                .total_cost_usd = 0,
-                .duration_api_ms = 0,
-                .usage = .{},
-                .jsonl_replay = &.{},
-            };
-            try emit_mod.emitJson(allocator, writer, .{ .summary = &fallback, .duration_ms = duration });
-            return writer.flush();
-        }
-    }
-    if (summary) |*s| {
-        if (s.final_text.len > 0 or s.is_error) {
-            if (s.session_id.len == 0) s.session_id = try allocator.dupe(u8, session_id);
-            try emit_mod.emitJson(allocator, writer, .{ .summary = s, .duration_ms = duration, .error_reason = if (failed) "stop_failure" else null });
-            return writer.flush();
-        }
-    }
-    try writeError(allocator, writer, "result_unavailable", session_id, duration);
-}
-
-fn pumpTranscript(tailer: *stream_mod.Tailer, writer: *std.Io.Writer) !usize {
-    const lines = tailer.pump(writer) catch |e| switch (e) {
-        error.OutOfMemory, error.WriteFailed => return e,
-        else => 0,
-    };
-    if (lines > 0) try writer.flush();
-    return lines;
-}
-
-fn writeError(allocator: std.mem.Allocator, writer: *std.Io.Writer, reason: []const u8, sid: []const u8, duration: u64) !void {
-    try emit_mod.emitErrorResult(allocator, writer, "error", reason, sid, duration);
-    try writer.flush();
-}
-
-/// Emit a minimal `claude -p stream-json` style `system:init` envelope.
-/// Used at startup so hubs can capture the session_id and treat the agent
-/// as alive without waiting for the first transcript flush.
-pub fn emitSystemInit(writer: *std.Io.Writer, session_id: []const u8) !void {
-    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
-    try jw.beginObject();
-    try jw.objectField("type");
-    try jw.write("system");
-    try jw.objectField("subtype");
-    try jw.write("init");
-    try jw.objectField("session_id");
-    try jw.write(session_id);
-    try jw.endObject();
-    try writer.writeAll("\n");
-}
-
-/// Emit a `{"type":"pong","ts":<unix_ms>}` health-probe response. Produced by
-/// the main event loop in reply to a `ping` frame; its arrival proves the loop
-/// is not wedged (see SPEC §2.7).
-pub fn emitPong(writer: *std.Io.Writer) !void {
-    var jw = std.json.Stringify{ .writer = writer, .options = .{} };
-    try jw.beginObject();
-    try jw.objectField("type");
-    try jw.write("pong");
-    try jw.objectField("ts");
-    try jw.write(std.time.milliTimestamp());
-    try jw.endObject();
-    try writer.writeAll("\n");
-}
-
-/// Return true if `fd` has data available to read, without blocking.
-/// Uses poll(2) with a 0 timeout. POLLHUP / POLLERR also report as readable
-/// so a subsequent read() can pick up EOF.
-fn fdReadable(fd: std.posix.fd_t) bool {
-    var pfd = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
-    const ready = std.posix.poll(&pfd, 0) catch return false;
-    if (ready == 0) return false;
-    return (pfd[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0;
 }
 
 fn childExited(shared: *driver_mod.SharedState, session: *zmux.NativeSession) bool {
     return shared.exited.load(.seq_cst) or session.state() == .terminated;
 }
 
-/// Wait until the PTY has been quiet for `quiet_ms` (at most `max_ms`), then
-/// hold for `settle_ms` more so late Ink chrome finishes painting before we
-/// type. Flushes queued DEC replies the whole time: Ink blocks its render on
-/// those replies, so a wait that stops answering them never sees quiet.
 fn settleBeforePrompt(
     shared: *driver_mod.SharedState,
     session: *zmux.NativeSession,
@@ -748,42 +206,555 @@ fn settleBeforePrompt(
     }
 }
 
-/// Compute the periodic PTY diagnostic trace interval in nanoseconds, or null when disabled.
-pub fn ptyTraceInterval(debug: bool, setting: ?[]const u8) ?i128 {
-    const default: ?i128 = if (debug) 60 * std.time.ns_per_s else null;
-    const raw = std.mem.trim(u8, setting orelse return default, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(raw, "off") or std.ascii.eqlIgnoreCase(raw, "false") or std.ascii.eqlIgnoreCase(raw, "no")) return null;
-    const seconds = std.fmt.parseInt(u32, raw, 10) catch return default;
-    return if (seconds == 0) null else @as(i128, seconds) * std.time.ns_per_s;
-}
+const DaemonLoop = struct {
+    allocator: std.mem.Allocator,
+    opts: Options,
+    drv_opts: driver_mod.Options,
+    stdin_fd: std.posix.fd_t,
+    stdout: *std.Io.Writer,
+    fifo_fd: std.posix.fd_t,
+    nonce: []const u8,
+    shared: *driver_mod.SharedState,
+    session: *zmux.NativeSession,
+    trace_start: i128,
+    session_start_deadline_ns: i128,
+    trace_interval: ?i128,
+    next_trace_ns: i128,
+    last_trace_bytes: u64 = 0,
+    state: State = .waiting_for_ready,
+    transcript: TurnTranscript,
+    pending_stop: ?PendingStop = null,
+    fifo_buf: LineBuffer = .{},
+    stdin_buf: LineBuffer = .{},
+    prompt_queue: std.ArrayList([]u8) = .{},
+    prompt_queue_head: usize = 0,
+    active_prompt: ?[]u8 = null,
+    pending_paste: ?PendingPaste = null,
+    typed_ns: i64 = 0,
+    injections: u32 = 0,
+    exit_seen_ns: ?i64 = null,
+    queued_bytes: usize = 0,
+    session_id: ?[]u8 = null,
+    last_transcript_advance_ns: i64 = 0,
+    interrupt_deadline_ns: ?i128 = null,
+    after_interrupt: bool = false,
+    prompt_acked: bool = false,
+    turn_start_ns: i128 = 0,
+    stdin_eof: bool = false,
 
-fn startupFailure(writer: *std.Io.Writer, reason: []const u8, stage: []const u8) !u8 {
-    try emit_mod.emitErrorResultDetail(writer, "error", reason, "", 0, .{ .stage = stage });
-    try writer.flush();
-    return 2;
-}
+    fn deinit(self: *DaemonLoop) void {
+        self.transcript.deinit(self.allocator);
+        turn.clearStop(self.allocator, &self.pending_stop);
+        self.fifo_buf.bytes.deinit(self.allocator);
+        self.stdin_buf.bytes.deinit(self.allocator);
+        for (self.prompt_queue.items[self.prompt_queue_head..]) |p| self.allocator.free(p);
+        self.prompt_queue.deinit(self.allocator);
+        if (self.active_prompt) |p| self.allocator.free(p);
+        if (self.session_id) |s| self.allocator.free(s);
+    }
 
-fn writeFailureExit(cause: ?std.fs.File.WriteError) u8 {
-    return if ((cause orelse return 2) == error.BrokenPipe) 0 else 2;
-}
+    fn sid(self: *const DaemonLoop) []const u8 {
+        return self.session_id orelse "";
+    }
 
-/// Daemon entry. Runs until stdin EOF (callers close the spawned daemon's
-/// stdin to signal shutdown) or until the child `claude` exits.
+    fn currentAge(self: *const DaemonLoop, now_ns: i128) u64 {
+        return elapsedMs(if (self.state == .busy) self.turn_start_ns else self.trace_start, now_ns);
+    }
+
+    fn handleHookEvent(self: *DaemonLoop, ev: hook_mod.HookLine) !?u8 {
+        if (self.opts.debug) std.debug.print("hook: {s}\n", .{@tagName(ev.event)});
+        switch (ev.event) {
+            .session_start => {
+                trace(self.opts, self.trace_start, "SessionStart hook fired");
+                try self.transcript.observePath(self.allocator, ev.payload);
+                if (try hook_mod.extractSessionId(self.allocator, ev.payload)) |id| {
+                    if (self.session_id) |old| self.allocator.free(old);
+                    self.session_id = id;
+                }
+                if (self.state == .waiting_for_ready) {
+                    self.shared.startup_done.store(true, .seq_cst);
+                    try emitSystemInit(self.stdout, self.sid());
+                    try self.stdout.flush();
+                    self.state = .idle;
+                    trace(self.opts, self.trace_start, "daemon ready for prompts");
+                }
+            },
+            .user_prompt_submit => {
+                if (self.state != .busy or self.injections == 0) return null;
+                if (try hook_mod.extractPrompt(self.allocator, ev.payload)) |received| {
+                    defer self.allocator.free(received);
+                    if (driver_mod.isPromptTruncated(self.active_prompt.?, received)) {
+                        const dur = elapsedMs(self.turn_start_ns, monotonicNs());
+                        try protocol.writeError(self.allocator, self.stdout, "prompt_truncated", self.sid(), dur);
+                        return 2;
+                    }
+                }
+                try self.transcript.observePath(self.allocator, ev.payload);
+                self.prompt_acked = true;
+                if (self.pending_paste) |paste| {
+                    if (paste.is_reinject) {
+                        try paste.cancel(self.session);
+                        self.pending_paste = null;
+                    }
+                }
+            },
+            .permission_request => try self.handlePermissionRequest(ev.payload),
+            .stop, .stop_failure => try self.handleStopHook(ev),
+            .unknown => {},
+        }
+        return null;
+    }
+
+    fn handlePermissionRequest(self: *DaemonLoop, payload: []const u8) !void {
+        const allow = self.state == .busy and self.injections > 0 and
+            !driver_mod.hasExtraHook(self.opts.extra_hooks, "PermissionRequest");
+        if (!allow) return;
+        if (self.pending_paste) |paste| try paste.cancel(self.session);
+        self.pending_paste = null;
+        self.session.writeInput("\x1b") catch |err| {
+            traceFmt(self.opts, self.trace_start, "ESC on permission_request failed: {s}", .{@errorName(err)});
+        };
+        const tool = hook_mod.extractPermissionTool(self.allocator, payload);
+        defer if (tool) |name| self.allocator.free(name);
+        const dur = elapsedMs(self.turn_start_ns, monotonicNs());
+        try emit_mod.emitErrorResultDetail(
+            self.stdout,
+            "error_during_execution",
+            "permission_prompt_blocked",
+            self.sid(),
+            dur,
+            .{ .message = tool orelse "unknown tool" },
+        );
+        try self.stdout.flush();
+        turn.clearStop(self.allocator, &self.pending_stop);
+        self.interrupt_deadline_ns = null;
+        self.after_interrupt = true;
+        self.state = .idle;
+    }
+
+    fn handleStopHook(self: *DaemonLoop, ev: hook_mod.HookLine) !void {
+        if (!stopBelongsToTurn(self.state, self.prompt_acked)) return;
+        try self.transcript.observePath(self.allocator, ev.payload);
+        self.transcript.refresh(self.allocator, self.active_prompt.?, true);
+        turn.clearStop(self.allocator, &self.pending_stop);
+        if (ev.event == .stop_failure) {
+            try turn.emitTurnResult(
+                self.allocator,
+                self.stdout,
+                &self.transcript,
+                self.active_prompt.?,
+                ev.payload,
+                true,
+                self.turn_start_ns,
+                self.sid(),
+            );
+            self.interrupt_deadline_ns = null;
+            self.after_interrupt = false;
+            self.state = .idle;
+            return;
+        }
+        self.pending_stop = .{
+            .payload = try self.allocator.dupe(u8, ev.payload),
+            .deadline = @as(i128, monotonicNs()) + driver_mod.stopConfirmationNs(self.opts.extra_hooks),
+            .inode = self.transcript.inode,
+            .scan_pos = self.transcript.size,
+        };
+    }
+
+    fn drainFifo(self: *DaemonLoop, read_buf: *[4096]u8) !?u8 {
+        std.debug.assert(self.nonce.len == hook_mod.nonce_len);
+        while (true) {
+            const n = std.posix.read(self.fifo_fd, read_buf) catch |e| switch (e) {
+                error.WouldBlock => break,
+                else => return e,
+            };
+            if (n == 0) break;
+            var chunk: []const u8 = read_buf[0..n];
+            while (try self.fifo_buf.next(self.allocator, &chunk, false)) |frame| {
+                const line = switch (frame) {
+                    .line => |line| line,
+                    .oversized => {
+                        try emit_mod.writeProtocolError(self.stdout, "fifo_line_too_large");
+                        continue;
+                    },
+                };
+                if (hook_mod.parseLineWithNonce(line, self.nonce)) |ev| {
+                    if (try self.handleHookEvent(ev)) |code| return code;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn updateBusyTranscript(self: *DaemonLoop, before_size: u64) !void {
+        if (self.state != .busy) return;
+        std.debug.assert(self.active_prompt != null);
+        const can_recover = self.prompt_acked and !self.transcript.initial_resume;
+        self.transcript.refresh(self.allocator, self.active_prompt.?, can_recover);
+        if (self.transcript.size > before_size) self.last_transcript_advance_ns = monotonicNs();
+        if (self.transcript.tailer) |*t| {
+            const before = t.pos;
+            _ = try turn.pumpTranscript(t, self.stdout);
+            if (t.pos > before) self.last_transcript_advance_ns = monotonicNs();
+        }
+        if (self.pending_stop) |*stop| {
+            const status = try stop.status(self.allocator, &self.transcript, self.active_prompt.?);
+            if (status == .continued) {
+                turn.clearStop(self.allocator, &self.pending_stop);
+            } else if (status == .confirmed or monotonicNs() >= stop.deadline) {
+                try turn.emitTurnResult(
+                    self.allocator,
+                    self.stdout,
+                    &self.transcript,
+                    self.active_prompt.?,
+                    stop.payload,
+                    false,
+                    self.turn_start_ns,
+                    self.sid(),
+                );
+                turn.clearStop(self.allocator, &self.pending_stop);
+                self.interrupt_deadline_ns = null;
+                self.after_interrupt = false;
+                self.state = .idle;
+            }
+        }
+    }
+
+    fn drainStdin(self: *DaemonLoop, read_buf: *[4096]u8, age: u64) !void {
+        if (self.stdin_eof or !protocol.fdReadable(self.stdin_fd)) return;
+        const n = try std.posix.read(self.stdin_fd, read_buf);
+        self.stdin_eof = n == 0;
+        var chunk: []const u8 = read_buf[0..n];
+        while (try self.stdin_buf.next(self.allocator, &chunk, self.stdin_eof)) |frame| {
+            const line = switch (frame) {
+                .line => |line| line,
+                .oversized => {
+                    try emit_mod.writeProtocolError(self.stdout, "stdin_line_too_large");
+                    continue;
+                },
+            };
+            switch (try readInputFrame(self.allocator, self.stdout, line) orelse continue) {
+                .ping => {
+                    try emitPong(self.stdout);
+                    try self.stdout.flush();
+                },
+                .interrupt => try self.handleInterruptFrame(age),
+                .user => |content| try self.enqueuePrompt(content),
+            }
+        }
+    }
+
+    fn handleInterruptFrame(self: *DaemonLoop, age: u64) !void {
+        if (self.state != .busy or self.interrupt_deadline_ns != null) return;
+        if (self.pending_paste) |paste| {
+            try paste.cancel(self.session);
+            self.pending_paste = null;
+            if (!paste.is_reinject) {
+                try emit_mod.emitErrorResult(
+                    self.allocator,
+                    self.stdout,
+                    "interrupted",
+                    "interrupted",
+                    self.sid(),
+                    age,
+                );
+                try self.stdout.flush();
+                self.after_interrupt = true;
+                self.state = .idle;
+                return;
+            }
+        }
+        self.session.writeInput("\x1b") catch |err| {
+            traceFmt(self.opts, self.trace_start, "ESC on interrupt failed: {s}", .{@errorName(err)});
+        };
+        self.interrupt_deadline_ns = @as(i128, monotonicNs()) + interrupt_window_ms * std.time.ns_per_ms;
+    }
+
+    fn enqueuePrompt(self: *DaemonLoop, content: []u8) !void {
+        std.debug.assert(content.len > 0);
+        const queued = self.prompt_queue.items.len - self.prompt_queue_head;
+        if (queued >= max_queued_prompts or content.len > max_queued_bytes - self.queued_bytes) {
+            self.allocator.free(content);
+            try emit_mod.writeProtocolError(self.stdout, "queue_full");
+            return;
+        }
+        errdefer self.allocator.free(content);
+        try self.prompt_queue.append(self.allocator, content);
+        self.queued_bytes += content.len;
+    }
+
+    fn checkExitAndTimeouts(self: *DaemonLoop, now_ns: i128, age: u64) !?u8 {
+        if (self.stdin_eof and self.state != .busy and self.prompt_queue_head == self.prompt_queue.items.len) return 0;
+        if (childExited(self.shared, self.session)) {
+            if (self.exit_seen_ns == null) self.exit_seen_ns = @intCast(now_ns);
+            const grace = self.pending_stop != null or
+                elapsedMs(self.exit_seen_ns.?, now_ns) < driver_mod.post_exit_fifo_grace_ms;
+            if (self.state == .busy and grace) return null;
+            traceFmt(self.opts, self.trace_start, "child exited while {s}", .{@tagName(self.state)});
+            driver_mod.reportFailure(
+                self.shared,
+                self.shared.debug_screen,
+                "claude exited while {s}",
+                .{@tagName(self.state)},
+            );
+            try protocol.writeError(self.allocator, self.stdout, "child_exited", self.sid(), age);
+            return 2;
+        }
+        const last_out = self.shared.last_output_ns.load(.seq_cst);
+        if (self.trace_interval) |interval| if (now_ns >= self.next_trace_ns) {
+            const bytes = self.shared.bytes_seen.load(.seq_cst);
+            const pos = if (self.transcript.tailer) |t| t.pos else 0;
+            const byte_age: i64 = if (last_out == 0) -1 else @intCast(elapsedMs(last_out, now_ns));
+            const turn_age = if (self.state == .busy) age else 0;
+            std.debug.print(
+                "[pty-trace] state={s} pty_bytes={d} pty_delta={d} last_byte_age_ms={d} " ++
+                    "turn_age_ms={d} transcript_pos={d}\n",
+                .{ @tagName(self.state), bytes, bytes - self.last_trace_bytes, byte_age, turn_age, pos },
+            );
+            self.last_trace_bytes = bytes;
+            self.next_trace_ns = now_ns + interval;
+        };
+        if (self.opts.session_start_timeout_ms != 0 and self.state == .waiting_for_ready and
+            now_ns > self.session_start_deadline_ns)
+        {
+            driver_mod.reportFailure(self.shared, self.shared.debug_screen, "timed out waiting for SessionStart", .{});
+            try protocol.writeError(self.allocator, self.stdout, "session_start_timeout", self.sid(), age);
+            return 124;
+        }
+        if (self.pending_paste == null and self.pending_stop == null) {
+            if (idleTimedOut(self.state, last_out, now_ns, self.opts.idle_progress_timeout_ms)) {
+                try protocol.writeError(self.allocator, self.stdout, "idle_timeout", self.sid(), age);
+                return 124;
+            }
+            const stalled = transcriptStalled(
+                self.state,
+                self.last_transcript_advance_ns,
+                now_ns,
+                self.opts.transcript_idle_timeout_ms,
+            );
+            if (stalled) {
+                try protocol.writeError(self.allocator, self.stdout, "transcript_stalled", self.sid(), age);
+                return 124;
+            }
+        }
+        return null;
+    }
+
+    fn checkInterruptAndWatchdog(self: *DaemonLoop, now_ns: i128, age: u64) !void {
+        if (self.state != .busy) return;
+        std.debug.assert(self.active_prompt != null);
+        if (self.interrupt_deadline_ns) |deadline| {
+            const window_now: i128 = monotonicNs();
+            if (self.pending_stop == null and window_now >= deadline) {
+                trace(self.opts, self.trace_start, "interrupt window elapsed without Stop; reporting interrupted");
+                const dur = elapsedMs(self.turn_start_ns, window_now);
+                try emit_mod.emitErrorResult(
+                    self.allocator,
+                    self.stdout,
+                    "interrupted",
+                    "interrupted",
+                    self.sid(),
+                    dur,
+                );
+                try self.stdout.flush();
+                turn.clearStop(self.allocator, &self.pending_stop);
+                self.interrupt_deadline_ns = null;
+                self.after_interrupt = true;
+                self.state = .idle;
+            }
+            return;
+        }
+        if (self.pending_paste != null) return;
+        const advanced = if (self.transcript.tailer) |t| t.pos > self.transcript.start.? else false;
+        const accepted = self.prompt_acked or (!self.after_interrupt and advanced);
+        const since_typed: i64 = @intCast(elapsedMs(self.typed_ns, now_ns));
+        switch (driver_mod.promptWatchdogAction(accepted, self.injections, since_typed)) {
+            .wait => {},
+            .reinject => {
+                traceFmt(
+                    self.opts,
+                    self.trace_start,
+                    "retrying prompt after {d} unacknowledged injections",
+                    .{self.injections},
+                );
+                self.session.writeInput("\x15") catch |err| {
+                    traceFmt(self.opts, self.trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
+                };
+                settleBeforePrompt(self.shared, self.session, 0, 0, driver_mod.ink_enter_debounce_ms);
+                settleBeforePrompt(
+                    self.shared,
+                    self.session,
+                    driver_mod.ink_quiescence_ms,
+                    driver_mod.ink_max_wait_ms,
+                    0,
+                );
+                if (interrupted() or childExited(self.shared, self.session)) return;
+                self.pending_paste = .init(self.active_prompt.?, true);
+            },
+            .give_up => {
+                try protocol.writeError(self.allocator, self.stdout, "prompt_not_accepted", self.sid(), age);
+                self.session.writeInput("\x15") catch |err| {
+                    traceFmt(self.opts, self.trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
+                };
+                self.after_interrupt = true;
+                self.state = .idle;
+            },
+        }
+    }
+
+    fn dispatchNextPrompt(self: *DaemonLoop) void {
+        if (self.state != .idle) return;
+        if (self.active_prompt) |old| self.allocator.free(old);
+        self.active_prompt = null;
+        if (childExited(self.shared, self.session)) return;
+        if (self.prompt_queue_head >= self.prompt_queue.items.len) return;
+        if (self.transcript.initial_resume) {
+            settleBeforePrompt(
+                self.shared,
+                self.session,
+                driver_mod.resume_quiescence_ms,
+                driver_mod.resume_max_wait_ms,
+                0,
+            );
+        } else {
+            settleBeforePrompt(
+                self.shared,
+                self.session,
+                driver_mod.ink_quiescence_ms,
+                driver_mod.ink_max_wait_ms,
+                driver_mod.prompt_settle_ms,
+            );
+        }
+        if (interrupted() or childExited(self.shared, self.session)) return;
+        std.debug.assert(self.prompt_queue_head < self.prompt_queue.items.len);
+        const content = self.prompt_queue.items[self.prompt_queue_head];
+        self.prompt_queue_head += 1;
+        self.queued_bytes -= content.len;
+        self.active_prompt = content;
+        if (self.prompt_queue_head == self.prompt_queue.items.len) {
+            self.prompt_queue.clearRetainingCapacity();
+            self.prompt_queue_head = 0;
+        } else if (self.prompt_queue_head >= 64 and self.prompt_queue_head >= self.prompt_queue.items.len / 2) {
+            const pending = self.prompt_queue.items[self.prompt_queue_head..];
+            std.mem.copyForwards([]u8, self.prompt_queue.items, pending);
+            self.prompt_queue.shrinkRetainingCapacity(pending.len);
+            self.prompt_queue_head = 0;
+        }
+        if (self.after_interrupt) self.session.writeInput("\x15") catch |err| {
+            traceFmt(self.opts, self.trace_start, "Ctrl-U after interrupt failed: {s}", .{@errorName(err)});
+        };
+        self.transcript.begin(self.allocator, self.after_interrupt);
+        traceFmt(self.opts, self.trace_start, "sending prompt ({d} bytes, transcript offset {?d})", .{
+            content.len,
+            self.transcript.start,
+        });
+        self.turn_start_ns = monotonicNs();
+        self.pending_paste = .init(content, false);
+        self.injections = 0;
+        self.prompt_acked = false;
+        self.interrupt_deadline_ns = null;
+        self.state = .busy;
+    }
+
+    fn stepPendingPaste(self: *DaemonLoop) void {
+        if (self.pending_paste) |*paste| {
+            const finished = paste.advance(self.session) catch |err| failed: {
+                traceFmt(self.opts, self.trace_start, "prompt write failed: {s}", .{@errorName(err)});
+                paste.cancel(self.session) catch |cancel_err| {
+                    traceFmt(self.opts, self.trace_start, "paste cancel failed: {s}", .{@errorName(cancel_err)});
+                };
+                break :failed true;
+            };
+            if (finished) {
+                self.typed_ns = monotonicNs();
+                if (!paste.is_reinject) {
+                    self.shared.last_output_ns.store(self.typed_ns, .seq_cst);
+                    self.last_transcript_advance_ns = self.typed_ns;
+                }
+                self.injections += 1;
+                self.pending_paste = null;
+            }
+        }
+    }
+
+    fn runLoop(self: *DaemonLoop) !u8 {
+        var read_buf: [4096]u8 = undefined;
+        while (true) {
+            if (interrupted()) {
+                driver_mod.clearInterrupt();
+                return 130;
+            }
+            driver_mod.flushPendingToPty(self.shared, self.session);
+            if (self.state == .waiting_for_ready) {
+                driver_mod.maybeHandleStartupDialogs(self.drv_opts, self.trace_start, self.shared, self.session);
+                if (self.shared.dialog.refused != .none) {
+                    const dur = elapsedMs(self.trace_start, monotonicNs());
+                    try protocol.writeError(self.allocator, self.stdout, "unexpected_startup_dialog", self.sid(), dur);
+                    return 2;
+                }
+            }
+            const before_size = self.transcript.size;
+            if (try self.drainFifo(&read_buf)) |code| return code;
+            try self.updateBusyTranscript(before_size);
+            const now_ns: i128 = monotonicNs();
+            const age = self.currentAge(now_ns);
+            try self.drainStdin(&read_buf, age);
+            if (try self.checkExitAndTimeouts(now_ns, age)) |code| return code;
+            if (childExited(self.shared, self.session)) {
+                std.Thread.sleep(5 * std.time.ns_per_ms);
+                continue;
+            }
+            try self.checkInterruptAndWatchdog(now_ns, age);
+            self.dispatchNextPrompt();
+            self.stepPendingPaste();
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+    }
+};
+
+/// Daemon entry. Runs until stdin EOF or until the child `claude` exits.
 pub fn run(allocator: std.mem.Allocator, opts: Options) RunError!u8 {
     var stdout_buf: [16 * 1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     return runWithIo(allocator, opts, std.posix.STDIN_FILENO, &stdout_writer.interface) catch |e| switch (e) {
-        error.WriteFailed => writeFailureExit(stdout_writer.err),
+        error.WriteFailed => protocol.writeFailureExit(stdout_writer.err),
         error.OutOfMemory, error.InvalidExtraSettings, error.InvalidOptions => |err| return err,
         else => return error.IoFailure,
     };
 }
 
-fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.posix.fd_t, stdout: *std.Io.Writer) !u8 {
+fn prepareSpawnCommand(
+    allocator: std.mem.Allocator,
+    opts: Options,
+    drv_opts: driver_mod.Options,
+    settings_json: []const u8,
+    stdout: *std.Io.Writer,
+) !union(enum) { cmd: []u8, exit_code: u8 } {
+    const claude_bin = driver_mod.resolveClaudeBinary(allocator, opts.claude_path) catch |err| switch (err) {
+        error.ClaudeNotFound => {
+            const code = try protocol.startupFailure(stdout, "claude_not_found", "resolve_claude");
+            return .{ .exit_code = code };
+        },
+        error.OutOfMemory => return err,
+    };
+    defer allocator.free(claude_bin);
+    var argv = try driver_mod.buildArgv(allocator, claude_bin, settings_json, drv_opts);
+    defer argv.deinit(allocator);
+    const shell_cmd = driver_mod.buildShellCommandInDir(allocator, argv.items, opts.cwd) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .{ .exit_code = try protocol.startupFailure(stdout, "spawn_failed", "shell_command") },
+    };
+    return .{ .cmd = shell_cmd };
+}
+
+fn runWithIo(
+    backing_allocator: std.mem.Allocator,
+    opts: Options,
+    stdin_fd: std.posix.fd_t,
+    stdout: *std.Io.Writer,
+) !u8 {
     const scope = driver_mod.InterruptScope.enter();
     defer scope.exit();
-    // Consume only a signal this invocation actually observed. A signal that
-    // arrives during a successful teardown remains pending for the next run.
     if (interrupted()) {
         driver_mod.clearInterrupt();
         return 130;
@@ -794,55 +765,72 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
     driver_mod.validateOptions(drv_opts) catch return error.InvalidOptions;
     driver_mod.validateCwd(opts.cwd) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return startupFailure(stdout, "spawn_failed", "cwd"),
+        else => return protocol.startupFailure(stdout, "spawn_failed", "cwd"),
     };
     const trace_start: i128 = monotonicNs();
     trace(opts, trace_start, "daemon.run() entered");
 
-    // ----------- 1. Hook harness + argv + env -----------
     var harness = hook_mod.createWithOptions(allocator, .{
         .extra_hooks = opts.extra_hooks,
         .extra_settings_json = opts.extra_settings_json,
     }) catch |e| switch (e) {
         error.InvalidExtraSettings => {
-            _ = try startupFailure(stdout, "spawn_failed", "hook_settings");
+            _ = try protocol.startupFailure(stdout, "spawn_failed", "hook_settings");
             return error.InvalidExtraSettings;
         },
         error.OutOfMemory => return e,
-        else => return startupFailure(stdout, "spawn_failed", "hook_harness"),
+        else => return protocol.startupFailure(stdout, "spawn_failed", "hook_harness"),
     };
     defer harness.deinit();
 
-    const claude_bin = driver_mod.resolveClaudeBinary(allocator, opts.claude_path) catch |err| switch (err) {
-        error.ClaudeNotFound => return startupFailure(stdout, "claude_not_found", "resolve_claude"),
-        error.OutOfMemory => return err,
-    };
-    defer allocator.free(claude_bin);
-
-    var argv = try driver_mod.buildArgv(allocator, claude_bin, harness.settings_json, drv_opts);
-    defer argv.deinit(allocator);
-
-    const shell_cmd = driver_mod.buildShellCommandInDir(allocator, argv.items, opts.cwd) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return startupFailure(stdout, "spawn_failed", "shell_command"),
+    const shell_cmd = switch (try prepareSpawnCommand(allocator, opts, drv_opts, harness.settings_json, stdout)) {
+        .cmd => |cmd| cmd,
+        .exit_code => |code| return code,
     };
     defer allocator.free(shell_cmd);
 
-    // Same child environment as one-shot mode: nested-session markers are
-    // stripped. Only the relay script embeds the FIFO path and nonce.
     var env_list = driver_mod.buildChildEnv(allocator, harness.fifo_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return startupFailure(stdout, "spawn_failed", "environment"),
+        else => return protocol.startupFailure(stdout, "spawn_failed", "environment"),
     };
     defer driver_mod.freeChildEnv(allocator, &env_list);
 
-    // ----------- 2. FIFO for hook events -----------
     const fifo_z = try allocator.dupeZ(u8, harness.fifo_path);
     defer allocator.free(fifo_z);
-    const fifo_fd = std.posix.openZ(fifo_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return startupFailure(stdout, "spawn_failed", "fifo_open");
+    const fifo_fd = std.posix.openZ(
+        fifo_z,
+        .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+        0,
+    ) catch return protocol.startupFailure(stdout, "spawn_failed", "fifo_open");
     defer std.posix.close(fifo_fd);
 
-    // ----------- 3. SharedState + spawn zmux session -----------
+    return runSessionLoop(
+        allocator,
+        opts,
+        drv_opts,
+        stdin_fd,
+        stdout,
+        fifo_fd,
+        &harness.nonce,
+        shell_cmd,
+        env_list.items,
+        trace_start,
+    );
+}
+
+fn runSessionLoop(
+    allocator: std.mem.Allocator,
+    opts: Options,
+    drv_opts: driver_mod.Options,
+    stdin_fd: std.posix.fd_t,
+    stdout: *std.Io.Writer,
+    fifo_fd: std.posix.fd_t,
+    nonce: []const u8,
+    shell_cmd: []const u8,
+    env_items: []const []const u8,
+    trace_start: i128,
+) !u8 {
+    std.debug.assert(nonce.len == hook_mod.nonce_len);
     var shared: driver_mod.SharedState = .{
         .session = undefined,
         .dec = .{ .rows = opts.rows, .cols = opts.cols },
@@ -857,574 +845,46 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
         shared.recent.deinit(std.heap.page_allocator);
         shared.recent_mutex.unlock();
     }
-
-    const sink: zmux.native.EventSink = .{
-        .context = @ptrCast(&shared),
-        .emit = driver_mod.onZmuxEvent,
-    };
-
+    const sink: zmux.native.EventSink = .{ .context = @ptrCast(&shared), .emit = driver_mod.onZmuxEvent };
     const session = zmux.NativeSession.create(allocator, .{
         .id = "claude-p-daemon",
         .shell = "/bin/sh",
         .command = shell_cmd,
         .cwd = opts.cwd,
-        .env = env_list.items,
+        .env = env_items,
         .rows = opts.rows,
         .cols = opts.cols,
         .event_sink = sink,
-    }) catch return startupFailure(stdout, "spawn_failed", "pty_spawn");
+    }) catch return protocol.startupFailure(stdout, "spawn_failed", "pty_spawn");
     shared.session = session;
     defer session.destroy();
     trace(opts, trace_start, "zmux session spawned; Ink booting");
 
-    var state: State = .waiting_for_ready;
-    var transcript: TurnTranscript = .{ .initial_resume = driver_mod.isResumeRun(drv_opts) };
-    defer transcript.deinit(allocator);
-    var pending_stop: ?PendingStop = null;
-    defer clearStop(allocator, &pending_stop);
-
-    var fifo_buf: LineBuffer = .{};
-    defer fifo_buf.bytes.deinit(allocator);
-    var stdin_buf: LineBuffer = .{};
-    defer stdin_buf.bytes.deinit(allocator);
-    var read_buf: [4096]u8 = undefined;
-
-    var prompt_queue: std.ArrayList([]u8) = .{};
-    var prompt_queue_head: usize = 0;
-    defer {
-        for (prompt_queue.items[prompt_queue_head..]) |p| allocator.free(p);
-        prompt_queue.deinit(allocator);
-    }
-    var active_prompt: ?[]u8 = null;
-    defer if (active_prompt) |prompt| allocator.free(prompt);
-    var pending_paste: ?PendingPaste = null;
-    var typed_ns: i64 = 0;
-    var injections: u32 = 0;
-    var exit_seen_ns: ?i64 = null;
-    var queued_bytes: usize = 0;
-
-    // Session id from the SessionStart payload; error frames carry it.
-    var session_id: ?[]u8 = null;
-    defer if (session_id) |sid| allocator.free(sid);
-
-    // Transcript-advance watchdog baseline (see `transcriptStalled`).
-    var last_transcript_advance_ns: i64 = 0;
-    // Set while an `interrupt` frame waits for the turn's Stop hook.
-    var interrupt_deadline_ns: ?i128 = null;
-    // The previous turn ended as `interrupted`; its Stop hook may still come.
-    var after_interrupt = false;
-    // UserPromptSubmit fired for the turn in flight.
-    var prompt_acked = false;
-
-    var turn_start_ns: i128 = 0;
-    const session_start_deadline_ns: i128 = trace_start + @as(i128, @intCast(opts.session_start_timeout_ms)) * std.time.ns_per_ms;
-    var stdin_eof = false;
-
-    const trace_interval = ptyTraceInterval(opts.debug, std.posix.getenv("CLAUDE_P_PTY_TRACE"));
-    var next_trace_ns = trace_start + (trace_interval orelse 0);
-    var last_trace_bytes: u64 = 0;
-
-    while (true) {
-        if (interrupted()) {
-            driver_mod.clearInterrupt();
-            return 130;
-        }
-        // ----- flush DEC-responder bytes to PTY -----
-        driver_mod.flushPendingToPty(&shared, session);
-
-        // ----- pre-SessionStart modal dialogs (shared with driver.run) -----
-        // Workspace trust (Claude Code 2.1 preselects "No, exit"),
-        // bypass-permissions, and development channels.
-        if (state == .waiting_for_ready) {
-            driver_mod.maybeHandleStartupDialogs(drv_opts, trace_start, &shared, session);
-            if (shared.dialog.refused != .none) {
-                try writeError(allocator, stdout, "unexpected_startup_dialog", session_id orelse "", elapsedMs(trace_start, monotonicNs()));
-                return 2;
-            }
-        }
-
-        const before_size = transcript.size;
-        // ----- drain FIFO (hook events) -----
-        while (true) {
-            const n = std.posix.read(fifo_fd, &read_buf) catch |e| switch (e) {
-                error.WouldBlock => break,
-                else => return e,
-            };
-            if (n == 0) break;
-            var chunk: []const u8 = read_buf[0..n];
-            while (try fifo_buf.next(allocator, &chunk, false)) |frame| {
-                const line = switch (frame) {
-                    .line => |line| line,
-                    .oversized => {
-                        try emit_mod.writeProtocolError(stdout, "fifo_line_too_large");
-                        continue;
-                    },
-                };
-                if (hook_mod.parseLineWithNonce(line, &harness.nonce)) |ev| {
-                    if (opts.debug) std.debug.print("hook: {s}\n", .{@tagName(ev.event)});
-                    switch (ev.event) {
-                        .session_start => {
-                            trace(opts, trace_start, "SessionStart hook fired");
-                            try transcript.observePath(allocator, ev.payload);
-                            if (try hook_mod.extractSessionId(allocator, ev.payload)) |id| {
-                                if (session_id) |old| allocator.free(old);
-                                session_id = id;
-                            }
-                            if (state == .waiting_for_ready) {
-                                shared.startup_done.store(true, .seq_cst);
-                                try emitSystemInit(stdout, session_id orelse "");
-                                try stdout.flush();
-                                state = .idle;
-                                trace(opts, trace_start, "daemon ready for prompts");
-                            }
-                        },
-                        .user_prompt_submit => {
-                            if (state != .busy or injections == 0) continue;
-                            if (try hook_mod.extractPrompt(allocator, ev.payload)) |received| {
-                                defer allocator.free(received);
-                                if (driver_mod.isPromptTruncated(active_prompt.?, received)) {
-                                    try writeError(allocator, stdout, "prompt_truncated", session_id orelse "", elapsedMs(turn_start_ns, monotonicNs()));
-                                    return 2;
-                                }
-                            }
-                            try transcript.observePath(allocator, ev.payload);
-                            prompt_acked = true;
-                            if (pending_paste) |paste| {
-                                if (paste.is_reinject) {
-                                    try paste.cancel(session);
-                                    pending_paste = null;
-                                }
-                            }
-                        },
-                        .permission_request => if (state == .busy and injections > 0 and !driver_mod.hasExtraHook(opts.extra_hooks, "PermissionRequest")) {
-                            if (pending_paste) |paste| try paste.cancel(session);
-                            pending_paste = null;
-                            session.writeInput("\x1b") catch |err| {
-                                traceFmt(opts, trace_start, "ESC on permission_request failed: {s}", .{@errorName(err)});
-                            };
-                            const tool = hook_mod.extractPermissionTool(allocator, ev.payload);
-                            defer if (tool) |name| allocator.free(name);
-                            try emit_mod.emitErrorResultDetail(stdout, "error_during_execution", "permission_prompt_blocked", session_id orelse "", elapsedMs(turn_start_ns, monotonicNs()), .{ .message = tool orelse "unknown tool" });
-                            try stdout.flush();
-                            clearStop(allocator, &pending_stop);
-                            interrupt_deadline_ns = null;
-                            after_interrupt = true;
-                            state = .idle;
-                        },
-                        .stop, .stop_failure => {
-                            if (!stopBelongsToTurn(state, prompt_acked)) continue;
-                            try transcript.observePath(allocator, ev.payload);
-                            transcript.refresh(allocator, active_prompt.?, true);
-                            clearStop(allocator, &pending_stop);
-                            if (ev.event == .stop_failure) {
-                                try emitTurnResult(allocator, stdout, &transcript, active_prompt.?, ev.payload, true, turn_start_ns, session_id orelse "");
-                                interrupt_deadline_ns = null;
-                                after_interrupt = false;
-                                state = .idle;
-                            } else {
-                                pending_stop = .{
-                                    .payload = try allocator.dupe(u8, ev.payload),
-                                    .deadline = @as(i128, monotonicNs()) + driver_mod.stopConfirmationNs(opts.extra_hooks),
-                                    .inode = transcript.inode,
-                                    .scan_pos = transcript.size,
-                                };
-                            }
-                        },
-                        .unknown => {},
-                    }
-                }
-            }
-        }
-
-        if (state == .busy) {
-            transcript.refresh(allocator, active_prompt.?, prompt_acked and !transcript.initial_resume);
-            if (transcript.size > before_size) last_transcript_advance_ns = monotonicNs();
-            if (transcript.tailer) |*t| {
-                const before = t.pos;
-                _ = try pumpTranscript(t, stdout);
-                if (t.pos > before) last_transcript_advance_ns = monotonicNs();
-            }
-            if (pending_stop) |*stop| {
-                const status = try stop.status(allocator, &transcript, active_prompt.?);
-                if (status == .continued) {
-                    clearStop(allocator, &pending_stop);
-                } else if (status == .confirmed or monotonicNs() >= stop.deadline) {
-                    try emitTurnResult(allocator, stdout, &transcript, active_prompt.?, stop.payload, false, turn_start_ns, session_id orelse "");
-                    clearStop(allocator, &pending_stop);
-                    interrupt_deadline_ns = null;
-                    after_interrupt = false;
-                    state = .idle;
-                }
-            }
-        }
-
-        const now_ns: i128 = monotonicNs();
-        const sid = session_id orelse "";
-        const age = elapsedMs(if (state == .busy) turn_start_ns else trace_start, now_ns);
-        if (!stdin_eof and fdReadable(stdin_fd)) {
-            const n = try std.posix.read(stdin_fd, &read_buf);
-            stdin_eof = n == 0;
-            var chunk: []const u8 = read_buf[0..n];
-            while (try stdin_buf.next(allocator, &chunk, stdin_eof)) |frame| {
-                const line = switch (frame) {
-                    .line => |line| line,
-                    .oversized => {
-                        try emit_mod.writeProtocolError(stdout, "stdin_line_too_large");
-                        continue;
-                    },
-                };
-                switch (try readInputFrame(allocator, stdout, line) orelse continue) {
-                    .ping => {
-                        try emitPong(stdout);
-                        try stdout.flush();
-                    },
-                    .interrupt => if (state == .busy and interrupt_deadline_ns == null) {
-                        if (pending_paste) |paste| {
-                            try paste.cancel(session);
-                            pending_paste = null;
-                            if (!paste.is_reinject) {
-                                try emit_mod.emitErrorResult(allocator, stdout, "interrupted", "interrupted", sid, age);
-                                try stdout.flush();
-                                after_interrupt = true;
-                                state = .idle;
-                                continue;
-                            }
-                        }
-                        session.writeInput("\x1b") catch |err| {
-                            traceFmt(opts, trace_start, "ESC on interrupt failed: {s}", .{@errorName(err)});
-                        };
-                        interrupt_deadline_ns = @as(i128, monotonicNs()) + interrupt_window_ms * std.time.ns_per_ms;
-                    },
-                    .user => |content| {
-                        if (prompt_queue.items.len - prompt_queue_head >= max_queued_prompts or content.len > max_queued_bytes - queued_bytes) {
-                            allocator.free(content);
-                            try emit_mod.writeProtocolError(stdout, "queue_full");
-                            continue;
-                        }
-                        errdefer allocator.free(content);
-                        try prompt_queue.append(allocator, content);
-                        queued_bytes += content.len;
-                    },
-                }
-            }
-        }
-
-        if (stdin_eof and state != .busy and prompt_queue_head == prompt_queue.items.len) return 0;
-        if (childExited(&shared, session)) {
-            if (exit_seen_ns == null) exit_seen_ns = @intCast(now_ns);
-            if (state == .busy and (pending_stop != null or elapsedMs(exit_seen_ns.?, now_ns) < driver_mod.post_exit_fifo_grace_ms)) {
-                std.Thread.sleep(5 * std.time.ns_per_ms);
-                continue;
-            }
-            traceFmt(opts, trace_start, "child exited while {s}", .{@tagName(state)});
-            driver_mod.reportFailure(&shared, shared.debug_screen, "claude exited while {s}", .{@tagName(state)});
-            try writeError(allocator, stdout, "child_exited", sid, age);
-            return 2;
-        }
-        const last_output_ns = shared.last_output_ns.load(.seq_cst);
-        if (trace_interval) |interval| {
-            if (now_ns >= next_trace_ns) {
-                const bytes = shared.bytes_seen.load(.seq_cst);
-                const pos = if (transcript.tailer) |t| t.pos else 0;
-                const byte_age: i64 = if (last_output_ns == 0) -1 else @intCast(elapsedMs(last_output_ns, now_ns));
-                std.debug.print("[pty-trace] state={s} pty_bytes={d} pty_delta={d} last_byte_age_ms={d} turn_age_ms={d} transcript_pos={d}\n", .{
-                    @tagName(state), bytes, bytes - last_trace_bytes, byte_age, if (state == .busy) age else 0, pos,
-                });
-                last_trace_bytes = bytes;
-                next_trace_ns = now_ns + interval;
-            }
-        }
-        if (opts.session_start_timeout_ms != 0 and state == .waiting_for_ready and now_ns > session_start_deadline_ns) {
-            driver_mod.reportFailure(&shared, shared.debug_screen, "timed out waiting for SessionStart", .{});
-            try writeError(allocator, stdout, "session_start_timeout", sid, age);
-            return 124;
-        }
-        if (pending_paste == null and pending_stop == null and idleTimedOut(state, last_output_ns, now_ns, opts.idle_progress_timeout_ms)) {
-            try writeError(allocator, stdout, "idle_timeout", sid, age);
-            return 124;
-        }
-        if (pending_paste == null and pending_stop == null and transcriptStalled(state, last_transcript_advance_ns, now_ns, opts.transcript_idle_timeout_ms)) {
-            try writeError(allocator, stdout, "transcript_stalled", sid, age);
-            return 124;
-        }
-
-        // ----- interrupt window: no Stop arrived after ESC -----
-        // Runs after the FIFO drain above, so a Stop that landed inside the
-        // window has already ended the turn with a normal result.
-        if (state == .busy) {
-            if (interrupt_deadline_ns) |deadline| {
-                const window_now: i128 = monotonicNs();
-                if (pending_stop == null and window_now >= deadline) {
-                    trace(opts, trace_start, "interrupt window elapsed without Stop; reporting interrupted");
-                    try emit_mod.emitErrorResult(allocator, stdout, "interrupted", "interrupted", sid, elapsedMs(turn_start_ns, window_now));
-                    try stdout.flush();
-                    clearStop(allocator, &pending_stop);
-                    interrupt_deadline_ns = null;
-                    after_interrupt = true;
-                    // The session stays alive for the next turn.
-                    state = .idle;
-                }
-            }
-        }
-
-        if (state == .busy and pending_paste == null and interrupt_deadline_ns == null) {
-            const advanced = if (transcript.tailer) |t| t.pos > transcript.start.? else false;
-            const accepted = prompt_acked or (!after_interrupt and advanced);
-            switch (driver_mod.promptWatchdogAction(accepted, injections, @intCast(elapsedMs(typed_ns, now_ns)))) {
-                .wait => {},
-                .reinject => {
-                    traceFmt(opts, trace_start, "retrying prompt after {d} unacknowledged injections", .{injections});
-                    session.writeInput("\x15") catch |err| {
-                        traceFmt(opts, trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
-                    };
-                    settleBeforePrompt(&shared, session, 0, 0, driver_mod.ink_enter_debounce_ms);
-                    settleBeforePrompt(&shared, session, driver_mod.ink_quiescence_ms, driver_mod.ink_max_wait_ms, 0);
-                    if (interrupted() or childExited(&shared, session)) continue;
-                    pending_paste = .init(active_prompt.?, true);
-                },
-                .give_up => {
-                    try writeError(allocator, stdout, "prompt_not_accepted", sid, age);
-                    session.writeInput("\x15") catch |err| {
-                        traceFmt(opts, trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
-                    };
-                    after_interrupt = true;
-                    state = .idle;
-                },
-            }
-        }
-
-        if (state == .idle) {
-            if (active_prompt) |old| allocator.free(old);
-            active_prompt = null;
-            if (childExited(&shared, session)) continue;
-            if (prompt_queue_head < prompt_queue.items.len) {
-                if (transcript.initial_resume) {
-                    settleBeforePrompt(&shared, session, driver_mod.resume_quiescence_ms, driver_mod.resume_max_wait_ms, 0);
-                } else {
-                    settleBeforePrompt(&shared, session, driver_mod.ink_quiescence_ms, driver_mod.ink_max_wait_ms, driver_mod.prompt_settle_ms);
-                }
-                if (interrupted() or childExited(&shared, session)) continue;
-                const content = prompt_queue.items[prompt_queue_head];
-                prompt_queue_head += 1;
-                queued_bytes -= content.len;
-                active_prompt = content;
-                if (prompt_queue_head == prompt_queue.items.len) {
-                    prompt_queue.clearRetainingCapacity();
-                    prompt_queue_head = 0;
-                } else if (prompt_queue_head >= 64 and prompt_queue_head >= prompt_queue.items.len / 2) {
-                    const pending = prompt_queue.items[prompt_queue_head..];
-                    std.mem.copyForwards([]u8, prompt_queue.items, pending);
-                    prompt_queue.shrinkRetainingCapacity(pending.len);
-                    prompt_queue_head = 0;
-                }
-                if (after_interrupt) session.writeInput("\x15") catch |err| {
-                    traceFmt(opts, trace_start, "Ctrl-U after interrupt failed: {s}", .{@errorName(err)});
-                };
-                // Snapshot immediately before typing, including any idle-time
-                // writes or resumed history that appeared during settling.
-                transcript.begin(allocator, after_interrupt);
-                traceFmt(opts, trace_start, "sending prompt ({d} bytes, transcript offset {?d})", .{ content.len, transcript.start });
-                turn_start_ns = monotonicNs();
-                pending_paste = .init(content, false);
-                injections = 0;
-                prompt_acked = false;
-                interrupt_deadline_ns = null;
-                state = .busy;
-            }
-        }
-
-        if (pending_paste) |*paste| {
-            const attempt_finished = paste.advance(session) catch |err| failed: {
-                traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(err)});
-                paste.cancel(session) catch |cancel_err| {
-                    traceFmt(opts, trace_start, "paste cancel failed: {s}", .{@errorName(cancel_err)});
-                };
-                // A child exit can race the write. Let FIFO drain, exit
-                // detection and the acceptance watchdog resolve this attempt.
-                break :failed true;
-            };
-            if (attempt_finished) {
-                typed_ns = monotonicNs();
-                if (!paste.is_reinject) {
-                    shared.last_output_ns.store(typed_ns, .seq_cst);
-                    last_transcript_advance_ns = typed_ns;
-                }
-                injections += 1;
-                pending_paste = null;
-            }
-        }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
-    }
+    const start_deadline = trace_start +
+        @as(i128, @intCast(opts.session_start_timeout_ms)) * std.time.ns_per_ms;
+    const interval = ptyTraceInterval(opts.debug, std.posix.getenv("CLAUDE_P_PTY_TRACE"));
+    var loop: DaemonLoop = .{
+        .allocator = allocator,
+        .opts = opts,
+        .drv_opts = drv_opts,
+        .stdin_fd = stdin_fd,
+        .stdout = stdout,
+        .fifo_fd = fifo_fd,
+        .nonce = nonce,
+        .shared = &shared,
+        .session = session,
+        .trace_start = trace_start,
+        .session_start_deadline_ns = start_deadline,
+        .trace_interval = interval,
+        .next_trace_ns = trace_start + (interval orelse 0),
+        .transcript = .{ .initial_resume = driver_mod.isResumeRun(drv_opts) },
+    };
+    defer loop.deinit();
+    return loop.runLoop();
 }
 
 // -------- tests --------
 const testing = std.testing;
-
-test "parseUserMessageContent: simple string content" {
-    const line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}";
-    const out = (try parseUserMessageContent(testing.allocator, line)).?;
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("hello", out);
-}
-
-test "parseUserMessageContent: array content with text blocks" {
-    const line =
-        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
-        "{\"type\":\"text\",\"text\":\"hi \"}," ++
-        "{\"type\":\"text\",\"text\":\"there\"}" ++
-        "]}}";
-    const out = (try parseUserMessageContent(testing.allocator, line)).?;
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("hi there", out);
-}
-
-test "parseUserMessageContent: fallback top-level content" {
-    const line = "{\"type\":\"user\",\"content\":\"hi\"}";
-    const out = (try parseUserMessageContent(testing.allocator, line)).?;
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("hi", out);
-}
-
-test "parseUserMessageContent: non-user type returns null" {
-    const line = "{\"type\":\"system\",\"content\":\"nope\"}";
-    try testing.expectEqual(@as(?[]u8, null), try parseUserMessageContent(testing.allocator, line));
-}
-
-test "parseUserMessageContent: malformed returns null" {
-    try testing.expectEqual(@as(?[]u8, null), try parseUserMessageContent(testing.allocator, "not json"));
-}
-
-test "isPingFrame: ping frame recognized" {
-    try testing.expect(isPingFrame(testing.allocator, "{\"type\":\"ping\"}"));
-    try testing.expect(isPingFrame(testing.allocator, "{\"type\":\"ping\",\"id\":7}"));
-}
-
-test "isPingFrame: user frame is not a ping" {
-    const line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}";
-    try testing.expect(!isPingFrame(testing.allocator, line));
-}
-
-test "isPingFrame: malformed / non-ping returns false" {
-    try testing.expect(!isPingFrame(testing.allocator, "not json"));
-    try testing.expect(!isPingFrame(testing.allocator, "{\"type\":\"system\"}"));
-    try testing.expect(!isPingFrame(testing.allocator, "{\"foo\":1}"));
-}
-
-test "emitPong: shape is a single-line pong object with ts" {
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    try emitPong(&aw.writer);
-    buf = aw.toArrayList();
-    const out = buf.items;
-    try testing.expect(std.mem.endsWith(u8, out, "\n"));
-    try testing.expect(std.mem.indexOf(u8, out, "\"type\":\"pong\"") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"ts\":") != null);
-}
-
-test "idleTimedOut: busy + stale last_output trips" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms; // 1_000_000 ms
-    const last_out: i64 = 0; // not yet observed → never trips
-    try testing.expect(!idleTimedOut(.busy, last_out, now, 180_000));
-    // 200s of silence > 180s timeout
-    const stale: i64 = @intCast(now - 200_000 * std.time.ns_per_ms);
-    try testing.expect(idleTimedOut(.busy, stale, now, 180_000));
-}
-
-test "idleTimedOut: busy + fresh baseline does not trip" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    // Just reset on dispatch (last_output == now) → 0ms idle.
-    try testing.expect(!idleTimedOut(.busy, @intCast(now), now, 180_000));
-    // 1s after a fresh baseline, well under timeout.
-    const one_s_ago: i64 = @intCast(now - 1_000 * std.time.ns_per_ms);
-    try testing.expect(!idleTimedOut(.busy, one_s_ago, now, 180_000));
-}
-
-test "idleTimedOut: idle/waiting never trip even with ancient timestamp" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    const ancient: i64 = @intCast(now - 3_600_000 * std.time.ns_per_ms); // 1h ago
-    // This is the Bug B regression: an idle daemon parked for an hour must NOT
-    // be considered timed out — only .busy is subject to the watchdog.
-    try testing.expect(!idleTimedOut(.idle, ancient, now, 180_000));
-    try testing.expect(!idleTimedOut(.waiting_for_ready, ancient, now, 180_000));
-}
-
-test "idleTimedOut: timeout 0 disables" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    const ancient: i64 = @intCast(now - 3_600_000 * std.time.ns_per_ms);
-    try testing.expect(!idleTimedOut(.busy, ancient, now, 0));
-}
-
-test "transcriptStalled: busy + stale baseline trips" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    const stale: i64 = @intCast(now - 700_000 * std.time.ns_per_ms);
-    try testing.expect(transcriptStalled(.busy, stale, now, 600_000));
-    // Exactly at the limit does not trip; one ms past it does.
-    const at_limit: i64 = @intCast(now - 600_000 * std.time.ns_per_ms);
-    try testing.expect(!transcriptStalled(.busy, at_limit, now, 600_000));
-    const past_limit: i64 = @intCast(now - 600_001 * std.time.ns_per_ms);
-    try testing.expect(transcriptStalled(.busy, past_limit, now, 600_000));
-}
-
-test "transcriptStalled: fresh baseline or no baseline does not trip" {
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    // Reset on dispatch or on a tailer advance.
-    try testing.expect(!transcriptStalled(.busy, @intCast(now), now, 600_000));
-    const recent: i64 = @intCast(now - 599_000 * std.time.ns_per_ms);
-    try testing.expect(!transcriptStalled(.busy, recent, now, 600_000));
-    try testing.expect(!transcriptStalled(.busy, 0, now, 600_000));
-}
-
-test "transcriptStalled: idle/waiting never trip, timeout 0 disables" {
-    const now: i128 = 10_000_000 * std.time.ns_per_ms;
-    const ancient: i64 = @intCast(now - 7_200_000 * std.time.ns_per_ms);
-    try testing.expect(!transcriptStalled(.idle, ancient, now, 600_000));
-    try testing.expect(!transcriptStalled(.waiting_for_ready, ancient, now, 600_000));
-    try testing.expect(!transcriptStalled(.busy, ancient, now, 0));
-}
-
-test "transcriptStalled: spinner output cannot reset it" {
-    // The PTY watchdog sees fresh output; the transcript watchdog still trips.
-    const now: i128 = 1_000_000 * std.time.ns_per_ms;
-    const fresh_pty: i64 = @intCast(now - 100 * std.time.ns_per_ms);
-    const stale_transcript: i64 = @intCast(now - 601_000 * std.time.ns_per_ms);
-    try testing.expect(!idleTimedOut(.busy, fresh_pty, now, 180_000));
-    try testing.expect(transcriptStalled(.busy, stale_transcript, now, 600_000));
-}
-
-test "isInterruptFrame: interrupt frame recognized" {
-    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
-    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\",\"id\":3}"));
-}
-
-test "isInterruptFrame: other frames and malformed input return false" {
-    const user = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"interrupt\"}}";
-    try testing.expect(!isInterruptFrame(testing.allocator, user));
-    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":\"ping\"}"));
-    try testing.expect(!isInterruptFrame(testing.allocator, "{\"type\":7}"));
-    try testing.expect(!isInterruptFrame(testing.allocator, "{\"interrupt\":true}"));
-    try testing.expect(!isInterruptFrame(testing.allocator, "\"interrupt\""));
-    try testing.expect(!isInterruptFrame(testing.allocator, "not json"));
-    try testing.expect(!isInterruptFrame(testing.allocator, ""));
-    // A ping is not an interrupt and an interrupt is not a ping or a prompt.
-    try testing.expect(!isPingFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
-    try testing.expectEqual(@as(?[]u8, null), try parseUserMessageContent(testing.allocator, "{\"type\":\"interrupt\"}"));
-}
-
-test "Stop ownership requires acknowledgment even after a successful turn" {
-    try testing.expect(!stopBelongsToTurn(.idle, true));
-    try testing.expect(!stopBelongsToTurn(.busy, false));
-    try testing.expect(stopBelongsToTurn(.busy, true));
-}
-
-test "elapsedMs: clamps a start in the future to 0" {
-    try testing.expectEqual(@as(u64, 1500), elapsedMs(0, 1500 * std.time.ns_per_ms));
-    try testing.expectEqual(@as(u64, 0), elapsedMs(10, 5));
-    try testing.expectEqual(@as(u64, 0), elapsedMs(7, 7));
-    // Regression: extreme clock values overflowed the i128 subtraction.
-    try testing.expectEqual(std.math.maxInt(u64), elapsedMs(std.math.minInt(i128), std.math.maxInt(i128)));
-    try testing.expectEqual(std.math.maxInt(u64), elapsedMs(0, std.math.maxInt(i128)));
-}
 
 test "Options: hardening defaults match the contract" {
     const opts: Options = .{};
@@ -1448,76 +908,23 @@ test "toDriverOptions: passes extra hooks and extra settings" {
     try testing.expectEqual(@as(usize, 0), toDriverOptions(.{}).extra_hooks.len);
 }
 
-test "stdin rejects malformed and mixed content once without completing a turn" {
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    for ([_][]const u8{ "", "\r", "   \t\r" }) |line| {
-        try testing.expect(try readInputFrame(testing.allocator, &out.writer, line) == null);
-    }
-    try testing.expectEqual(0, out.written().len);
-    for ([_][]const u8{
-        "{", "{}", "{\"type\":\"user\"}",
-        \\{"type":"user","message":{"role":"assistant","content":"wrong role"}}
-        ,
-        \\{"type":"user","message":{"content":[{"type":"text","text":"a"},{"type":"image"}]}}
-        ,
-        \\{"type":"user","message":{"content":[{"type":"text","text":"a"},{"type":"text","text":false}]}}
-        ,
-    }, [_][]const u8{ "invalid_json", "unsupported_frame_type", "invalid_user_message", "invalid_user_message", "unsupported_content_block", "unsupported_content_block" }) |line, reason| {
-        out.clearRetainingCapacity();
-        try testing.expect(try readInputFrame(testing.allocator, &out.writer, line) == null);
-        try testing.expectEqual(1, std.mem.count(u8, out.written(), "\n"));
-        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.written(), .{});
-        defer parsed.deinit();
-        try testing.expectEqualStrings("error", parsed.value.object.get("type").?.string);
-        try testing.expectEqualStrings(reason, parsed.value.object.get("error").?.string);
-    }
+test "daemon re-exports protocol and turn helpers cleanly" {
+    try testing.expect(isPingFrame(testing.allocator, "{\"type\":\"ping\"}"));
+    try testing.expect(isInterruptFrame(testing.allocator, "{\"type\":\"interrupt\"}"));
+    try testing.expect(stopBelongsToTurn(.busy, true));
+    try testing.expectEqual(@as(u64, 0), elapsedMs(10, 5));
 }
 
-test "line buffer bounds fragmented input, resynchronizes and delivers EOF remainder once" {
-    var buf: LineBuffer = .{};
-    defer buf.bytes.deinit(testing.allocator);
-    const block = try testing.allocator.alloc(u8, LineBuffer.limit);
-    defer testing.allocator.free(block);
-    @memset(block, 'a');
-    var chunk: []const u8 = block;
-    try testing.expect(try buf.next(testing.allocator, &chunk, false) == null);
-    chunk = "too long";
-    try testing.expect((try buf.next(testing.allocator, &chunk, false)).? == .oversized);
-    chunk = "discard me\nok\nlast";
-    try testing.expectEqualStrings("ok", (try buf.next(testing.allocator, &chunk, false)).?.line);
-    try testing.expect(try buf.next(testing.allocator, &chunk, false) == null);
-    try testing.expectEqualStrings("last", (try buf.next(testing.allocator, &chunk, true)).?.line);
-    try testing.expect(try buf.next(testing.allocator, &chunk, true) == null);
-    try testing.expect(buf.bytes.capacity <= LineBuffer.limit);
-}
-
-test "readFileRange returns exactly owned bytes on short reads including EOF" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "transcript", .data = "abc" });
-    const file = try tmp.dir.openFile("transcript", .{});
-    defer file.close();
-    for ([_]u64{ 1, 3 }, [_][]const u8{ "bc", "" }) |start, want| {
-        const slice = try readFileRange(testing.allocator, file, start, 300);
-        defer testing.allocator.free(slice);
-        try testing.expectEqualStrings(want, slice);
-    }
-}
-
-test "PTY trace follows debug by default and honors explicit intervals and disable" {
-    try testing.expectEqual(null, ptyTraceInterval(false, null));
-    try testing.expectEqual(@as(?i128, 60 * std.time.ns_per_s), ptyTraceInterval(true, null));
-    try testing.expectEqual(@as(?i128, std.time.ns_per_s), ptyTraceInterval(false, "1"));
-    try testing.expectEqual(null, ptyTraceInterval(true, "off"));
+test "daemon write failure exit helper maps BrokenPipe to 0" {
+    try testing.expectEqual(@as(u8, 0), protocol.writeFailureExit(error.BrokenPipe));
+    try testing.expectEqual(@as(u8, 2), protocol.writeFailureExit(error.NoSpaceLeft));
 }
 
 const fixture_relay =
-    \\stty raw -echo
-    \\[ "$1" = --settings ]
-    \\relay=$(python3 -c 'import json,shlex,sys; print(shlex.split(json.loads(sys.argv[1])["hooks"]["Stop"][0]["hooks"][0]["command"])[0])' "$2")
-    \\
-;
+    "stty raw -echo\n" ++
+    "[ \"$1\" = --settings ]\n" ++
+    "relay=$(python3 -c 'import json,shlex,sys; " ++
+    "print(shlex.split(json.loads(sys.argv[1])[\"hooks\"][\"Stop\"][0][\"hooks\"][0][\"command\"])[0])' \"$2\")\n";
 
 test "daemon reports spontaneous child exit before readiness, while idle, and during a turn" {
     const ready = fixture_relay ++
