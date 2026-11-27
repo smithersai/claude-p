@@ -26,6 +26,11 @@ export default defineConfig({
           tag: 'script',
           attrs: { type: 'module' },
           content: `
+const extractMermaidSource = (pre) => {
+  const lines = [...pre.querySelectorAll('.ec-line .code')];
+  if (lines.length > 0) return lines.map((el) => el.textContent ?? '').join('\\n');
+  return pre.innerText || pre.textContent || '';
+};
 const renderMermaid = async () => {
   const blocks = [...document.querySelectorAll('pre[data-language="mermaid"]')];
   if (blocks.length === 0) return;
@@ -35,13 +40,19 @@ const renderMermaid = async () => {
     mermaid.initialize({ startOnLoad: false, theme: isLight ? 'default' : 'dark', securityLevel: 'strict' });
     for (let i = 0; i < blocks.length; i++) {
       const pre = blocks[i];
-      const source = pre.textContent ?? '';
+      const source = extractMermaidSource(pre).trim();
       const frame = pre.closest('.expressive-code') ?? pre;
-      const { svg } = await mermaid.render('cp-mermaid-' + i + '-' + Date.now(), source);
-      const wrap = document.createElement('figure');
-      wrap.className = 'cp-diagram cp-mermaid';
-      wrap.innerHTML = svg;
-      frame.replaceWith(wrap);
+      const id = 'cp-mermaid-' + i + '-' + Date.now();
+      try {
+        const { svg } = await mermaid.render(id, source);
+        const wrap = document.createElement('figure');
+        wrap.className = 'cp-diagram cp-mermaid';
+        wrap.innerHTML = svg;
+        frame.replaceWith(wrap);
+      } catch (innerErr) {
+        document.getElementById('d' + id)?.remove();
+        console.warn('mermaid diagram error:', innerErr);
+      }
     }
   } catch (err) {
     console.warn('mermaid render skipped:', err);
