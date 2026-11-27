@@ -31,6 +31,8 @@ const escapes = [_][]const u8{
 };
 
 fn checkStrip(_: void, raw: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (raw.len == 0) return;
     const allocator = testing.allocator;
     const clean = try driver.stripCsi(allocator, raw);
     defer allocator.free(clean);
@@ -98,6 +100,8 @@ const kinds = [_]driver.DialogKind{ .trust, .bypass_permissions, .dev_channels }
 const retry: i64 = driver.dialog_retry_ms;
 
 fn checkDialogBytes(_: void, input: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     // The handler keeps the most recent raw bytes and independently strips the
     // bytes received since the last key, even if that boundary splits an ESC.
     const raw = input[input.len -| driver.recent_capacity..];
@@ -476,6 +480,8 @@ test "bypass and dev-channel dialogs are approved only by the caller's own flags
 }
 
 fn checkFailureScreen(_: void, raw: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (raw.len == 0) return;
     var out: [driver.failure_screen_max_bytes]u8 = undefined;
     const screen = driver.formatFailureScreen(&out, raw);
     try testing.expect(screen.len <= driver.failure_screen_max_bytes);
@@ -504,7 +510,7 @@ test "fuzz failure screens stay bounded, printable, and free of blank lines" {
         "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\n",
         "\xe2\x9d\xaf No, exit\r\n  Yes, I trust this folder\r\n",
         "\x1b]0;title\x07text\x1b[",
-        "\x1b",
+        "\x1b[",
         "\xff\xfe\x80",
     } });
 }

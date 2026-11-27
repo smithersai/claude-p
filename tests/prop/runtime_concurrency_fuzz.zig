@@ -57,6 +57,8 @@ const Cursor = struct {
 // ============================================================================
 
 fn fuzzDriverHelpers(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
     const accepted = (cur.byte() & 1) != 0;
     const injections = cur.int(u32);

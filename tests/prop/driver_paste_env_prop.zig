@@ -328,6 +328,8 @@ test "prop: paste sink errors propagate from any write index" {
 }
 
 fn fuzzPaste(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var sc: Scratch = .{};
     defer sc.deinit();
     try checkPaste(&sc, input);
@@ -626,6 +628,8 @@ test "prop: isPromptTruncated detects genuine truncation of prompts over 64 byte
 }
 
 fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const split: usize = if (input.len <= 1)
         input.len
     else
@@ -668,8 +672,8 @@ fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
 test "fuzz: isPromptTruncated(expected, received)" {
     const long = "The quick brown fox jumps over the lazy dog, then writes a property test. " ** 3;
     try testing.fuzz({}, fuzzTruncated, .{ .corpus = &.{
-        "\x00",
-        "\xff",
+        "\x00\x00",
+        "\xff\xff",
         "\x80abcabc",
         "\xe0" ++ long ++ long[0..40],
         "\xf0" ++ long ++ "[Pasted text #1 +12 lines]",
@@ -882,6 +886,8 @@ test "prop: shouldStripChildEnv strips exactly the nesting markers" {
 }
 
 fn fuzzStripName(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     try checkStripName(input);
     // Any name glued behind a marker prefix is stripped; glued behind an auth
     // var name it is judged on its own text.
@@ -1066,6 +1072,8 @@ test "prop: buildChildEnvFromMap never leaks under allocation failure" {
 
 /// Input is `NAME=VALUE` lines; the first line is the FIFO path.
 fn fuzzChildEnv(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const a = testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(a);
     defer arena_state.deinit();
@@ -1255,6 +1263,8 @@ test "prop: shellQuoteArgv output is re-read byte-for-byte by the real /bin/sh" 
 
 /// Input is NUL-separated argv words.
 fn fuzzShellQuote(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var words: [64][]const u8 = undefined;
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, input, 0);
@@ -1269,8 +1279,8 @@ fn fuzzShellQuote(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: shellQuoteArgv POSIX round trip" {
     try testing.fuzz({}, fuzzShellQuote, .{ .corpus = &.{
-        "\x00",
-        "'",
+        "\x00\x00",
+        "''",
         "''\x00'\\''\x00\\",
         "claude\x00--settings\x00{\"hooks\":{\"Stop\":[{\"command\":\"sh '/tmp/a b/hook.sh'\"}]}}",
         "$(rm -rf /)\x00`id`\x00${IFS}\x00;\x00&&\x00|",
@@ -1417,6 +1427,8 @@ test "prop: buildArgv matches the flag model and never leaks over 1500 random op
 
 /// Input: 4 bytes option bitmask, 4 bytes max_turns, then NUL-separated words.
 fn fuzzBuildArgv(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

@@ -50,6 +50,8 @@ const Cursor = struct {
 // ============================================================================
 
 fn fuzzIsForwardable(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const fwd = try stream.isForwardable(testing.allocator, input);
 
     // Independent reference oracle using strict std.json parse.
@@ -119,6 +121,8 @@ fn expectedForwardedFromSlice(allocator: std.mem.Allocator, content: []const u8)
 }
 
 fn fuzzStreamTailer(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
 
     var tmp = testing.tmpDir(.{});
@@ -214,6 +218,8 @@ test "fuzz: stream.Tailer chunked pump, reopenAt, and flushPartial match referen
 // ============================================================================
 
 fn fuzzTranscriptOptionsAndEmit(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     // Parse with both keep_replay=true and keep_replay=false and confirm identical summaries
     // (except jsonl_replay which is empty when keep_replay=false).
     const res_keep = transcript.parseWithOptions(testing.allocator, input, .{ .keep_replay = true });
@@ -275,6 +281,8 @@ test "fuzz: transcript.parseWithOptions + emitJson strict RFC-8259 round-trip" {
 // ============================================================================
 
 fn fuzzTranscriptOffsetFile(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
     const keep_replay = (cur.byte() & 1) != 0;
     const raw_off = cur.int(u16);

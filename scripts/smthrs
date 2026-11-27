@@ -1,0 +1,35 @@
+#!/bin/sh
+# Runs the Smithers CLI (`smthrs`) against this repository's
+# .smithers/WORKSPACE.ts build graph and factory projections.
+#
+# Usage:
+#   scripts/smthrs ci //...
+#   scripts/smthrs affected
+#   scripts/smthrs targets
+#   scripts/smthrs explain //.smithers:test-unit
+#   scripts/smthrs target //.smithers:factory-write --write
+#   scripts/smthrs run //.smithers:test-e2e
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+if [ -n "${SMTHRS_BIN:-}" ] && [ -x "$SMTHRS_BIN" ]; then
+  exec "$SMTHRS_BIN" "$@"
+fi
+
+if command -v smthrs >/dev/null 2>&1; then
+  exec smthrs "$@"
+fi
+
+for candidate in \
+  "$root/../smithers-mvp-deploy/node_modules/.bin/smthrs" \
+  "$root/../smithers/node_modules/.bin/smthrs"
+do
+  if [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+echo "error: smthrs not found on PATH or sibling checkouts (set SMTHRS_BIN or run npx --package=@smthrs/cli smthrs)" >&2
+exit 1

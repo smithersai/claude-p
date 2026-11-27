@@ -203,6 +203,8 @@ fn fuzzText(alloc: Allocator, raw: []const u8) ![]u8 {
 }
 
 fn fuzzEmit(_: void, input: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const alloc = testing.allocator;
     var fields = std.mem.splitScalar(u8, input, 0xff);
     var text = [_][]u8{&.{}} ** 4;
@@ -233,7 +235,7 @@ fn fuzzEmit(_: void, input: []const u8) !void {
 
 test "fuzz result emitters and format dispatch" {
     try testing.fuzz({}, fuzzEmit, .{ .corpus = &.{
-        "\n",
+        "\n\n",
         "👩‍💻\x00\r\n\xffid\\\"\xffinterrupted\xff\x01\t\xff" ++ "\xff" ** 64,
         "line\n\n\xff\xfferror\xff\x00\xff\x01",
         "\xc0\x80\xff🛰️\xffInterrupted\xff\r\n",
@@ -314,6 +316,8 @@ test "stdin classifier and content extraction over 3000 random frames" {
 }
 
 fn fuzzFrames(_: void, input: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     try checkFrame(testing.allocator, input, .unknown, "", "");
     var parts = std.mem.splitScalar(u8, input, 0xff);
     const a = try fuzzText(testing.allocator, parts.next().?);
@@ -389,6 +393,8 @@ test "busy watchdog gates, skew, and strict millisecond boundaries" {
 }
 
 fn fuzzWatchdogs(_: void, input: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var bytes = [_]u8{0} ** 32;
     const n = @min(input.len, bytes.len);
     @memcpy(bytes[0..n], input[0..n]);

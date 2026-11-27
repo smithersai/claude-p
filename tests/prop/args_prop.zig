@@ -768,6 +768,8 @@ fn splitNul(allocator: std.mem.Allocator, input: []const u8) ![]const []const u8
 }
 
 fn fuzzParseOne(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const argv = try splitNul(testing.allocator, input);
     defer testing.allocator.free(argv);
     try checkUniversal(argv, input.len);
@@ -1558,6 +1560,8 @@ test "prop: --extra-hook splits on the first `=` and rejects malformed values" {
 }
 
 fn fuzzExtraHookOne(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var prng = std.Random.DefaultPrng.init(0);
@@ -1567,10 +1571,10 @@ fn fuzzExtraHookOne(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: --extra-hook value matches the first-`=` split model" {
     try testing.fuzz({}, fuzzExtraHookOne, .{ .corpus = &.{
-        "=",       "==",       "Stop",         "Stop=",
-        "=echo hi", "Stop=echo hi", "PostToolUse=env A=1 true",
-        "a=b=c=d", "a==",      "\x00=\x00",    "Stop=\n",
-        "--=--",   "=\xff",    "\xff=\xff",    "Stop =x",
+        "= ",       "==",           "Stop",                     "Stop=",
+        "=echo hi", "Stop=echo hi", "PostToolUse=env A=1 true", "a=b=c=d",
+        "a==",      "\x00=\x00",    "Stop=\n",                  "--=--",
+        "=\xff",    "\xff=\xff",    "Stop =x",
     } });
 }
 
@@ -1802,6 +1806,8 @@ test "prop: OutputFormat.fromString accepts exactly text|json|stream-json" {
 }
 
 fn fuzzFormatOne(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try checkFormat(arena.allocator(), input);
@@ -1809,9 +1815,10 @@ fn fuzzFormatOne(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: OutputFormat.fromString exact-match model and parse agreement" {
     try testing.fuzz({}, fuzzFormatOne, .{ .corpus = &.{
-        "text",       "json",         "stream-json", "stream_json",
-        "Text",       "JSON",         "stream-json ", " json",       "json\x00",
-        "streamjson", "stream-jsonl", "tex",          "yaml",        "--verbose",
-        "-",          "--",           "\xff",         "text\n",      "stream-",
+        "text",     "json",       "stream-json",  "stream_json",
+        "Text",     "JSON",       "stream-json ", " json",
+        "json\x00", "streamjson", "stream-jsonl", "tex",
+        "yaml",     "--verbose",  "- ",           "--",
+        "\xff\xff", "text\n",     "stream-",
     } });
 }

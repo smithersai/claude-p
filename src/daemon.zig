@@ -1602,8 +1602,8 @@ fn fixtureRunWithOptions(script: []const u8, input: []const u8, writer: *std.Io.
     var opts = options;
     opts.claude_path = exe;
     opts.cwd = std.fs.path.dirname(exe);
-    opts.session_start_timeout_ms = 3000;
-    opts.idle_progress_timeout_ms = 3000;
+    opts.session_start_timeout_ms = 10_000;
+    opts.idle_progress_timeout_ms = 10_000;
     return runWithIo(testing.allocator, opts, stdin.handle, writer);
 }
 

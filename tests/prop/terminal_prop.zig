@@ -36,6 +36,8 @@ fn expectExactReplies(input: []const u8, output: []const u8) !void {
 }
 
 fn fuzzOne(_: void, input: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var output: Bytes = .empty;
     defer output.deinit(testing.allocator);
     try respond(testing.allocator, input, &output);
@@ -47,7 +49,7 @@ const all_requests = "\x1b[c\x1b[0c\x1b[>c\x1b[>0c\x1b[6n\x1b[>q\x1b[>0q\x1b[18t
 test "terminal fuzz emits exactly the reply tokens requested by arbitrary bytes" {
     try testing.fuzz({}, fuzzOne, .{ .corpus = &.{
         "\x00\xff\x80\x9b6n",
-        "\x1b",
+        "\x1b\x1b",
         "\x1b[",
         "\x1b[>",
         "\x1b[?",

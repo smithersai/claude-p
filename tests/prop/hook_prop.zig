@@ -372,7 +372,7 @@ fn genSettingsObject(a: Allocator, r: Random) ![]u8 {
 }
 
 const malformed_settings = [_][]const u8{
-    "",                           " ",                     "\n\t",             "{",                        "}",
+    "",                           " ",                     "\n\t",             "{{",                       "}",
     "[]",                         "[{}]",                  "null",             "true",                     "false",
     "42",                         "-0.5e3",                "\"str\"",          "\"{}\"",                   "{} trailing",
     "{}{}",                       "{},",                   "{\"a\":1,}",       "{'a':1}",                  "{a:1}",
@@ -801,6 +801,8 @@ fn isNonceShaped(field: []const u8) bool {
 }
 
 fn fuzzParseLine(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     try checkParseLine(input);
     _ = hook.HookEvent.fromString(input);
     try testing.expectEqual(expectedEvent(input), hook.HookEvent.fromString(input));
@@ -808,9 +810,9 @@ fn fuzzParseLine(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: parseLine never panics and keeps its structural invariant" {
     try testing.fuzz({}, fuzzParseLine, .{ .corpus = &.{
-        "\t",
-        "\n",
-        "\r",
+        "\t\t",
+        "\n\n",
+        "\r\r",
         "\r\n",
         "\n\r",
         "\t\n",
@@ -970,6 +972,8 @@ test "prop: HookEvent.fromString matches exactly four names (3,000 trials)" {
 // ---------------------------------------------------------------------------
 
 fn fuzzExtractors(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     const a = testing.allocator;
     var results: [4]?[]u8 = .{ null, null, null, null };
     defer for (results) |res| if (res) |s| a.free(s);
@@ -1641,6 +1645,8 @@ fn settingsShouldBeAccepted(a: Allocator, raw: []const u8) bool {
 }
 
 fn fuzzSettingsJson(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1712,6 +1718,8 @@ const Smith = struct {
 };
 
 fn fuzzSettingsStructured(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

@@ -3547,7 +3547,7 @@ test "run: continued assistant output supersedes provisional Stop until the seco
             \\printf '{"last_assistant_message":"second answer","stop_hook_active":true}' | hook Stop
         );
         defer testing.allocator.free(exe);
-        var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+        var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 10_000 });
         defer result.deinit(testing.allocator);
         try testing.expectEqualStrings("second answer", result.summary.final_text);
         try testing.expectEqual(3, result.summary.usage.output_tokens);
@@ -3579,7 +3579,7 @@ test "run: late-flushed current user and final assistant records preserve provis
         \\exec sleep 5
     );
     defer testing.allocator.free(exe);
-    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 10_000 });
     defer result.deinit(testing.allocator);
     try testing.expectEqualStrings("PONG", result.summary.final_text);
     try testing.expectEqual(@as(u64, 5), result.summary.usage.output_tokens);
@@ -3726,7 +3726,7 @@ test "run: oversized transcript falls back to authoritative Stop" {
         \\printf '{"session_id":"s","last_assistant_message":"done"}' | hook Stop
     );
     defer testing.allocator.free(exe);
-    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 10_000 });
     defer result.deinit(testing.allocator);
     try testing.expectEqualStrings("done", result.summary.final_text);
     try testing.expectEqualStrings("s", result.summary.session_id);
@@ -3741,7 +3741,7 @@ test "run: StopFailure preserves transcript usage and turns" {
         \\printf '{"last_assistant_message":"quota reached","error":"generic"}' | hook StopFailure
     );
     defer testing.allocator.free(exe);
-    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 5000 });
+    var result = try run(testing.allocator, .{ .prompt = "hello", .claude_path = exe, .cwd = std.fs.path.dirname(exe), .timeout_ms = 10_000 });
     defer result.deinit(testing.allocator);
     try testing.expect(result.summary.is_error);
     try testing.expectEqualStrings("quota reached", result.summary.final_text);

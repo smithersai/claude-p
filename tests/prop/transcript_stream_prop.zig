@@ -33,6 +33,8 @@ fn checkRawParse(bytes: []const u8) !void {
 }
 
 fn fuzzParse(_: void, bytes: []const u8) !void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (bytes.len == 0) return;
     try checkRawParse(bytes);
     // Force a successful parse even when the entire fuzz input was garbage.
     const input = try std.mem.concat(alloc, u8, &.{ bytes, "\n{\"type\":\"result\",\"result\":\"sentinel\"}" });

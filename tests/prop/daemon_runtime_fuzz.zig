@@ -49,6 +49,8 @@ const Cursor = struct {
 // ============================================================================
 
 fn fuzzReadFileRange(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
     const start_raw = cur.int(u16);
     const end_raw = cur.int(u16);
@@ -123,6 +125,8 @@ test "prop: daemon.readFileRange clamps past EOF and leaks nothing on OOM" {
 // ============================================================================
 
 fn fuzzElapsedMs(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
     const start_ns = cur.int(i128);
     const now_ns = cur.int(i128);
@@ -179,6 +183,8 @@ fn expectPtyTrace(debug: bool, input: ?[]const u8) !void {
 }
 
 fn fuzzPtyTrace(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     try expectPtyTrace(false, input);
     try expectPtyTrace(true, input);
     try expectPtyTrace(false, null);
@@ -189,13 +195,13 @@ test "fuzz: daemon.ptyTraceInterval total over arbitrary env values" {
     try testing.fuzz({}, fuzzPtyTrace, .{
         .corpus = &.{
             "   \t\r\n ",
-            "0",
             "00",
+            " 0",
             "off",
             "OFF",
             "False",
             "NO",
-            "1",
+            "01",
             "60",
             "4294967295",
             "4294967296",
@@ -212,6 +218,8 @@ test "fuzz: daemon.ptyTraceInterval total over arbitrary env values" {
 // ============================================================================
 
 fn fuzzDaemonEmitters(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     // 1. emitSystemInit always emits a single NDJSON line that round-trips exact UTF-8 session_id.
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -278,6 +286,8 @@ test "fuzz: daemon.emitSystemInit, emitPong, and toDriverOptions" {
 // ============================================================================
 
 fn fuzzDaemonStateMachine(_: void, input: []const u8) anyerror!void {
+    // Zig 0.15.2 lib/fuzzer.zig crashes if an empty slice overwrites a corpus slot.
+    if (input.len == 0) return;
     var cur: Cursor = .{ .data = input };
 
     var state: daemon.State = .waiting_for_ready;
