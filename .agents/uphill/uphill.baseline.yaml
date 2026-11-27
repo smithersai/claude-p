@@ -4,71 +4,139 @@
 footprint:
   module-prod-lines:
     "*": { target: 500 }
-    src/args.zig: { baseline: 665 }
-    src/daemon.zig: { baseline: 1332 }
-    src/driver.zig: { baseline: 2545 }
-    src/emit.zig: { baseline: 224 }
-    src/hook.zig: { baseline: 606 }
-    src/main.zig: { baseline: 601 }
-    src/root.zig: { baseline: 30 }
-    src/stream.zig: { baseline: 163 }
-    src/terminal.zig: { baseline: 173 }
-    src/transcript.zig: { baseline: 417 }
+    src/args.zig: { baseline: 399 }
+    src/args/flags.zig: { baseline: 171 }
+    src/daemon.zig: { baseline: 276 }
+    src/daemon/paste.zig: { baseline: 86 }
+    src/daemon/protocol.zig: { baseline: 351 }
+    src/daemon/queue.zig: { baseline: 150 }
+    src/daemon/runtime.zig: { baseline: 529 }
+    src/daemon/turn.zig: { baseline: 341 }
+    src/driver.zig: { baseline: 369 }
+    src/driver/diag.zig: { baseline: 90 }
+    src/driver/dialog.zig: { baseline: 358 }
+    src/driver/env.zig: { baseline: 290 }
+    src/driver/finalizer.zig: { baseline: 197 }
+    src/driver/paste.zig: { baseline: 147 }
+    src/driver/runtime.zig: { baseline: 382 }
+    src/driver/session.zig: { baseline: 388 }
+    src/driver/spawn.zig: { baseline: 218 }
+    src/driver/stop_scan.zig: { baseline: 302 }
+    src/driver/watchdog.zig: { baseline: 247 }
+    src/emit.zig: { baseline: 290 }
+    src/hook.zig: { baseline: 424 }
+    src/hook/settings.zig: { baseline: 215 }
+    src/main.zig: { baseline: 389 }
+    src/root.zig: { baseline: 48 }
+    src/stdin.zig: { baseline: 164 }
+    src/stream.zig: { baseline: 190 }
+    src/terminal.zig: { baseline: 193 }
+    src/transcript.zig: { baseline: 343 }
+    src/transcript/file.zig: { baseline: 170 }
   module-bytes:
     "*": { target: 20kB }
     bin/claude-p.js: { baseline: 1860B }
     scripts/install.js: { baseline: 24140B }
     scripts/publish.mjs: { baseline: 28180B }
-    src/args.zig: { baseline: 60780B }
-    src/daemon.zig: { baseline: 93580B }
-    src/driver.zig: { baseline: 171.6kB }
-    src/emit.zig: { baseline: 14370B }
-    src/hook.zig: { baseline: 43.1kB }
-    src/main.zig: { baseline: 42270B }
-    src/root.zig: { baseline: 1170B }
-    src/stream.zig: { baseline: 11740B }
-    src/terminal.zig: { baseline: 10330B }
-    src/transcript.zig: { baseline: 25.4kB }
+    src/args.zig: { baseline: 21960B }
+    src/args/flags.zig: { baseline: 10890B }
+    src/daemon.zig: { baseline: 17210B }
+    src/daemon/paste.zig: { baseline: 10030B }
+    src/daemon/protocol.zig: { baseline: 21910B }
+    src/daemon/queue.zig: { baseline: 13680B }
+    src/daemon/runtime.zig: { baseline: 35710B }
+    src/daemon/turn.zig: { baseline: 23360B }
+    src/driver.zig: { baseline: 22580B }
+    src/driver/diag.zig: { baseline: 7.3kB }
+    src/driver/dialog.zig: { baseline: 19720B }
+    src/driver/env.zig: { baseline: 18990B }
+    src/driver/finalizer.zig: { baseline: 18990B }
+    src/driver/paste.zig: { baseline: 12320B }
+    src/driver/runtime.zig: { baseline: 23370B }
+    src/driver/session.zig: { baseline: 27230B }
+    src/driver/spawn.zig: { baseline: 15740B }
+    src/driver/stop_scan.zig: { baseline: 19040B }
+    src/driver/watchdog.zig: { baseline: 14230B }
+    src/emit.zig: { baseline: 23370B }
+    src/hook.zig: { baseline: 24340B }
+    src/hook/settings.zig: { baseline: 15920B }
+    src/main.zig: { baseline: 22.5kB }
+    src/root.zig: { baseline: 2330B }
+    src/stdin.zig: { baseline: 13360B }
+    src/stream.zig: { baseline: 21430B }
+    src/terminal.zig: { baseline: 13930B }
+    src/transcript.zig: { baseline: 24kB }
+    src/transcript/file.zig: { baseline: 11480B }
   zig-dependencies: { baseline: 1 }
   npm-dependencies: { baseline: 0 }
 
 style:
   zig-fmt:
     "*": { baseline: pass }
-    tests/prop/args_prop.zig: { baseline: fail }
-    tests/prop/driver_dialog_watchdog_prop.zig: { baseline: fail }
-    tests/prop/driver_paste_env_prop.zig: { baseline: fail }
-    tests/prop/hook_prop.zig: { baseline: fail }
   max-fn-lines:
     "*": { target: 70 }
-    src/args.zig: { baseline: 147 }
-    src/daemon.zig: { baseline: 465 }
-    src/driver.zig: { baseline: 514 }
-    src/emit.zig: { baseline: 49 }
-    src/hook.zig: { baseline: 53 }
-    src/main.zig: { baseline: 159 }
-    src/root.zig: { baseline: 3 }
-    src/stream.zig: { baseline: 51 }
-    src/terminal.zig: { baseline: 45 }
-    src/transcript.zig: { baseline: 208 }
+    src/args.zig: { baseline: 49 }
+    src/args/flags.zig: { baseline: 10 }
+    src/daemon.zig: { baseline: 72 }
+    src/daemon/paste.zig: { baseline: 25 }
+    src/daemon/protocol.zig: { baseline: 37 }
+    src/daemon/queue.zig: { baseline: 31 }
+    src/daemon/runtime.zig: { baseline: 56 }
+    src/daemon/turn.zig: { baseline: 56 }
+    src/driver.zig: { baseline: 64 }
+    src/driver/diag.zig: { baseline: 44 }
+    src/driver/dialog.zig: { baseline: 44 }
+    src/driver/env.zig: { baseline: 36 }
+    src/driver/finalizer.zig: { baseline: 37 }
+    src/driver/paste.zig: { baseline: 27 }
+    src/driver/runtime.zig: { baseline: 59 }
+    src/driver/session.zig: { baseline: 43 }
+    src/driver/spawn.zig: { baseline: 22 }
+    src/driver/stop_scan.zig: { baseline: 36 }
+    src/driver/watchdog.zig: { baseline: 33 }
+    src/emit.zig: { baseline: 51 }
+    src/hook.zig: { baseline: 55 }
+    src/hook/settings.zig: { baseline: 31 }
+    src/main.zig: { baseline: 51 }
+    src/root.zig: { baseline: 4 }
+    src/stdin.zig: { baseline: 39 }
+    src/stream.zig: { baseline: 53 }
+    src/terminal.zig: { baseline: 47 }
+    src/transcript.zig: { baseline: 36 }
+    src/transcript/file.zig: { baseline: 15 }
   line-length:
-    "*": { baseline: fail }
-    src/emit.zig: { baseline: pass }
-    src/root.zig: { baseline: pass }
-    src/stream.zig: { baseline: pass }
-    src/terminal.zig: { baseline: pass }
+    "*": { baseline: pass }
   assert-density:
     "*": { target: 15 }
-    src/args.zig: { baseline: 0 }
-    src/daemon.zig: { baseline: 0 }
-    src/driver.zig: { baseline: 0 }
-    src/emit.zig: { baseline: 0 }
-    src/hook.zig: { baseline: 0 }
-    src/main.zig: { baseline: 0 }
-    src/root.zig: { baseline: 0 }
-    src/stream.zig: { baseline: 0 }
-    src/terminal.zig: { baseline: 0 }
-    src/transcript.zig: { baseline: 0 }
+    src/args.zig: { baseline: 18 }
+    src/args/flags.zig: { baseline: 18 }
+    src/daemon.zig: { baseline: 18 }
+    src/daemon/paste.zig: { baseline: 35 }
+    src/daemon/protocol.zig: { baseline: 31 }
+    src/daemon/queue.zig: { baseline: 33 }
+    src/daemon/runtime.zig: { baseline: 21 }
+    src/daemon/turn.zig: { baseline: 23 }
+    src/driver.zig: { baseline: 16 }
+    src/driver/diag.zig: { baseline: 33 }
+    src/driver/dialog.zig: { baseline: 17 }
+    src/driver/env.zig: { baseline: 10 }
+    src/driver/finalizer.zig: { baseline: 20 }
+    src/driver/paste.zig: { baseline: 20 }
+    src/driver/runtime.zig: { baseline: 18 }
+    src/driver/session.zig: { baseline: 28 }
+    src/driver/spawn.zig: { baseline: 28 }
+    src/driver/stop_scan.zig: { baseline: 17 }
+    src/driver/watchdog.zig: { baseline: 20 }
+    src/emit.zig: { baseline: 21 }
+    src/hook.zig: { baseline: 19 }
+    src/hook/settings.zig: { baseline: 28 }
+    src/main.zig: { baseline: 21 }
+    src/root.zig: { baseline: 21 }
+    src/stdin.zig: { baseline: 37 }
+    src/stream.zig: { baseline: 37 }
+    src/terminal.zig: { baseline: 26 }
+    src/transcript.zig: { baseline: 9 }
+    src/transcript/file.zig: { baseline: 35 }
 
 correctness:
   version-lockstep: { baseline: pass }
@@ -77,15 +145,8 @@ correctness:
   factory-projections: { baseline: pass }
   no-panic:
     "*": { baseline: pass }
-    src/driver.zig: { baseline: fail }
-    src/hook.zig: { baseline: fail }
-    src/terminal.zig: { baseline: fail }
   no-empty-catch:
     "*": { baseline: pass }
-    src/daemon.zig: { baseline: fail }
-    src/driver.zig: { baseline: fail }
-    src/hook.zig: { baseline: fail }
-    src/main.zig: { baseline: fail }
   no-todo:
     "*": { baseline: pass }
 
@@ -94,32 +155,78 @@ testing:
     "*": { baseline: pass }
   unit-tests:
     "*": { target: 20 }
-    src/args.zig: { baseline: 57 }
-    src/daemon.zig: { baseline: 43 }
-    src/driver.zig: { baseline: 54 }
-    src/emit.zig: { baseline: 10 }
-    src/hook.zig: { baseline: 28 }
+    src/args.zig: { baseline: 23 }
+    src/args/flags.zig: { baseline: 20 }
+    src/daemon.zig: { baseline: 20 }
+    src/daemon/paste.zig: { baseline: 20 }
+    src/daemon/protocol.zig: { baseline: 21 }
+    src/daemon/queue.zig: { baseline: 20 }
+    src/daemon/runtime.zig: { baseline: 20 }
+    src/daemon/turn.zig: { baseline: 20 }
+    src/driver.zig: { baseline: 20 }
+    src/driver/diag.zig: { baseline: 20 }
+    src/driver/dialog.zig: { baseline: 20 }
+    src/driver/env.zig: { baseline: 21 }
+    src/driver/finalizer.zig: { baseline: 20 }
+    src/driver/paste.zig: { baseline: 20 }
+    src/driver/runtime.zig: { baseline: 20 }
+    src/driver/session.zig: { baseline: 20 }
+    src/driver/spawn.zig: { baseline: 20 }
+    src/driver/stop_scan.zig: { baseline: 20 }
+    src/driver/watchdog.zig: { baseline: 20 }
+    src/emit.zig: { baseline: 20 }
+    src/hook.zig: { baseline: 20 }
+    src/hook/settings.zig: { baseline: 20 }
     src/main.zig: { baseline: 20 }
-    src/stream.zig: { baseline: 6 }
-    src/terminal.zig: { baseline: 10 }
-    src/transcript.zig: { baseline: 16 }
+    src/stdin.zig: { baseline: 20 }
+    src/stream.zig: { baseline: 21 }
+    src/terminal.zig: { baseline: 21 }
+    src/transcript.zig: { baseline: 21 }
+    src/transcript/file.zig: { baseline: 20 }
   prop-fuzz-coverage:
     "*": { baseline: pass }
 
 documentation:
   pub-doc-coverage:
     "*": { target: 90 }
-    src/args.zig: { baseline: 67 }
-    src/daemon.zig: { baseline: 79 }
-    src/driver.zig: { baseline: 60 }
-    src/emit.zig: { baseline: 22 }
-    src/hook.zig: { baseline: 57 }
-    src/main.zig: { baseline: 17 }
-    src/root.zig: { baseline: 0 }
-    src/stream.zig: { baseline: 0 }
-    src/terminal.zig: { baseline: 60 }
-    src/transcript.zig: { baseline: 33 }
+    src/args.zig: { baseline: 100 }
+    src/args/flags.zig: { baseline: 100 }
+    src/daemon.zig: { baseline: 100 }
+    src/daemon/paste.zig: { baseline: 100 }
+    src/daemon/protocol.zig: { baseline: 100 }
+    src/daemon/queue.zig: { baseline: 100 }
+    src/daemon/runtime.zig: { baseline: 100 }
+    src/daemon/turn.zig: { baseline: 100 }
+    src/driver.zig: { baseline: 100 }
+    src/driver/diag.zig: { baseline: 100 }
+    src/driver/dialog.zig: { baseline: 100 }
+    src/driver/env.zig: { baseline: 100 }
+    src/driver/finalizer.zig: { baseline: 100 }
+    src/driver/paste.zig: { baseline: 100 }
+    src/driver/runtime.zig: { baseline: 100 }
+    src/driver/session.zig: { baseline: 100 }
+    src/driver/spawn.zig: { baseline: 100 }
+    src/driver/stop_scan.zig: { baseline: 100 }
+    src/driver/watchdog.zig: { baseline: 100 }
+    src/emit.zig: { baseline: 100 }
+    src/hook.zig: { baseline: 100 }
+    src/hook/settings.zig: { baseline: 100 }
+    src/main.zig: { baseline: 100 }
+    src/root.zig: { baseline: 100 }
+    src/stdin.zig: { baseline: 100 }
+    src/stream.zig: { baseline: 100 }
+    src/terminal.zig: { baseline: 100 }
+    src/transcript.zig: { baseline: 100 }
+    src/transcript/file.zig: { baseline: 100 }
   markdown-links:
     "*": { baseline: pass }
   docs-frontmatter:
     "*": { baseline: pass }
+
+factory:
+  remote-cache-config: { baseline: pass }
+  trust-boundaries: { baseline: pass }
+  personalized-ui: { baseline: pass }
+  wiki-freshness: { baseline: pass }
+  mythical-history: { baseline: pass }
+  mcp-sandbox-auth: { baseline: pass }

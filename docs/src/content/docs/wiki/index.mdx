@@ -33,16 +33,16 @@ Key contract truths documented in `SPEC.md`:
 
 | File | Owns |
 | --- | --- |
-| `src/main.zig` | CLI entry point, stdin composition, signal handling, and exit code mapping (`0`, `1`, `2`, `124`, `128 + sig`) |
+| `src/main.zig`, `src/stdin.zig` | CLI entry point, bounded stdin composition, signal handling, and exit code mapping (`0`, `1`, `2`, `124`, `128 + sig`) |
 | `src/root.zig` | Public Zig library facade and version constant |
-| `src/args.zig` | Flag parsing, rejected print-only flags, boolean passthrough table, and cross-flag rules |
+| `src/args.zig`, `src/args/flags.zig` | Flag parsing, rejected print-only flags, boolean passthrough table, cross-flag rules, and embedded help text |
 | `src/terminal.zig` | Stateful `DecDecoder` responding to DA1, DA2, DSR, XTVERSION, and 18t queries |
-| `src/hook.zig` | Inline `--settings` generation, FIFO setup, nonce-tagged `hook.sh`, and `--setting-json` validation |
-| `src/driver.zig` | One-shot execution, env filtering, startup dialog FSM, `PasteChunker`, and watchdogs |
-| `src/daemon.zig` | Long-lived NDJSON protocol (`user`, `ping`, `interrupt`), incremental paste, and dual watchdogs |
-| `src/transcript.zig` | Offset-scoped JSONL parser with `uuid` and `message.id` deduplication |
+| `src/hook.zig`, `src/hook/settings.zig` | Inline `--settings` generation, FIFO setup, nonce-tagged `hook.sh`, and `--setting-json` validation |
+| `src/driver.zig`, `src/driver/{spawn,env,stop_scan,watchdog,paste,dialog,diag,runtime,finalizer,session}.zig` | One-shot execution DAG: spawn and env filtering, startup dialog FSM, `PasteChunker`, provisional Stop scanner, bounded diagnostics, watchdogs, and finalizer |
+| `src/daemon.zig`, `src/daemon/{protocol,queue,paste,turn,runtime}.zig` | Long-lived NDJSON daemon DAG (`user`, `ping`, `interrupt`), bounded prompt queue, incremental `PendingPaste`, turn transcript cursor, and dual watchdogs |
+| `src/transcript.zig`, `src/transcript/file.zig` | Symlink-safe transcript opening and offset-scoped JSONL parser with `uuid` and `message.id` deduplication |
 | `src/stream.zig` | `pread`-based line-buffered tailer with 16 MiB partial-line cap |
-| `src/emit.zig` | `text`, `json`, and `stream-json` output encoders |
+| `src/emit.zig` | `text`, `json`, and `stream-json` output encoders and error helpers |
 
 ## Related Wiki Pages
 

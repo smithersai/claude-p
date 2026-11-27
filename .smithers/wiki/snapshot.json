@@ -9,13 +9,13 @@
       "title": "System Overview and World Model",
       "kind": "overview",
       "document": ".smithers/wiki/pages/index.md",
-      "sha256": "296ba6ecc592ae716cd7af67bb14208202823da6e5da413054062954241576df",
+      "sha256": "0b618790ad90ea1013030de6c37e0f8b95bd33bc37f73fd5d6ec60e8ae7de4c5",
       "inputs": {
         "README.md": "94a1deb0ebfcf9f61f669f704c58d5f6c0d61d56d5c3393fc1482a0ebd83191d",
         "SPEC.md": "399ec4291c9f11cda899df734e36e8dbe90dbb5674886e08cee656bb6da4261c",
-        "CLAUDE.md": "29a9d506881b441a18e5e72ce69832ff091a40ed8fcc25759ea1378630592beb",
-        "build.zig": "1ab295800bb83ad3db0b3f5da76188ffff3bd38ca2e7805c286c46a594c42cbc",
-        "src/root.zig": "308edd5f0c4f005448d76afc5e44d5736a0bf75faa635ffdcd1cb24014f758cc"
+        "CLAUDE.md": "537fd0c6bb2ab86bceb3df710c8afd5e99fe00191188ab023791f95f79a6fd93",
+        "build.zig": "bb9b208893aca3323c7eb2e59350fb237d00d8fcb7607fb5ae0d6eef34bb5192",
+        "src/root.zig": "1286ae5de11679c4776e3d69b005064ff6767451fa9d6a19a8536f55a0c6ad67"
       }
     },
     {
@@ -26,7 +26,7 @@
       "sha256": "b1cc63bbea71ab65782aca7f9a6d896f0fc181f3ee4dfb8a054bd9803c7fbb81",
       "inputs": {
         "src/terminal.zig": "be5a1f8a4c7096582424dc5f5b8a6de3774d32871395d2d390bd0a0fa702327b",
-        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d",
+        "src/driver.zig": "e99ec1d56eec83448d9f84f9966153fe61bd1b2c281379e887a66a14db8d3811",
         "build.zig.zon": "50c91239704786a2e292aa34c0488da21da254a0cdebe9672c04518340d529cc"
       }
     },
@@ -35,10 +35,10 @@
       "title": "Startup Dialog FSM and macOS TTYHOG Safe Paste",
       "kind": "subsystem",
       "document": ".smithers/wiki/pages/startup-dialogs-and-paste.md",
-      "sha256": "5f7cc3d70f3233160aedb69c460d01c425f49edcc9f79d93f2d6589aca5670b8",
+      "sha256": "85121a19e013cac83f6f84e397d8c55f7d4395465121b7058a88e731e89227bc",
       "inputs": {
-        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d",
-        "src/args.zig": "b07656d61f0a1ea4f22b824108be9865198f67b06bc0f8d9a6500375bebc2d45"
+        "src/driver.zig": "e99ec1d56eec83448d9f84f9966153fe61bd1b2c281379e887a66a14db8d3811",
+        "src/args.zig": "be2fb9b25598468c95cce438541ffb1140dded56e1678409625e4c84874921af"
       }
     },
     {
@@ -46,10 +46,10 @@
       "title": "Nonce-Tagged Hook Relay and Ephemeral FIFO",
       "kind": "subsystem",
       "document": ".smithers/wiki/pages/hook-relay-and-fifo.md",
-      "sha256": "8319a21be452a507360bf169d64d6da2f8ee651fb9f12e0dc7a8d6c222aa745c",
+      "sha256": "9cf70b557e23849ca405e339c95edc65596e10d883f119976e581881f4a7fd28",
       "inputs": {
-        "src/hook.zig": "6f72dc555756d7560d1cf31c50c38b870e63df135a41a12f0635afc51ec00704",
-        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d"
+        "src/hook.zig": "0284e18cfc4b9c0dcda95ec1a632d55ae7a9386c2453ef4616ffa1750cf64cdf",
+        "src/driver.zig": "e99ec1d56eec83448d9f84f9966153fe61bd1b2c281379e887a66a14db8d3811"
       }
     },
     {
@@ -57,11 +57,11 @@
       "title": "Transcript Parsing, Resume Offset Isolation, and Stop Races",
       "kind": "subsystem",
       "document": ".smithers/wiki/pages/transcript-and-streaming.md",
-      "sha256": "fca2389b84f8c2a9a16d360f8b4452ed1a8655dcdc091dc706f66537146cabc3",
+      "sha256": "cf922251d783d2310805cb0b1addd90f2b7bf778a0ce86457ca7ebd4b9c04d39",
       "inputs": {
-        "src/transcript.zig": "2496888228597ae3d26b831b6ebf9c3e82eb69698b4c57683aa4559d381b67cd",
-        "src/stream.zig": "aea2c97794506bfef30dce8ff55afb0cfb65f9f2f19ccfa6c26155e2d8e12110",
-        "src/emit.zig": "bdc8d24f6ac672696ae331b216cfaba4ad37cd843e6130fdda68baeb6e72bcaa"
+        "src/transcript.zig": "3d491b267bc70b5db065dd8d2951a985a66b3af717e367fe5e74f82f23465f56",
+        "src/stream.zig": "221ce6df6710f87dcafca7ba6a7c2c408090fe5afde95b41abf4fcef8891bf30",
+        "src/emit.zig": "aa50c3a2608cab832145e2e5c2937bd0eb20a091b23fe01c8e4b4d751f041d0a"
       }
     },
     {
@@ -69,11 +69,11 @@
       "title": "Multi-Turn NDJSON Daemon Protocol",
       "kind": "subsystem",
       "document": ".smithers/wiki/pages/daemon-protocol.md",
-      "sha256": "cb608f4c05e34a001e61cc9fceab6350b5722a1ee94fb692281b9276e173c0a9",
+      "sha256": "9105654cdc90d062c914a0621157dd8025925a3969662a24aa1926769e45b89d",
       "inputs": {
-        "src/daemon.zig": "7e62a106fd4b6a48a72d4bf33bcc91dabf02dbd48613c1d591662bea9bbd03ac",
-        "src/main.zig": "38ba7d8a4987389a1ebc1c12bf13dcfd662432a3921afd469e5d918e76661ea9",
-        "src/emit.zig": "bdc8d24f6ac672696ae331b216cfaba4ad37cd843e6130fdda68baeb6e72bcaa"
+        "src/daemon.zig": "b686a5433ccea217262d575efde1a334255a35d28e89cec34e7799e1a44721aa",
+        "src/main.zig": "249732378fdcc1b58bc1c5ffd8d6910600a4dad1f70a91c3bb5e722661fa2f57",
+        "src/emit.zig": "aa50c3a2608cab832145e2e5c2937bd0eb20a091b23fe01c8e4b4d751f041d0a"
       }
     },
     {
@@ -97,7 +97,7 @@
       "document": ".smithers/wiki/pages/fuzzing-and-verification.md",
       "sha256": "13bf65547e1ad2df850a5f6f49d60ab99fd165fb3f050b9b5d7643e7b011625b",
       "inputs": {
-        "tests/prop_fuzz.zig": "52d625e5f3308f8f2f87b651b95a1469e3970a6ca7d073d7dda4c46e977df908",
+        "tests/prop_fuzz.zig": "5db1d1edccd1585bf5839c783da4f14be4d6cc122102aebbf066dd2615593a60",
         "tests/integration.zig": "fae01c73fff7b1ff4f75c510147bb62c316ab200a5d1ef2f5e42a96d36bef764",
         "scripts/fuzz-linux.sh": "4ac164d6b81d9421fddd96f83818627fb4228e574fcbaf544325d728936a8034",
         ".agents/uphill/uphill.yaml": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
@@ -129,5 +129,5 @@
       }
     }
   ],
-  "digest": "9117ba86d1df4281eabcff5f6f2e02c6f2bfbb8848c34061711b4eb9c3a1f58a"
+  "digest": "c6390674461dd525e737719530dd5279234ccd28d6b432464d959fab19f9da4e"
 }

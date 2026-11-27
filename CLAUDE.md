@@ -82,16 +82,18 @@ cd docs && npm run build
 
 | Path | Role |
 | --- | --- |
-| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, `<stdin>\n\n<PROMPT>` composition (3 s grace), signal handlers, exit-code mapping (`0`, `1`, `2`, `124`, `128 + sig`). |
+| `src/main.zig` | CLI entry point, one-shot vs `daemon` dispatch, signal handlers, exit-code mapping (`0`, `1`, `2`, `124`, `128 + sig`). |
+| `src/stdin.zig` | Bounded stdin reader (`<stdin>\n\n<PROMPT>` composition with 3 s grace). |
 | `src/root.zig` | Public Zig library facade and `version`. |
-| `src/args.zig` | Argparse (`--flag=value`, `-r`, `-c`), variadic flags, `rejected_flags`, boolean passthrough list, cross-flag rules. |
+| `src/args.zig`, `src/args/flags.zig`, `src/args_help.txt` | Argparse (`--flag=value`, `-r`, `-c`), variadic flags, `rejected_flags`, boolean passthrough list, cross-flag rules, and embedded help text. |
 | `src/terminal.zig` | Streaming `DecDecoder` DEC/XTerm responder (`DA1`, `DA2`, `DSR`, `XTVERSION`, `18t` with configured rows/cols). |
-| `src/hook.zig` | Inline `--settings` (5 relay hooks), `extra_hooks` (`--extra-hook`), `extra_settings_json` (`--setting-json`), FIFO, nonce-tagged `hook.sh`. |
-| `src/driver.zig` | One-shot lifecycle, env filter, intent-gated startup dialog state machine, `PasteChunker`, watchdog, `StopFailure`, `requestInterrupt`. |
-| `src/daemon.zig` | Long-lived NDJSON daemon (`user`, `ping`/`pong`, `interrupt`, `system/init`, `result`, `type:"error"` protocol frames, 64-prompt / 64 MiB queue, idle + transcript watchdogs, `[pty-trace]` off unless `--debug` or `CLAUDE_P_PTY_TRACE`). |
-| `src/transcript.zig` | Session JSONL parser and offset-scoped `parseFileFromOffset`; dedups records by `uuid` and usage by `message.id`. |
+| `src/hook.zig`, `src/hook/settings.zig` | Inline `--settings` (5 relay hooks), `extra_hooks` (`--extra-hook`), `extra_settings_json` (`--setting-json`), FIFO, nonce-tagged `hook.sh`. |
+| `src/driver.zig`, `src/driver/{spawn,env,stop_scan,watchdog,paste,dialog,diag,runtime,finalizer,session}.zig` | One-shot lifecycle DAG: spawn/env filtering, intent-gated startup dialog FSM, `PasteChunker`, provisional Stop scanner, watchdogs, bounded diagnostics, finalizer, and session loop. |
+| `src/daemon.zig`, `src/daemon/{protocol,queue,paste,turn,runtime}.zig` | Long-lived NDJSON daemon DAG (`user`, `ping`/`pong`, `interrupt`, `system/init`, `result`, `type:"error"` protocol frames, 64-prompt / 64 MiB queue, incremental `PendingPaste`, turn transcript cursor, idle + transcript watchdogs). |
+| `src/transcript.zig`, `src/transcript/file.zig` | Session JSONL parser, symlink-safe `openTranscriptRegularFile`, and offset-scoped `parseFileFromOffset`; dedups records by `uuid` and usage by `message.id`. |
 | `src/stream.zig` | `pread`-based line-buffered transcript `Tailer`; discards a partial line over 16 MiB. |
-| `src/emit.zig` | `text`, `json`, and `stream-json` formatters. |
+| `src/emit.zig` | `text`, `json`, and `stream-json` formatters plus protocol/error helpers. |
+| `tests/fixtures.zig`, `tests/{args_cli_tests,daemon_fixtures,driver_fixtures,main_launcher_test,module_fixtures}.zig` | Multi-module behavioral and launcher fixture suite run under `zig build test`. |
 | `tests/integration.zig` | Real-`claude` end-to-end suite (`CLAUDE_P_E2E=1`). |
 | `tests/prop_fuzz.zig`, `tests/prop/*.zig` | Property suites and `std.testing.fuzz` targets for every module, plus concurrency and mock-PTY end-to-end fuzzing. |
 | `scripts/fuzz-linux.sh` | Linux coverage-guided fuzz campaign runner (all targets, one instrumented binary). |

@@ -27,10 +27,10 @@ sequenceDiagram
 
 ## Responsiveness and Dual Watchdogs
 
-1. **Incremental paste:** `PendingPaste` in `src/daemon.zig` writes one `PasteChunker` chunk per loop tick instead of blocking, so `ping` replies within milliseconds and `interrupt` can abort mid-paste.
-2. **Dual watchdogs:** Independent idle-PTY (`--idle-timeout`) and transcript-stall (`--transcript-idle-timeout`) watchdogs monitor `.busy` turns only (never tripping while `.idle`) and exit `124` on stall.
+1. **Incremental paste:** `PendingPaste` in `src/daemon/paste.zig` (re-exported by `src/daemon/turn.zig`) writes one `PasteChunker` chunk per loop tick instead of blocking, so `ping` replies within milliseconds and `interrupt` can abort mid-paste.
+2. **Dual watchdogs:** Independent idle-PTY (`--idle-timeout`) and transcript-stall (`--transcript-idle-timeout`) watchdogs in `src/daemon/runtime.zig` monitor `.busy` turns only (never tripping while `.idle`) and exit `124` on stall.
 3. **PTY trace gating:** `[pty-trace]` stderr diagnostics remain silent unless `--debug` or `CLAUDE_P_PTY_TRACE` is set.
-4. **Shared startup logic:** `src/daemon.zig` delegates dialog handling, paste chunking, and env filtering to `src/driver.zig`.
+4. **Shared startup logic:** `src/daemon.zig` delegates dialog handling, paste chunking, and env filtering to `src/driver.zig` (backed by `src/driver/{dialog,paste,env,spawn,runtime}.zig`).
 
 ## Related Wiki Pages
 

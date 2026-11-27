@@ -5,6 +5,7 @@ const std = @import("std");
 const zmux = @import("zmux");
 const stream_mod = @import("../stream.zig");
 const terminal_mod = @import("../terminal.zig");
+/// Privacy-safe debug trace and failure screen diagnostic submodule.
 pub const diag = @import("diag.zig");
 const dialog_mod = @import("dialog.zig");
 const env_mod = @import("env.zig");

@@ -7,7 +7,7 @@ flowchart LR
   E3 --> E4["Epoch IV (Nov 2026+)<br/>Smithers Cloud Factory<br/>Lighthouse Audit & MCP"]
 ```
 
-Reconstructed directly from Jujutsu (`jj`) repository history for `smithersai/claude-p` (59 commits, 6 tagged releases, current version `v0.1.3`).
+Reconstructed directly from Jujutsu (`jj`) repository history for `smithersai/claude-p` (60 commits, 6 tagged releases, current version `v0.1.3`).
 
 ## Epoch I: Genesis and the In-Process PTY
 
@@ -65,6 +65,7 @@ Completed the public coding factory switchover at smithers.sh/smithersai/claude-
 
 | Commit | Date | Tag | Summary |
 | --- | --- | --- | --- |
+| [`e5dbe23a`](https://github.com/smithersai/claude-p/commit/e5dbe23a) | 2026-11-26 | — | feat(factory): complete Smithers Cloud switchover, 3-audience UI, Lighthouse audit, wiki, mythical history, and MCP sandbox auth |
 | [`7b7966c7`](https://github.com/smithersai/claude-p/commit/7b7966c7) | 2026-11-26 | — | fix(ci,fuzz): guard Zig 0.15.2 fuzzer empty-slot crash, harden PTY test timeouts, add scripts/smthrs |
 | [`919c68bb`](https://github.com/smithersai/claude-p/commit/919c68bb) | 2026-11-26 | — | chore(uphill): add Uphill continuous metrics, baseline, rules, CI workflow, and Smithers flow |
 | [`2fc68ad9`](https://github.com/smithersai/claude-p/commit/2fc68ad9) | 2026-11-24 | — | docs: fix stale daemon turn-range, trace, exit-code, and CI-check references |
@@ -89,4 +90,3 @@ Completed the public coding factory switchover at smithers.sh/smithersai/claude-
 | [`ad1c7c41`](https://github.com/smithersai/claude-p/commit/ad1c7c41) | 2026-05-29 | — | Merge pull request #3 from madogao/feat/daemon-health-ping |
 | [`bb9ee417`](https://github.com/smithersai/claude-p/commit/bb9ee417) | 2026-05-26 | — | feat(daemon): add ping/pong health-probe frame for liveness detection |
 | [`3710a408`](https://github.com/smithersai/claude-p/commit/3710a408) | 2026-05-22 | — | Merge pull request #2 from madogao/fix/bypass-permissions-dialog |
-| [`0c8f6e22`](https://github.com/smithersai/claude-p/commit/0c8f6e22) | 2026-05-22 | — | fix(daemon): reset idle baseline on idle→busy to avoid false IdleTimeout |

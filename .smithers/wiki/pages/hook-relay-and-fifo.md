@@ -27,7 +27,7 @@ Every run allocates a fresh `$TMPDIR/claude-p-<pid>-<rand>/` directory and remov
 - **Open before spawn:** `events.fifo` is opened with `O_RDONLY | O_NONBLOCK` before spawning `zmux.NativeSession` so `hook.sh` writers never block on startup.
 - **No exported FIFO env var:** `CLAUDE_P_FIFO` is never exported into the child environment, and `buildChildEnv` strips any inherited value.
 - **Per-run nonce:** `hook.sh` embeds a random nonce and emits `<nonce>\t<event>\t<json>`. Lines failing `parseLineWithNonce` are discarded so stray writes cannot spoof lifecycle events.
-- **Safe `--setting-json` merging:** `src/hook.zig` rejects `"disableAllHooks": true` and JSON nesting beyond 128 levels.
+- **Safe `--setting-json` merging:** `src/hook/settings.zig` (re-exported via `src/hook.zig`) rejects `"disableAllHooks": true` and JSON nesting beyond 128 levels.
 
 ## PermissionRequest Fail-Fast
 

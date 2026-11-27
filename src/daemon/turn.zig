@@ -6,6 +6,7 @@ const emit_mod = @import("../emit.zig");
 const hook_mod = @import("../hook.zig");
 const stream_mod = @import("../stream.zig");
 const transcript_mod = @import("../transcript.zig");
+/// Non-blocking paced bracketed-paste submodule.
 pub const paste = @import("paste.zig");
 const protocol = @import("protocol.zig");
 
