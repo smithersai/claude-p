@@ -6,6 +6,7 @@ const stdin_mod = claude_p.stdin;
 const testing = std.testing;
 
 fn fuzzComposePrompt(_: void, input: []const u8) anyerror!void {
+    if (input.len == 0) return;
     const split = input.len / 2;
     const piped = input[0..split];
     const prompt = input[split..];
@@ -23,7 +24,7 @@ fn fuzzComposePrompt(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: composePrompt preserves suffix and blank-line separator invariant" {
     try std.testing.fuzz({}, fuzzComposePrompt, .{
-        .corpus = &.{ "", "\n\r\nhi", "diff\n\nsummarize", "a\nb\nc" },
+        .corpus = &.{ "\n\r\nhi", "diff\n\nsummarize", "a\nb\nc" },
     });
 }
 

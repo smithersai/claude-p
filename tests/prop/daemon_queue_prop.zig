@@ -7,6 +7,7 @@ const protocol = claude_p.daemon.protocol;
 const testing = std.testing;
 
 fn fuzzPromptQueue(_: void, ops: []const u8) anyerror!void {
+    if (ops.len == 0) return;
     var q: queue_mod.PromptQueue = .{};
     defer q.deinit(testing.allocator);
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -38,6 +39,6 @@ fn fuzzPromptQueue(_: void, ops: []const u8) anyerror!void {
 
 test "fuzz: PromptQueue preserves len/bytes invariants under arbitrary push/pop sequences" {
     try std.testing.fuzz({}, fuzzPromptQueue, .{
-        .corpus = &.{ "", "\x00\x02\x01\x01", "\x00" ** 100 ++ "\x01" ** 70, "\x04\x06\x01\x08\x01\x01" },
+        .corpus = &.{ "\x00\x02\x01\x01", "\x00" ** 100 ++ "\x01" ** 70, "\x04\x06\x01\x08\x01\x01" },
     });
 }

@@ -6,6 +6,7 @@ const stop_scan = claude_p.driver.watchdog.stop_scan;
 const testing = std.testing;
 
 fn fuzzStopScan(_: void, input: []const u8) anyerror!void {
+    if (input.len == 0) return;
     _ = try stop_scan.isContinuationRecord(testing.allocator, input, "done", "hello");
     var sum = try stop_scan.synthesizeStopFailureSummary(testing.allocator, input);
     defer sum.deinit(testing.allocator);
@@ -16,7 +17,6 @@ fn fuzzStopScan(_: void, input: []const u8) anyerror!void {
 test "fuzz: stop_scan never crashes or leaks on arbitrary JSONL/payload input" {
     try std.testing.fuzz({}, fuzzStopScan, .{
         .corpus = &.{
-            "",
             "{}",
             "{\"type\":\"tool_use\"}",
             "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}",

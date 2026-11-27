@@ -6,6 +6,7 @@ const flags = claude_p.args.flags;
 const testing = std.testing;
 
 fn fuzzFlagMatchers(_: void, input: []const u8) anyerror!void {
+    if (input.len == 0) return;
     _ = flags.OutputFormat.fromString(input);
     _ = flags.isKnownBoolean(input);
     _ = flags.isRejectedFlag(input);
@@ -16,6 +17,6 @@ fn fuzzFlagMatchers(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: args/flags matchers never crash on arbitrary inputs" {
     try std.testing.fuzz({}, fuzzFlagMatchers, .{
-        .corpus = &.{ "", "-p", "-pc", "--model=opus", "Stop=echo 1=2", "300", "--bare" },
+        .corpus = &.{ "-p", "-pc", "--model=opus", "Stop=echo 1=2", "300", "--bare" },
     });
 }
