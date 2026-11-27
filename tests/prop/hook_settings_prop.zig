@@ -41,7 +41,7 @@ test "fuzz: validateExtraSettings never panics on arbitrary bytes" {
             }) catch {};
         }
     }.check, .{ .corpus = &.{
-        "{}",
+        "{\"ok\":true}",
         "{\"disableAllHooks\":true}",
         "{\"a\":[1,2,3]}",
         "not json",

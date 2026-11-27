@@ -38,7 +38,7 @@ test "fuzz: SessionRunner.handleHookEvent never crashes or leaks on arbitrary pa
             "\x00{\"prompt\":\"hello world\"}",
             "\x01{\"last_assistant_message\":\"done\"}",
             "\x02{\"error\":\"overloaded\"}",
-            "\x03{}",
+            "\x03{\"ok\":true}",
             "\x01not-json",
         },
     });

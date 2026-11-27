@@ -142,7 +142,7 @@ echo "corpus: $(find "$FUZZ_CACHE_DIR/f" -type f 2>/dev/null | wc -l) saved inpu
 
 if grep -qE "$failure_re" "$LOG"; then
   echo "FAIL: a fuzzer found a bug. Details:" >&2
-  grep -nE -B2 -A30 "$failure_re" "$LOG" | head -n 200 >&2
+  grep -nE -B30 -A30 "$failure_re" "$LOG" | head -n 200 >&2
   echo "Full log: $LOG. Crashing inputs are the 'in' files under $FUZZ_CACHE_DIR/f/<test>." >&2
   exit 1
 fi

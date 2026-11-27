@@ -17,7 +17,7 @@ fn fuzzStopScan(_: void, input: []const u8) anyerror!void {
 test "fuzz: stop_scan never crashes or leaks on arbitrary JSONL/payload input" {
     try std.testing.fuzz({}, fuzzStopScan, .{
         .corpus = &.{
-            "{}",
+            "{\"ok\":true}",
             "{\"type\":\"tool_use\"}",
             "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}",
             "{\"error\":\"overloaded\",\"session_id\":\"s\"}",

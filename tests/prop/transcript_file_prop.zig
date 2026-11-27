@@ -16,6 +16,6 @@ fn fuzzValidatePath(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: validateTranscriptPath enforces absolute, NUL-free, traversal-free invariant" {
     try std.testing.fuzz({}, fuzzValidatePath, .{
-        .corpus = &.{ "/", "/tmp/a.jsonl", "/tmp/../etc/passwd", "/a\x00b", "relative" },
+        .corpus = &.{ "/tmp/a.jsonl", "/tmp/../etc/passwd", "/a\x00b/c.jsonl", "relative/path.jsonl" },
     });
 }

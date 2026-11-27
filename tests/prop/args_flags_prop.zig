@@ -17,6 +17,6 @@ fn fuzzFlagMatchers(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: args/flags matchers never crash on arbitrary inputs" {
     try std.testing.fuzz({}, fuzzFlagMatchers, .{
-        .corpus = &.{ "-p", "-pc", "--model=opus", "Stop=echo 1=2", "300", "--bare" },
+        .corpus = &.{ "--print", "--verbose", "--model=opus", "Stop=echo 1=2", "3000", "--bare" },
     });
 }
