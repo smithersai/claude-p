@@ -7,7 +7,7 @@ const allZigFiles = [
   ...walkFiles(join(ROOT, "tests"), ".zig")
 ]
 
-const fmt = spawnSync("zig", ["fmt", "--check", ...allZigFiles], {
+const fmt = spawnSync("sh", [".smithers/run-zig.sh", "fmt", "--check", ...allZigFiles], {
   cwd: ROOT,
   encoding: "utf8"
 })

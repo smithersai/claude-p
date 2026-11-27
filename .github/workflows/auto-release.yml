@@ -1,0 +1,71 @@
+name: Auto Release on Version Bump
+
+# Automatically triggers when a merge to main (from Smithers Cloud or GitHub)
+# advances package.json, build.zig.zon, and src/root.zig to a new version that
+# does not yet have a v<version> tag. Verifies lockstep and core gates, then
+# creates the annotated tag which triggers .github/workflows/release.yml.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "build.zig.zon"
+      - "src/root.zig"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-release-main
+  cancel-in-progress: false
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Verify version lockstep and check whether v<version> already exists
+        id: check
+        run: |
+          node scripts/publish.mjs --check-versions
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists; skipping auto-tag."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "New version ${VERSION} detected without tag ${TAG}."
+          fi
+
+      - name: Verify trust boundaries and factory projections before tagging
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          node --test .smithers/tests/factory-projections.test.mjs .smithers/tests/trust-boundaries.test.mjs .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
+
+      - name: Create annotated release tag v<version>
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.check.outputs.tag }}"
+          VERSION="${{ steps.check.outputs.version }}"
+          git config user.name "smithers-release[bot]"
+          git config user.email "release@smithers.sh"
+          git tag -a "$TAG" -m "Release claude-p ${VERSION}" "$GITHUB_SHA"
+          git push origin "$TAG"
+          gh workflow run release.yml --ref "$TAG" -f "tag=$TAG"
+          echo "Created tag ${TAG} at ${GITHUB_SHA} and dispatched release.yml."

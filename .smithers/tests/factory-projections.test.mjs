@@ -1,9 +1,10 @@
 // Dependency-free staleness check for .smithers/factory.json and home.json.
 //
-// `smthrs target //.smithers:factory-check` is the authoritative check, but
-// GitHub CI has no smthrs. This test re-derives the projected fields from the
-// sources (flow.mdx frontmatter and FACTORY.ts literals) and fails when a
-// source changed without `smthrs target //.smithers:factory-write --write`.
+// `scripts/smthrs target //.smithers:factory-check` is the authoritative check,
+// but GitHub CI may run without smthrs installed. This test re-derives the
+// projected fields from flow.mdx frontmatter, flow.ts declarations, and
+// FACTORY.ts literals and fails when a source changed without
+// `scripts/smthrs target //.smithers:factory-write --write`.
 //
 // Run: node --test .smithers/tests/factory-projections.test.mjs
 import { test } from "node:test";
@@ -61,9 +62,10 @@ function listFlows(dir, rel = "") {
   for (const ent of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
     const r = rel ? `${rel}/${ent.name}` : ent.name;
     if (ent.isDirectory()) found.push(...listFlows(dir, r));
-    else if (ent.name === "flow.mdx") found.push(rel);
+    else if (ent.name === "flow.mdx") found.push({ id: rel, kind: "mdx", file: `flows/${rel}/flow.mdx` });
+    else if (ent.name === "flow.ts") found.push({ id: rel, kind: "ts", file: `flows/${rel}/flow.ts` });
   }
-  return found.sort();
+  return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 // Every double-quoted string literal in FACTORY.ts, decoded.
@@ -101,30 +103,48 @@ export function checkProjections(dir = SMITHERS_DIR) {
 
   const projected = new Map(factory.flows.map((f) => [f.id, f]));
   const onDisk = listFlows(path.join(dir, "flows"));
-  for (const id of onDisk) {
-    if (!projected.has(id)) errors.push(`flows/${id}/flow.mdx is not in factory.json`);
+  const onDiskIds = new Set(onDisk.map((f) => f.id));
+
+  for (const flow of onDisk) {
+    if (!projected.has(flow.id)) errors.push(`${flow.file} is not in factory.json`);
   }
   for (const id of projected.keys()) {
-    if (!onDisk.includes(id)) errors.push(`factory.json flow ${id} has no flows/${id}/flow.mdx`);
+    if (!onDiskIds.has(id)) errors.push(`factory.json flow ${id} has no flow file on disk`);
   }
 
-  for (const id of onDisk) {
-    const entry = projected.get(id);
+  for (const flow of onDisk) {
+    const entry = projected.get(flow.id);
     if (!entry) continue;
-    const fm = parseFrontmatter(fs.readFileSync(path.join(dir, "flows", id, "flow.mdx"), "utf8"));
-    const want = {
-      path: `.smithers/flows/${id}/flow.mdx`,
-      description: fm.description,
-      capabilities: fm.capabilities ?? [],
-      model: fm.model ?? null,
-      flows: fm.flows ?? [],
-      budget: fm.budget,
-    };
-    for (const [key, value] of Object.entries(want)) {
-      try {
-        assert.deepEqual(entry[key], value);
-      } catch {
-        errors.push(`factory.json ${id}.${key} is stale: ${JSON.stringify(entry[key])} != ${JSON.stringify(value)}`);
+    const expectedPath = `.smithers/${flow.file}`;
+    if (entry.path !== expectedPath) {
+      errors.push(`factory.json ${flow.id}.path is stale: ${entry.path} != ${expectedPath}`);
+    }
+    if (entry.kind !== flow.kind) {
+      errors.push(`factory.json ${flow.id}.kind is stale: ${entry.kind} != ${flow.kind}`);
+    }
+    if (flow.kind === "mdx") {
+      const fm = parseFrontmatter(fs.readFileSync(path.join(dir, flow.file), "utf8"));
+      const want = {
+        description: fm.description,
+        capabilities: fm.capabilities ?? [],
+        model: fm.model ?? null,
+        flows: fm.flows ?? [],
+        budget: fm.budget,
+      };
+      for (const [key, value] of Object.entries(want)) {
+        try {
+          assert.deepEqual(entry[key], value);
+        } catch {
+          errors.push(`factory.json ${flow.id}.${key} is stale: ${JSON.stringify(entry[key])} != ${JSON.stringify(value)}`);
+        }
+      }
+    } else if (flow.kind === "ts") {
+      const tsSrc = fs.readFileSync(path.join(dir, flow.file), "utf8");
+      if (!tsSrc.includes(`Flow.make("${flow.id}"`)) {
+        errors.push(`${flow.file} does not declare Flow.make("${flow.id}")`);
+      }
+      if (!entry.description || typeof entry.description !== "string") {
+        errors.push(`factory.json ${flow.id}.description is missing`);
       }
     }
   }
@@ -148,15 +168,12 @@ export function checkProjections(dir = SMITHERS_DIR) {
   for (const s of stringLeaves(factoryTop)) {
     if (!literals.has(s)) errors.push(`factory.json value ${JSON.stringify(s)} is not in FACTORY.ts`);
   }
-  // Reverse direction: every literal and policy key in the S.Factory({...})
-  // body (flows excluded) must still be projected, so deleting a top-level
-  // key such as github.protectedPaths, or one of its entries, is stale.
   const factoryStart = src.indexOf("S.Factory({");
   const factoryEnd = src.indexOf("S.Factory.Home(");
   if (factoryStart < 0 || factoryEnd < factoryStart) {
     errors.push("FACTORY.ts has no S.Factory({...}) before S.Factory.Home(...)");
   } else {
-    const factorySrc = src.slice(factoryStart, factoryEnd).replace(/^\s*flows:.*$/m, "");
+    const factorySrc = src.slice(factoryStart, factoryEnd).replace(/^\s*flows:[\s\S]*?\],/m, "");
     const topSet = new Set(stringLeaves(factoryTop));
     for (const s of stringLiterals(factorySrc)) {
       if (!topSet.has(s)) errors.push(`FACTORY.ts factory literal ${JSON.stringify(s)} is not in factory.json`);
@@ -181,6 +198,23 @@ export function checkProjections(dir = SMITHERS_DIR) {
   for (const s of stringLiterals(homeSrc)) {
     if (!homeSet.has(s)) errors.push(`FACTORY.ts home literal ${JSON.stringify(s)} is not in home.json`);
   }
+
+  // Personalized multi-audience UI checks
+  if (!Array.isArray(home.sections) || home.sections.length === 0) {
+    errors.push("home.json must declare personalized sections (maintainer, contributor, everyone)");
+  } else {
+    const audiences = new Set(home.sections.map((s) => s.audience ?? "everyone"));
+    for (const required of ["maintainer", "contributor", "everyone"]) {
+      if (!audiences.has(required)) errors.push(`home.json missing audience section: ${required}`);
+    }
+    const totalBlocks = home.sections.reduce((n, s) => n + (s.blocks?.length ?? 0), 0);
+    if (totalBlocks > 32) errors.push(`home.json has ${totalBlocks} blocks (limit 32)`);
+    if (home.sections.length > 8) errors.push(`home.json has ${home.sections.length} sections (limit 8)`);
+  }
+  if (!home.docs || !home.docs.startsWith("https://")) {
+    errors.push("home.json must declare an https:// docs llms.txt index");
+  }
+
   return errors;
 }
 
@@ -210,14 +244,14 @@ test("a changed flow capability is reported stale", () => {
   }
 });
 
-test("a changed FACTORY.ts summary and home text are reported stale", () => {
+test("a changed FACTORY.ts home title is reported stale", () => {
   const dir = tamperedCopy((d) => {
     const p = path.join(d, "FACTORY.ts");
-    fs.writeFileSync(p, fs.readFileSync(p, "utf8").replace('title: "claude-p factory"', 'title: "renamed"'));
+    fs.writeFileSync(p, fs.readFileSync(p, "utf8").replace('title: "Why claude-p"', 'title: "renamed"'));
   });
   try {
     const errors = checkProjections(dir);
-    assert.ok(errors.some((e) => e.includes('"claude-p factory" is not in FACTORY.ts')));
+    assert.ok(errors.some((e) => e.includes('"Why claude-p" is not in FACTORY.ts')));
     assert.ok(errors.some((e) => e.includes('"renamed" is not in home.json')));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -246,7 +280,7 @@ test("a deleted factory.json policy key or entry is reported stale", () => {
     });
   const cases = [
     [(j) => delete j.github.protectedPaths, ["github.protectedPaths is not in factory.json", '"src/driver.zig" is not in factory.json']],
-    [(j) => j.github.protectedPaths.pop(), ['".smithers/**" is not in factory.json']],
+    [(j) => j.github.protectedPaths.pop(), ['".agents/uphill/**" is not in factory.json']],
     [(j) => delete j.github.maintainers, ["github.maintainers is not in factory.json"]],
     [(j) => delete j.on, ["factory key on is not in factory.json"]],
   ];

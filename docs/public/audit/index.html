@@ -1,0 +1,3243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>claude-p Lighthouse Backpressure Audit (72/100)</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --surface: #f8f9fa;
+  --surface-2: #f1f3f4;
+  --fg: #1f2328;
+  --muted: #5f6368;
+  --line: #dadce0;
+  --accent: #1a73e8;
+  --good: #0cce6b;
+  --good-fg: #00803c;
+  --good-bg: rgba(12, 206, 107, 0.14);
+  --average: #ffa400;
+  --average-fg: #b25e00;
+  --average-bg: rgba(255, 164, 0, 0.16);
+  --poor: #ff4e42;
+  --poor-fg: #c5221f;
+  --poor-bg: rgba(255, 78, 66, 0.14);
+  --none: #9aa0a6;
+  --none-fg: #5f6368;
+  --none-bg: rgba(154, 160, 166, 0.16);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+[data-theme="dark"] {
+  --bg: #111317;
+  --surface: #181b21;
+  --surface-2: #20242c;
+  --fg: #e8eaed;
+  --muted: #9aa0a6;
+  --line: #2d323b;
+  --accent: #8ab4f8;
+  --good-fg: #0cce6b;
+  --average-fg: #ffb74d;
+  --poor-fg: #ff6b61;
+  --none-fg: #9aa0a6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111317;
+    --surface: #181b21;
+    --surface-2: #20242c;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --line: #2d323b;
+    --accent: #8ab4f8;
+    --good-fg: #0cce6b;
+    --average-fg: #ffb74d;
+    --poor-fg: #ff6b61;
+    --none-fg: #9aa0a6;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.topbar { position: sticky; top: 0; z-index: 20; background: var(--bg); border-bottom: 1px solid var(--line); backdrop-filter: blur(8px); }
+.topbar-inner { max-width: 1120px; margin: 0 auto; padding: 12px 20px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+.brand-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 4px var(--good-bg); }
+.nav-links { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 13px; }
+.btn { font: inherit; font-size: 12.5px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.btn:hover { background: var(--surface-2); }
+main { max-width: 1120px; margin: 0 auto; padding: 24px 20px 80px; }
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: center; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); margin-bottom: 20px; }
+@media (max-width: 720px) { .hero { grid-template-columns: 1fr; } }
+.hero h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -0.02em; }
+.hero p { margin: 0 0 12px; color: var(--muted); max-width: 68ch; }
+.meta-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.meta-chip { font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
+.trust-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--line); margin-bottom: 22px; }
+.trust-banner.trusted { background: var(--good-bg); border-color: var(--good); }
+.trust-banner.untrusted { background: var(--average-bg); border-color: var(--average); }
+.trust-title { font-weight: 700; font-size: 13.5px; }
+.trust-detail { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.gauges-panel { padding: 20px 16px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); margin-bottom: 22px; }
+.gauges-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 18px 28px; }
+.lh-gauge { display: inline-flex; flex-direction: column; align-items: center; gap: 8px; color: var(--fg); text-decoration: none; min-width: 116px; padding: 6px; border-radius: 10px; transition: background 0.15s ease; }
+.lh-gauge:hover { background: var(--surface-2); text-decoration: none; }
+.lh-gauge-ring { position: relative; width: var(--size); height: var(--size); }
+.lh-gauge-ring svg { display: block; width: 100%; height: 100%; }
+.lh-base { fill: transparent; stroke: var(--line); stroke-width: 7; opacity: 0.45; }
+.lh-good .lh-base { fill: var(--good-bg); stroke: var(--good-bg); opacity: 1; }
+.lh-average .lh-base { fill: var(--average-bg); stroke: var(--average-bg); opacity: 1; }
+.lh-poor .lh-base { fill: var(--poor-bg); stroke: var(--poor-bg); opacity: 1; }
+.lh-arc { fill: none; stroke-width: 7; stroke-linecap: round; animation: lh-draw 0.8s ease-out; }
+.lh-good .lh-arc { stroke: var(--good); }
+.lh-average .lh-arc { stroke: var(--average); }
+.lh-poor .lh-arc { stroke: var(--poor); }
+.lh-none .lh-arc { stroke: var(--none); }
+.lh-score { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 700; font-size: calc(var(--size) * 0.28); }
+.lh-good .lh-score { color: var(--good-fg); }
+.lh-average .lh-score { color: var(--average-fg); }
+.lh-poor .lh-score { color: var(--poor-fg); }
+.lh-label { font-size: 13px; font-weight: 600; text-align: center; }
+@keyframes lh-draw { from { stroke-dasharray: 0 300; } }
+.scale { display: flex; justify-content: center; gap: 20px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.scale span { display: inline-flex; align-items: center; gap: 6px; }
+.icon-good, .icon-average, .icon-poor, .icon-none { display: inline-block; flex: 0 0 auto; }
+.icon-good { width: 11px; height: 11px; border-radius: 50%; background: var(--good); }
+.icon-average { width: 11px; height: 11px; border-radius: 2px; background: var(--average); }
+.icon-poor { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 11px solid var(--poor); }
+.icon-none { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--none); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab { font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.tab.active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.filter-bar { display: flex; gap: 8px; align-items: center; }
+.search { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); min-width: 210px; }
+.card { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 18px 20px; margin-bottom: 20px; }
+.card h2 { margin: 0 0 12px; font-size: 16px; }
+.opp-row { display: grid; grid-template-columns: 54px 1fr 130px; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.opp-row:last-child { border-bottom: 0; }
+.opp-gain { font-family: var(--mono); font-weight: 700; color: var(--good-fg); text-align: right; }
+.opp-title { font-size: 13px; margin-bottom: 5px; }
+.opp-bar-track { height: 7px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.opp-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--average), var(--poor)); }
+.opp-delta { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+.empty-good { padding: 12px; border-radius: 8px; background: var(--good-bg); color: var(--good-fg); font-weight: 600; }
+.cat-section { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 20px; margin-bottom: 20px; }
+.cat-header { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.cat-meta h2 { margin: 0 0 4px; font-size: 19px; }
+.cat-meta p { margin: 0 0 8px; color: var(--muted); max-width: 66ch; }
+.cat-counts { display: flex; gap: 8px; }
+.pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
+.pill-good { background: var(--good-bg); color: var(--good-fg); }
+.pill-average { background: var(--average-bg); color: var(--average-fg); }
+.pill-poor { background: var(--poor-bg); color: var(--poor-fg); }
+.pill-none { background: var(--none-bg); color: var(--none-fg); }
+.audit-group h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 12px 0 6px; }
+.audit-group summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); padding: 8px 0; user-select: none; }
+.audit-row { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: start; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+.audit-row:last-child { border-bottom: 0; }
+.audit-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.audit-item { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.audit-note { font-size: 12.5px; color: var(--poor-fg); margin-top: 3px; }
+.audit-desc { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.audit-metrics { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.trust-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.trust-box { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: var(--bg); }
+.trust-box h3 { margin: 0 0 6px; font-size: 14px; }
+.trust-box p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.hidden { display: none !important; }
+footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span>smithersai/claude-p</span>
+      <span class="meta-chip">Lighthouse Backpressure Audit</span>
+    </div>
+    <nav class="nav-links">
+      <a href="https://smithers.sh/smithersai/claude-p">Smithers Factory</a>
+      <a href="https://smithersai.github.io/claude-p/">Docs</a>
+      <a href="https://smithersai.github.io/claude-p/wiki/">Wiki</a>
+      <a href="https://smithersai.github.io/claude-p/history/">Mythical History</a>
+      <a href="./audit.json">JSON</a>
+      <button class="btn" id="theme-toggle" type="button">Theme</button>
+    </nav>
+  </div>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1>Backpressure Audit Report</h1>
+      <p>Continuous Uphill measurements across Zig footprint, TigerStyle invariants, correctness, unit and fuzz testing, documentation coverage, and Smithers Cloud trust boundaries.</p>
+      <div class="meta-row">
+        <span class="meta-chip">v0.1.3</span>
+        <span class="meta-chip">commit 7b7966c78860</span>
+        <span class="meta-chip">store https://build.smithers.sh</span>
+        <span class="meta-chip">mcp https://smithers.sh/api/mcp</span>
+        <span class="meta-chip">2026-11-27T07:58:23.692Z</span>
+      </div>
+    </div>
+    <div class="lh-gauge lh-average" style="--size:124px" aria-label="Overall: 72">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="124" height="124">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="199.05 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">72</span>
+  </div>
+  <span class="lh-label">Overall</span>
+</div>
+  </section>
+
+  <section class="trust-banner untrusted">
+    <div>
+      <div class="trust-title">Execution Provenance: Untrusted / Local Execution (actor: williamcory)</div>
+      <div class="trust-detail">Non-maintainer and local runs are welcomed and encouraged. Results read shared cache hits but never write trunk keys or bypass gates.</div>
+    </div>
+    <div class="meta-row">
+      <span class="meta-chip">Read-Only Trunk + Isolated Namespace</span>
+      <span class="meta-chip">Informational only (cannot skip maintainer sandbox gates)</span>
+    </div>
+  </section>
+
+  <section class="gauges-panel">
+    <div class="gauges-grid">
+      <a href="#cat-footprint" class="lh-gauge lh-average" style="--size:100px" aria-label="Footprint: 53">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="146.52 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">53</span>
+  </div>
+  <span class="lh-label">Footprint</span>
+</a><a href="#cat-style" class="lh-gauge lh-poor" style="--size:100px" aria-label="Style &amp; TigerStyle: 36">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="99.53 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">36</span>
+  </div>
+  <span class="lh-label">Style &amp; TigerStyle</span>
+</a><a href="#cat-correctness" class="lh-gauge lh-average" style="--size:100px" aria-label="Correctness: 88">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="243.28 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">88</span>
+  </div>
+  <span class="lh-label">Correctness</span>
+</a><a href="#cat-testing" class="lh-gauge lh-average" style="--size:100px" aria-label="Testing: 85">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="234.99 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">85</span>
+  </div>
+  <span class="lh-label">Testing</span>
+</a><a href="#cat-documentation" class="lh-gauge lh-average" style="--size:100px" aria-label="Documentation: 67">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="185.23 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">67</span>
+  </div>
+  <span class="lh-label">Documentation</span>
+</a><a href="#cat-factory" class="lh-gauge lh-good" style="--size:100px" aria-label="Factory &amp; Trust: 100">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="100" height="100">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="276.46 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">100</span>
+  </div>
+  <span class="lh-label">Factory &amp; Trust</span>
+</a>
+    </div>
+    <div class="scale">
+      <span><i class="icon-poor"></i> 0–49 Poor</span>
+      <span><i class="icon-average"></i> 50–89 Needs work</span>
+      <span><i class="icon-good"></i> 90–100 Good</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Top Score Opportunities</h2>
+    <div class="opp-row">
+            <div class="opp-gain">+23</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>assert-density</code> <span class="audit-item">10 items</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:100%"></div></div>
+            </div>
+            <div class="opp-delta">0 &rarr; 15</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+12</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>footprint</code> / <code>module-prod-lines</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:52%"></div></div>
+            </div>
+            <div class="opp-delta">2545 &rarr; 500</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+12</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>footprint</code> / <code>module-prod-lines</code> <span class="audit-item">src/daemon.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:52%"></div></div>
+            </div>
+            <div class="opp-delta">1332 &rarr; 500</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+11</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>documentation</code> / <code>pub-doc-coverage</code> <span class="audit-item">src/root.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:48%"></div></div>
+            </div>
+            <div class="opp-delta">0 &rarr; 90</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+11</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>documentation</code> / <code>pub-doc-coverage</code> <span class="audit-item">src/stream.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:48%"></div></div>
+            </div>
+            <div class="opp-delta">0 &rarr; 90</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+8</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>footprint</code> / <code>module-bytes</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:35%"></div></div>
+            </div>
+            <div class="opp-delta">171610 &rarr; 20000</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+8</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>footprint</code> / <code>module-bytes</code> <span class="audit-item">src/daemon.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:35%"></div></div>
+            </div>
+            <div class="opp-delta">93590 &rarr; 20000</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+8</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>max-fn-lines</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:35%"></div></div>
+            </div>
+            <div class="opp-delta">514 &rarr; 70</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+8</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>max-fn-lines</code> <span class="audit-item">src/daemon.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:35%"></div></div>
+            </div>
+            <div class="opp-delta">465 &rarr; 70</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+6</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>testing</code> / <code>unit-tests</code> <span class="audit-item">src/stream.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:26%"></div></div>
+            </div>
+            <div class="opp-delta">6 &rarr; 20</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/args.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/daemon.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/hook.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/main.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+3</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>style</code> / <code>line-length</code> <span class="audit-item">src/transcript.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:13%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-empty-catch</code> <span class="audit-item">src/daemon.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-empty-catch</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-empty-catch</code> <span class="audit-item">src/hook.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-empty-catch</code> <span class="audit-item">src/main.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-panic</code> <span class="audit-item">src/driver.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-panic</code> <span class="audit-item">src/hook.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div><div class="opp-row">
+            <div class="opp-gain">+2</div>
+            <div class="opp-body">
+              <div class="opp-title"><code>correctness</code> / <code>no-panic</code> <span class="audit-item">src/terminal.zig</span></div>
+              <div class="opp-bar-track"><div class="opp-bar-fill" style="width:9%"></div></div>
+            </div>
+            <div class="opp-delta">false &rarr; true</div>
+          </div>
+  </section>
+
+  <div class="toolbar">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-filter-cat="all" type="button">All Categories</button>
+      <button class="tab" data-filter-cat="footprint" type="button">Footprint (53)</button><button class="tab" data-filter-cat="style" type="button">Style &amp; TigerStyle (36)</button><button class="tab" data-filter-cat="correctness" type="button">Correctness (88)</button><button class="tab" data-filter-cat="testing" type="button">Testing (85)</button><button class="tab" data-filter-cat="documentation" type="button">Documentation (67)</button><button class="tab" data-filter-cat="factory" type="button">Factory &amp; Trust (100)</button>
+    </div>
+    <div class="filter-bar">
+      <button class="btn" id="missed-only" type="button">Missed only: Off</button>
+      <input class="search" id="audit-search" type="search" placeholder="Filter metrics or files..." aria-label="Filter audits">
+    </div>
+  </div>
+
+  <div id="categories-root">
+    <section class="cat-section" id="cat-footprint" data-category="footprint">
+        <div class="cat-header">
+          <div class="lh-gauge lh-average" style="--size:96px" aria-label="Footprint: 53">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="146.52 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">53</span>
+  </div>
+  <span class="lh-label">Footprint</span>
+</div>
+          <div class="cat-meta">
+            <h2>Footprint</h2>
+            <p>Keep Zig PTY/daemon modules and JS supply-chain scripts small, modular, and dependency-minimal.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">12 passed</span>
+              <span class="pill pill-poor">13 missed target</span>
+            </div>
+          </div>
+        </div>
+        <div class="audit-group"><h3>Diagnostics and missed targets (13)</h3><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">2545</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">1332</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">665</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">606</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">601</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">171.6 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">93.6 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">60.8 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">43.1 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">42.3 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">scripts/publish.mjs</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">28.2 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">25.4 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">scripts/install.js</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">24.1 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div></div>
+        <details class="audit-group passed-group" >
+          <summary>Passed audits (12)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">417</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">224</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">173</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">163</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-prod-lines</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">30</span>
+          <span class="meta-chip">target 500</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">14.4 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">11.7 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">10.3 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">bin/claude-p.js</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1.9 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>module-bytes</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1.2 kB</span>
+          <span class="meta-chip">target 20.0 kB</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-dependencies</code>
+            
+          </div>
+          <div class="audit-desc">Avoid adding unnecessary Zig package dependencies in build.zig.zon.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>npm-dependencies</code>
+            
+          </div>
+          <div class="audit-desc">Keep package.json free of runtime npm dependencies so npx claude-p stays fast and auditable.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">0</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+<section class="cat-section" id="cat-style" data-category="style">
+        <div class="cat-header">
+          <div class="lh-gauge lh-poor" style="--size:96px" aria-label="Style &amp; TigerStyle: 36">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="99.53 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">36</span>
+  </div>
+  <span class="lh-label">Style &amp; TigerStyle</span>
+</div>
+          <div class="cat-meta">
+            <h2>Style &amp; TigerStyle</h2>
+            <p>Enforce zig fmt and TigerStyle limits on function length, line width, and assertion density.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">31 passed</span>
+              <span class="pill pill-poor">21 missed target</span>
+            </div>
+          </div>
+        </div>
+        <div class="audit-group"><h3>Diagnostics and missed targets (21)</h3><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-note">runSession at line 1802 (514 lines)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">514</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-note">runWithIo at line 778 (465 lines)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">465</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-note">parseRecords at line 118 (208 lines)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">208</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-note">main at line 264 (159 lines)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">159</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-note">parseWithDiag at line 426 (147 lines)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">147</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-note">line 179: 126 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-note">line 328: 121 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-note">line 153: 132 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-note">line 522: 135 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-note">line 345: 126 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-note">line 118: 126 chars (limit 120)</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>assert-density</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target &gt;= 15 per kLOC).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 15</span>
+          
+        </div>
+      </div></div>
+        <details class="audit-group passed-group" >
+          <summary>Passed audits (31)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/integration.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/args_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/daemon_emit_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/daemon_runtime_fuzz.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/driver_dialog_watchdog_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/driver_paste_env_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/hook_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/runtime_concurrency_fuzz.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/stream_transcript_deep_fuzz.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/terminal_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop/transcript_stream_prop.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>zig-fmt</code>
+            <span class="audit-item">tests/prop_fuzz.zig</span>
+          </div>
+          <div class="audit-desc">Format all Zig source and property-test files with `zig fmt`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">53</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">51</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">49</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">45</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>max-fn-lines</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">3</span>
+          <span class="meta-chip">target 70</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Wrap Zig lines at or under 120 columns for readability.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Wrap Zig lines at or under 120 columns for readability.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Wrap Zig lines at or under 120 columns for readability.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>line-length</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Wrap Zig lines at or under 120 columns for readability.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+<section class="cat-section" id="cat-correctness" data-category="correctness">
+        <div class="cat-header">
+          <div class="lh-gauge lh-average" style="--size:96px" aria-label="Correctness: 88">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="243.28 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">88</span>
+  </div>
+  <span class="lh-label">Correctness</span>
+</div>
+          <div class="cat-meta">
+            <h2>Correctness</h2>
+            <p>Enforce version lockstep, release script syntax, Smithers factory projection freshness, and panic-free Zig code.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">30 passed</span>
+              <span class="pill pill-poor">7 missed target</span>
+            </div>
+          </div>
+        </div>
+        <div class="audit-group"><h3>Diagnostics and missed targets (7)</h3><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-note">line 1665: panic or unreachable in production code</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-note">line 185: panic or unreachable in production code</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-note">line 128: panic or unreachable in production code</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-note">line 998: silent `catch {}` swallows errors</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-note">line 1232: silent `catch {}` swallows errors</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-note">line 57: silent `catch {}` swallows errors</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-note">line 54: silent `catch {}` swallows errors</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">fail</span>
+          
+          
+        </div>
+      </div></div>
+        <details class="audit-group passed-group" >
+          <summary>Passed audits (30)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>version-lockstep</code>
+            
+          </div>
+          <div class="audit-desc">Keep package.json, build.zig.zon, and src/root.zig versions identical; verify with `node scripts/publish.mjs --check-versions`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>script-syntax</code>
+            <span class="audit-item">bin/claude-p.js</span>
+          </div>
+          <div class="audit-desc">Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>script-syntax</code>
+            <span class="audit-item">scripts/install.js</span>
+          </div>
+          <div class="audit-desc">Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>script-syntax</code>
+            <span class="audit-item">scripts/publish.mjs</span>
+          </div>
+          <div class="audit-desc">Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>script-syntax</code>
+            <span class="audit-item">scripts/build-in-linux.sh</span>
+          </div>
+          <div class="audit-desc">Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>script-syntax</code>
+            <span class="audit-item">scripts/fuzz-linux.sh</span>
+          </div>
+          <div class="audit-desc">Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>factory-projections</code>
+            
+          </div>
+          <div class="audit-desc">Keep Smithers factory projections fresh (`smthrs target //.smithers:factory-write --write`).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-panic</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-empty-catch</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Handle errors explicitly instead of silently swallowing them with `catch {}`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>no-todo</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Resolve TODO/FIXME markers instead of leaving them in production Zig modules.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+<section class="cat-section" id="cat-testing" data-category="testing">
+        <div class="cat-header">
+          <div class="lh-gauge lh-average" style="--size:96px" aria-label="Testing: 85">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="234.99 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">85</span>
+  </div>
+  <span class="lh-label">Testing</span>
+</div>
+          <div class="cat-meta">
+            <h2>Testing</h2>
+            <p>Verify installer supply-chain tests pass and every Zig module has deep unit and property/fuzz coverage.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">15 passed</span>
+              <span class="pill pill-poor">4 missed target</span>
+            </div>
+          </div>
+        </div>
+        <div class="audit-group"><h3>Diagnostics and missed targets (4)</h3><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">6</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">10</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">10</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">16</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div></div>
+        <details class="audit-group passed-group" >
+          <summary>Passed audits (15)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>js-supplychain-tests</code>
+            <span class="audit-item">.smithers/tests/install-checksum.test.mjs</span>
+          </div>
+          <div class="audit-desc">Keep all JS installer checksum and supply-chain property tests passing.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>js-supplychain-tests</code>
+            <span class="audit-item">tests/prop/js_supplychain_prop.mjs</span>
+          </div>
+          <div class="audit-desc">Keep all JS installer checksum and supply-chain property tests passing.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">20</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">28</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">43</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">54</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>unit-tests</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Keep thorough inline unit tests in every src/*.zig module (target &gt;= 20 tests per module).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">57</span>
+          <span class="meta-chip">target 20</span>
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>prop-fuzz-coverage</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-desc">Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+<section class="cat-section" id="cat-documentation" data-category="documentation">
+        <div class="cat-header">
+          <div class="lh-gauge lh-average" style="--size:96px" aria-label="Documentation: 67">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="185.23 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">67</span>
+  </div>
+  <span class="lh-label">Documentation</span>
+</div>
+          <div class="cat-meta">
+            <h2>Documentation</h2>
+            <p>Keep Zig public declarations documented, Markdown links valid, and Astro docs frontmatter complete.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">33 passed</span>
+              <span class="pill pill-poor">10 missed target</span>
+            </div>
+          </div>
+        </div>
+        <div class="audit-group"><h3>Diagnostics and missed targets (10)</h3><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/root.zig</span>
+          </div>
+          <div class="audit-note">0/15 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/stream.zig</span>
+          </div>
+          <div class="audit-note">0/3 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">0</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/main.zig</span>
+          </div>
+          <div class="audit-note">1/6 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">17</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/emit.zig</span>
+          </div>
+          <div class="audit-note">2/9 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">22</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-poor" data-status="missed">
+        <span class="audit-icon icon-poor" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/transcript.zig</span>
+          </div>
+          <div class="audit-note">4/12 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-poor">33</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/hook.zig</span>
+          </div>
+          <div class="audit-note">13/23 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">57</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/driver.zig</span>
+          </div>
+          <div class="audit-note">53/89 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">60</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/terminal.zig</span>
+          </div>
+          <div class="audit-note">3/5 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">60</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/args.zig</span>
+          </div>
+          <div class="audit-note">8/12 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">67</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div><div class="audit-row status-average" data-status="missed">
+        <span class="audit-icon icon-average" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>pub-doc-coverage</code>
+            <span class="audit-item">src/daemon.zig</span>
+          </div>
+          <div class="audit-note">15/19 pub decls have /// doc comments</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-average">79</span>
+          <span class="meta-chip">target 90</span>
+          
+        </div>
+      </div></div>
+        <details class="audit-group passed-group" >
+          <summary>Passed audits (33)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>markdown-links</code>
+            <span class="audit-item">README.md</span>
+          </div>
+          <div class="audit-desc">Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>markdown-links</code>
+            <span class="audit-item">SPEC.md</span>
+          </div>
+          <div class="audit-desc">Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>markdown-links</code>
+            <span class="audit-item">CLAUDE.md</span>
+          </div>
+          <div class="audit-desc">Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>markdown-links</code>
+            <span class="audit-item">AGENTS.md</span>
+          </div>
+          <div class="audit-desc">Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/factory/audit.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/getting-started.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/guides/debugging-and-diagnostics.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/guides/nested-sessions-and-auth.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/guides/resuming-sessions.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/guides/streaming-json.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/history/index.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/index.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/internals/architecture.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/internals/hooks-and-transcripts.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/internals/pty-and-dec-queries.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/internals/startup-dialogs-and-paste.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/reference/cli.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/reference/daemon-protocol.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/reference/installation-and-builds.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/reference/zig-api.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/tutorials/embed-in-zig.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/tutorials/first-automation.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/tutorials/multi-turn-daemon.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/contributing-and-triage.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/daemon-protocol.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/fuzzing-and-verification.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/hook-relay-and-fifo.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/index.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/pty-and-zmux.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/smithers-cloud-factory.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/startup-dialogs-and-paste.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/supply-chain-and-releases.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>docs-frontmatter</code>
+            <span class="audit-item">docs/src/content/docs/wiki/transcript-and-streaming.mdx</span>
+          </div>
+          <div class="audit-desc">Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">pass</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+<section class="cat-section" id="cat-factory" data-category="factory">
+        <div class="cat-header">
+          <div class="lh-gauge lh-good" style="--size:96px" aria-label="Factory &amp; Trust: 100">
+  <div class="lh-gauge-ring">
+    <svg viewBox="0 0 100 100" width="96" height="96">
+      <circle class="lh-base" cx="50" cy="50" r="44" />
+      <circle class="lh-arc" cx="50" cy="50" r="44" stroke-dasharray="276.46 276.46" transform="rotate(-90 50 50)" />
+    </svg>
+    <span class="lh-score">100</span>
+  </div>
+  <span class="lh-label">Factory &amp; Trust</span>
+</div>
+          <div class="cat-meta">
+            <h2>Factory &amp; Trust</h2>
+            <p>Enforce Smithers Cloud shared object-store caching, non-poisoning trust boundaries, personalized 3-audience UI, wiki freshness, mythical history, and one-time MCP sandbox auth.</p>
+            <div class="cat-counts">
+              <span class="pill pill-good">6 passed</span>
+              <span class="pill pill-good">0 missed targets</span>
+            </div>
+          </div>
+        </div>
+        
+        <details class="audit-group passed-group" open>
+          <summary>Passed audits (6)</summary>
+          <div class="passed-list"><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>remote-cache-config</code>
+            
+          </div>
+          <div class="audit-desc">Configure .smithers/WORKSPACE.ts with https://build.smithers.sh and separate SMITHERS_CACHE_READ_TOKEN and SMITHERS_CACHE_WRITE_TOKEN secrets.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>trust-boundaries</code>
+            
+          </div>
+          <div class="audit-desc">Pass .smithers/tests/trust-boundaries.test.mjs to prevent cache poisoning and untrusted gate bypasses.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>personalized-ui</code>
+            
+          </div>
+          <div class="audit-desc">Keep .smithers/home.json personalized across maintainer, contributor, and everyone audiences with an https:// docs llms.txt URL.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>wiki-freshness</code>
+            
+          </div>
+          <div class="audit-desc">Keep all Engineering Wiki citations and source digests fresh (`node .smithers/flows/wiki/sync-wiki.mjs --write`).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>mythical-history</code>
+            
+          </div>
+          <div class="audit-desc">Keep Mythical History generated and verified (`node .smithers/flows/mythical-history/generate.mjs --write`).</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div><div class="audit-row status-good" data-status="passed">
+        <span class="audit-icon icon-good" aria-hidden="true"></span>
+        <div class="audit-main">
+          <div class="audit-title">
+            <code>mcp-sandbox-auth</code>
+            
+          </div>
+          <div class="audit-desc">Keep scripts/smithers-auth.mjs valid and able to print attenuated sandbox and Cloud MCP bootstrap config.</div>
+        </div>
+        <div class="audit-metrics">
+          <span class="pill pill-good">1</span>
+          
+          
+        </div>
+      </div></div>
+        </details>
+      </section>
+  </div>
+
+  <section class="card">
+    <h2>Execution Trust Boundary Policy</h2>
+    <div class="trust-grid">
+      <div class="trust-box">
+        <h3>Trusted Maintainer Sandboxes</h3>
+        <p>Maintainer-controlled sandboxes and main-branch cache-publish jobs hold read and trunk write credentials for <code>build.smithers.sh</code> and satisfy merge and release gates.</p>
+      </div>
+      <div class="trust-box">
+        <h3>Untrusted Contributor Runs (Encouraged)</h3>
+        <p>Non-maintainers can run local or sandboxed checks, Uphill audits, and repro flows freely. Untrusted runs read shared cache hits but never write trunk keys or skip gates.</p>
+      </div>
+      <div class="trust-box">
+        <h3>Person-Only Governance</h3>
+        <p>Agents connect via <code>https://smithers.sh/api/mcp</code> using short-lived attenuated tokens. Merging, committing TODOs, publishing releases, and secret edits remain person-only.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Generated by <code>.smithers/audit/generate-lighthouse.mjs</code> from Uphill metrics</span>
+    <span><a href="https://smithers.sh/smithersai/claude-p">smithers.sh/smithersai/claude-p</a></span>
+  </footer>
+</main>
+<script>
+(() => {
+  const root = document.documentElement;
+  const themeBtn = document.getElementById("theme-toggle");
+  themeBtn.addEventListener("click", () => {
+    const cur = root.getAttribute("data-theme");
+    const next = cur === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+  });
+
+  let activeCat = "all";
+  let missedOnly = false;
+  let query = "";
+
+  const tabs = [...document.querySelectorAll(".tab[data-filter-cat]")];
+  const sections = [...document.querySelectorAll(".cat-section")];
+  const missedBtn = document.getElementById("missed-only");
+  const searchInput = document.getElementById("audit-search");
+
+  function applyFilters() {
+    const q = query.trim().toLowerCase();
+    for (const sec of sections) {
+      const catMatch = activeCat === "all" || sec.dataset.category === activeCat;
+      sec.classList.toggle("hidden", !catMatch);
+      if (!catMatch) continue;
+      for (const row of sec.querySelectorAll(".audit-row")) {
+        const isMissed = row.dataset.status === "missed";
+        const textMatch = !q || row.textContent.toLowerCase().includes(q);
+        row.classList.toggle("hidden", (missedOnly && !isMissed) || !textMatch);
+      }
+      const passedGroup = sec.querySelector(".passed-group");
+      if (passedGroup) {
+        if (q) passedGroup.open = true;
+        passedGroup.classList.toggle("hidden", missedOnly);
+      }
+    }
+  }
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      activeCat = tab.dataset.filterCat;
+      tabs.forEach((t) => t.classList.toggle("active", t === tab));
+      applyFilters();
+    });
+  }
+  missedBtn.addEventListener("click", () => {
+    missedOnly = !missedOnly;
+    missedBtn.textContent = "Missed only: " + (missedOnly ? "On" : "Off");
+    applyFilters();
+  });
+  searchInput.addEventListener("input", (e) => {
+    query = e.target.value;
+    applyFilters();
+  });
+})();
+</script>
+</body>
+</html>

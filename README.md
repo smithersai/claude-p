@@ -10,10 +10,15 @@ in-process [zmux][zmux] PTY session. `text` and `json` output follow
 session-transcript lines plus a `claude -p`-shaped `result` envelope (see
 [Output formats](#output-formats)).
 
-Built using [smithers][smithers] self-improving harness.
+Built publicly on [Smithers Cloud][factory] ([Docs][docs] · [Lighthouse Audit][audit] · [Engineering Wiki][wiki] · [Mythical History][history] · [Smithers][smithers]).
 
 [zmux]: https://github.com/smithersai/zmux
 [smithers]: https://github.com/smithersai/smithers
+[factory]: https://smithers.sh/smithersai/claude-p
+[docs]: https://smithersai.github.io/claude-p/
+[audit]: https://smithersai.github.io/claude-p/audit/
+[wiki]: https://smithersai.github.io/claude-p/wiki/
+[history]: https://smithersai.github.io/claude-p/history/
 
 ---
 

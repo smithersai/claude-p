@@ -2,6 +2,8 @@
 
 Follow the [Uphill rules](.agents/uphill/rules.md), which `uphill rules --write` rewrites from each metric's description: @.agents/uphill/rules.md
 
+For Smithers Cloud MCP workflows (authenticated `https://smithers.sh/api/mcp`, one-time sandbox auth via `node scripts/smithers-auth.mjs`, shared object-store CI via `scripts/smthrs`, Engineering Wiki, Mythical History, and trust boundaries), see [AGENTS.md](./AGENTS.md) and [.smithers/instructions/agent.md](./.smithers/instructions/agent.md).
+
 > **Start here on every session or after compaction.** Re-read
 > [SPEC.md](./SPEC.md) and [README.md](./README.md) before modifying code. The
 > source tree and `SPEC.md` are authoritative—never assume prior conversation

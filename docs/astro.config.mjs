@@ -27,6 +27,14 @@ export default defineConfig({
           items: [{ label: 'Getting Started', slug: 'getting-started' }],
         },
         {
+          label: 'Coding Factory',
+          items: [
+            { label: 'Lighthouse Audit Report', slug: 'factory/audit' },
+            { label: 'Mythical History', slug: 'history' },
+            { label: 'Engineering Wiki', autogenerate: { directory: 'wiki' } },
+          ],
+        },
+        {
           label: 'Tutorials',
           autogenerate: { directory: 'tutorials' },
         },

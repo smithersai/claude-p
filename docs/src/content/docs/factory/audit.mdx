@@ -1,0 +1,25 @@
+---
+title: "Lighthouse Backpressure Audit"
+description: "Live Uphill continuous quality scores across Zig footprint, TigerStyle invariants, correctness, testing, documentation, and Smithers Cloud trust boundaries."
+---
+
+Every pull request and every merge to `main` runs `claude-p`'s Uphill continuous metrics suite and renders an interactive, Google-Lighthouse-style backpressure audit report.
+
+- **Open the interactive report:** [Live Lighthouse Audit Report (/claude-p/audit/)](/claude-p/audit/)
+- **Machine-readable JSON:** [audit.json](/claude-p/audit/audit.json)
+- **Run locally:** `uphill --compact && node .smithers/audit/generate-lighthouse.mjs --no-run`
+
+## What Is Measured
+
+| Category | Metrics |
+| --- | --- |
+| **Footprint** | Per-module production lines (`<= 500`), file bytes (`<= 20 kB`), Zig deps (`1`), runtime npm deps (`0`) |
+| **Style & TigerStyle** | `zig fmt --check`, function length (`<= 70` lines), line width (`<= 120` cols), `std.debug.assert` density (`>= 15 / kLOC`) |
+| **Correctness** | Version lockstep (`package.json` / `build.zig.zon` / `src/root.zig`), script syntax, factory projections, zero `@panic`/`unreachable`, zero silent `catch {}`, zero unresolved TODOs |
+| **Testing** | Node supply-chain & checksum suites, per-module inline Zig unit tests (`>= 20`), property/fuzz pairing |
+| **Documentation** | `///` doc coverage on `pub` Zig declarations (`>= 90%`), Markdown relative links, Starlight frontmatter |
+| **Factory & Trust** | Shared object store (`build.smithers.sh`) split secrets, non-poisoning trust boundaries, personalized 3-audience `home.json`, Engineering Wiki freshness, Mythical History integrity, and one-time MCP sandbox auth |
+
+## Trust Provenance
+
+Untrusted contributor runs are encouraged and stamp their audit report as `Untrusted / Local Execution` (read-only trunk cache, isolated namespace, informational only). Maintainer-controlled sandboxes and `main` branch merges stamp reports as `Trusted Maintainer Sandbox`, publish to the shared Smithers Cloud object store, and update the live report on GitHub Pages.

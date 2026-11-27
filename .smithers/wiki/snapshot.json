@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "repository": "smithersai/claude-p",
+  "catalogSha256": "51e28679c71d0b0c3ceeb7e98eaf03cec0b46907b56c965ff8c26f0552a1d86c",
+  "pageCount": 10,
+  "pages": [
+    {
+      "id": "index",
+      "title": "System Overview and World Model",
+      "kind": "overview",
+      "document": ".smithers/wiki/pages/index.md",
+      "sha256": "296ba6ecc592ae716cd7af67bb14208202823da6e5da413054062954241576df",
+      "inputs": {
+        "README.md": "94a1deb0ebfcf9f61f669f704c58d5f6c0d61d56d5c3393fc1482a0ebd83191d",
+        "SPEC.md": "399ec4291c9f11cda899df734e36e8dbe90dbb5674886e08cee656bb6da4261c",
+        "CLAUDE.md": "29a9d506881b441a18e5e72ce69832ff091a40ed8fcc25759ea1378630592beb",
+        "build.zig": "1ab295800bb83ad3db0b3f5da76188ffff3bd38ca2e7805c286c46a594c42cbc",
+        "src/root.zig": "efd96f1353582dfcb97a8556007cb8f8cb82a80255bad774097d4cf05bdb4cb6"
+      }
+    },
+    {
+      "id": "pty-and-zmux",
+      "title": "PTY Lifecycle, zmux Threading, and DEC Queries",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/pty-and-zmux.md",
+      "sha256": "b1cc63bbea71ab65782aca7f9a6d896f0fc181f3ee4dfb8a054bd9803c7fbb81",
+      "inputs": {
+        "src/terminal.zig": "e5893c2f1598befcaa70a49dc7b3f6f9f429e22a20f3b033a10596221526c91c",
+        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6",
+        "build.zig.zon": "50c91239704786a2e292aa34c0488da21da254a0cdebe9672c04518340d529cc"
+      }
+    },
+    {
+      "id": "startup-dialogs-and-paste",
+      "title": "Startup Dialog FSM and macOS TTYHOG Safe Paste",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/startup-dialogs-and-paste.md",
+      "sha256": "5f7cc3d70f3233160aedb69c460d01c425f49edcc9f79d93f2d6589aca5670b8",
+      "inputs": {
+        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6",
+        "src/args.zig": "c57ad2b80985f7afac90c9cdf6c9bd24b14c70b09490dcf8ef56af832d1fceae"
+      }
+    },
+    {
+      "id": "hook-relay-and-fifo",
+      "title": "Nonce-Tagged Hook Relay and Ephemeral FIFO",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/hook-relay-and-fifo.md",
+      "sha256": "8319a21be452a507360bf169d64d6da2f8ee651fb9f12e0dc7a8d6c222aa745c",
+      "inputs": {
+        "src/hook.zig": "5f15b85a37ea8cd3bdcb679fa059f3017084352fb5803c4d8ca7fd6469445ff0",
+        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6"
+      }
+    },
+    {
+      "id": "transcript-and-streaming",
+      "title": "Transcript Parsing, Resume Offset Isolation, and Stop Races",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/transcript-and-streaming.md",
+      "sha256": "fca2389b84f8c2a9a16d360f8b4452ed1a8655dcdc091dc706f66537146cabc3",
+      "inputs": {
+        "src/transcript.zig": "b8d60a27b4c39ea0d0b94f4706acccdafc525b409f989d2efbf99af0977d27db",
+        "src/stream.zig": "c1012b23549f5c336967ae2bf4abd7258800142926e507d5fb78041c7f7795fa",
+        "src/emit.zig": "d373b9c4a50db28f2b46a3c36733d2acd2ccf5a2a935860270ee8c69bdad12e0"
+      }
+    },
+    {
+      "id": "daemon-protocol",
+      "title": "Multi-Turn NDJSON Daemon Protocol",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/daemon-protocol.md",
+      "sha256": "cb608f4c05e34a001e61cc9fceab6350b5722a1ee94fb692281b9276e173c0a9",
+      "inputs": {
+        "src/daemon.zig": "d4191dfdedf3117a63a68d43e7095fb123748d13cf07e1b67fa7424f6ef66a78",
+        "src/main.zig": "32bc2a3699b825c5a91f883b7a9113b5bbe2f137f2ca6716725e3db1af6af92b",
+        "src/emit.zig": "d373b9c4a50db28f2b46a3c36733d2acd2ccf5a2a935860270ee8c69bdad12e0"
+      }
+    },
+    {
+      "id": "supply-chain-and-releases",
+      "title": "Supply-Chain Trust Root and Automated Releases",
+      "kind": "operations",
+      "document": ".smithers/wiki/pages/supply-chain-and-releases.md",
+      "sha256": "4de7dcdbf04599d86d23ac2a83eac80e99e12a3091e2469bf33b3ead55a54cad",
+      "inputs": {
+        "package.json": "df1c1f8cb34761ad6f3b3319b215bfe0eace7437e5bd091d72df47a8406abb78",
+        "bin/claude-p.js": "3a7427f1fa020ddd013c387b164d9075ef5b11beda6e18ef518da3456e5dd813",
+        "scripts/install.js": "4d110b8e9f8351cf179128bfc5bd3925480f4e36acda94907ebaeaf66bca3815",
+        "scripts/publish.mjs": "3ab011c13c70ec1e92b9a82f4462f8037f9dbd36b6381d17a249731281081156",
+        ".github/workflows/release.yml": "b7f51e79ac6b5740fce0339eeb99960cfad67bf77154acbf903db454a0267fbe"
+      }
+    },
+    {
+      "id": "fuzzing-and-verification",
+      "title": "Property Suites, Coverage-Guided Fuzzing, and Lighthouse Backpressure",
+      "kind": "quality",
+      "document": ".smithers/wiki/pages/fuzzing-and-verification.md",
+      "sha256": "13bf65547e1ad2df850a5f6f49d60ab99fd165fb3f050b9b5d7643e7b011625b",
+      "inputs": {
+        "tests/prop_fuzz.zig": "25fbfb9a356614c1c84becc64afcf1372da277e40372dd8675a4967864ac51f5",
+        "tests/integration.zig": "fae01c73fff7b1ff4f75c510147bb62c316ab200a5d1ef2f5e42a96d36bef764",
+        "scripts/fuzz-linux.sh": "4ac164d6b81d9421fddd96f83818627fb4228e574fcbaf544325d728936a8034",
+        ".agents/uphill/uphill.yaml": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
+      }
+    },
+    {
+      "id": "smithers-cloud-factory",
+      "title": "Smithers Cloud Factory, Object Store, and Cloud MCP Auth",
+      "kind": "operations",
+      "document": ".smithers/wiki/pages/smithers-cloud-factory.md",
+      "sha256": "3cce61aea53553e1a42b232207b1429c98d1af995a9c14675e784146632bd18f",
+      "inputs": {
+        ".smithers/WORKSPACE.ts": "8871f00efe67180a608bac58307301daeb41ef8d433f6ae05b99884b0677ad61",
+        ".smithers/PACKAGE.ts": "0fa9f933b74bd051ca49564e344de56823e0de94c0fa92843eea6608d5eb727f",
+        ".smithers/FACTORY.ts": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc",
+        ".smithers/trust-policy.json": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c"
+      }
+    },
+    {
+      "id": "contributing-and-triage",
+      "title": "Contributing, Public TODOs, and Untrusted Execution Policy",
+      "kind": "governance",
+      "document": ".smithers/wiki/pages/contributing-and-triage.md",
+      "sha256": "94fbf0b87e36ec5776c4163a95fb9d74af86cad2b49bf84f0649655959e52d30",
+      "inputs": {
+        ".smithers/FACTORY.ts": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc",
+        ".smithers/trust-policy.json": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c",
+        ".smithers/instructions/agent.md": "3350788c81c5a6f213f4e8ebb059f675adb8581464c2395a0914731a2dd48ef9"
+      }
+    }
+  ],
+  "digest": "d65aff270b6022cf74dd3c98f9564a5db9ac657090723705d946da19edbb87be"
+}

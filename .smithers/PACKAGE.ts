@@ -23,7 +23,9 @@ const jsSources = S.Filegroup({
     S.file("//scripts/install.js"),
     S.file("//scripts/publish.mjs"),
     S.file("//scripts/build-in-linux.sh"),
-    S.file("//scripts/fuzz-linux.sh")
+    S.file("//scripts/fuzz-linux.sh"),
+    S.file("//scripts/smthrs"),
+    S.file("//scripts/smithers-auth.mjs")
   ]
 })
 
@@ -38,8 +40,28 @@ const versionSources = S.Filegroup({
   ]
 })
 
+const workflowSources = S.Filegroup({
+  cwd: "//",
+  srcs: [S.glob("//.github/workflows/*.yml")]
+})
+
 const factorySources = S.Filegroup({
   srcs: [S.glob("**", { exclude: ["cache/**", "reports/**"] })]
+})
+
+const uphillSources = S.Filegroup({
+  cwd: "//",
+  srcs: [S.glob("//.agents/uphill/**")]
+})
+
+const docsSources = S.Filegroup({
+  cwd: "//",
+  srcs: [
+    S.file("//docs/astro.config.mjs"),
+    S.file("//docs/package.json"),
+    S.glob("//docs/src/**"),
+    S.glob("//docs/public/**")
+  ]
 })
 
 const zigRunner = S.file("run-zig.sh")
@@ -76,11 +98,42 @@ const testJs = S.Shell.Test({
   args: [
     "-eu",
     "-c",
-    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh && node --test .smithers/tests/install-checksum.test.mjs .smithers/tests/factory-projections.test.mjs tests/prop/js_supplychain_prop.mjs"
+    "node --check scripts/install.js && node --check scripts/publish.mjs && node --check scripts/smithers-auth.mjs && node --check bin/claude-p.js && sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh && sh -n scripts/smthrs && node --test .smithers/tests/install-checksum.test.mjs .smithers/tests/factory-projections.test.mjs .smithers/tests/trust-boundaries.test.mjs tests/prop/js_supplychain_prop.mjs"
   ],
   sandbox: "none",
   timeout: "2m",
-  data: [jsSources, versionSources, factorySources, jsPropTestFile]
+  data: [jsSources, versionSources, factorySources, workflowSources, jsPropTestFile]
+})
+
+const trustCheck = S.Shell.Test({
+  bin: S.Host.bin("sh"),
+  tools: [S.Host.bin("node")],
+  args: [
+    "-eu",
+    "-c",
+    "node --test .smithers/tests/trust-boundaries.test.mjs && node scripts/smithers-auth.mjs --dry-run --format json >/dev/null"
+  ],
+  sandbox: "none",
+  timeout: "2m",
+  data: [factorySources, workflowSources, S.file("//scripts/smithers-auth.mjs")]
+})
+
+const wikiCheck = S.Shell.Test({
+  bin: S.Host.bin("sh"),
+  tools: [S.Host.bin("node")],
+  args: ["-eu", "-c", "node .smithers/flows/wiki/sync-wiki.mjs --check"],
+  sandbox: "none",
+  timeout: "2m",
+  data: [factorySources, zigSources, jsSources, S.file("//README.md"), S.file("//SPEC.md"), S.file("//CLAUDE.md"), workflowSources, uphillSources]
+})
+
+const historyCheck = S.Shell.Test({
+  bin: S.Host.bin("sh"),
+  tools: [S.Host.bin("node")],
+  args: ["-eu", "-c", "node .smithers/flows/mythical-history/generate.mjs --check"],
+  sandbox: "none",
+  timeout: "2m",
+  data: [factorySources, S.file("//package.json")]
 })
 
 const build = S.Shell.Build({
@@ -117,9 +170,20 @@ const buildLinuxArm64 = crossBuild("linux-arm64", "aarch64-linux-musl")
 const buildDarwinArm64 = crossBuild("darwin-arm64", "aarch64-macos")
 const buildDarwinX64 = crossBuild("darwin-x64", "x86_64-macos")
 
+// Lighthouse-style Uphill backpressure audit (manual Run target so local
+// environments without ~/.uphill/bin/uphill still pass fast `smthrs ci //...`).
+const audit = S.Shell.Run({
+  shell: "node .smithers/audit/generate-lighthouse.mjs",
+  tools: [S.Host.bin("node"), S.Host.bin("bun"), S.Host.bin("zig")],
+  sandbox: "none",
+  timeout: "10m",
+  data: [zigSources, jsSources, factorySources, uphillSources, docsSources],
+  manual: true
+})
+
 // Real-Claude E2E suite (0 mocks). Declared as a manual Run target so fast
 // local/CI `smthrs ci //...` remains completely offline and zero-cost; run
-// explicitly on demand via `smthrs run //.smithers:test-e2e`.
+// explicitly on demand via `scripts/smthrs run //.smithers:test-e2e`.
 const testE2e = S.Shell.Run({
   shell: "env -u ANTHROPIC_API_KEY CLAUDE_P_E2E=1 sh .smithers/run-zig.sh build test-integration --summary all",
   tools: [S.Host.bin("zig")],
@@ -135,17 +199,24 @@ export const Package = S.Package({
     "zig-sources": zigSources,
     "js-sources": jsSources,
     "version-sources": versionSources,
+    "workflow-sources": workflowSources,
     "factory-sources": factorySources,
+    "uphill-sources": uphillSources,
+    "docs-sources": docsSources,
     "factory-write": S.FactoryProjection({ mode: "write" }),
     "factory-check": S.FactoryProjection({ mode: "check" }),
     hygiene,
     "test-js": testJs,
+    "trust-check": trustCheck,
+    "wiki-check": wikiCheck,
+    "history-check": historyCheck,
     build,
     "test-unit": testUnit,
     "build-linux-x64": buildLinuxX64,
     "build-linux-arm64": buildLinuxArm64,
     "build-darwin-arm64": buildDarwinArm64,
     "build-darwin-x64": buildDarwinX64,
+    audit,
     "test-e2e": testE2e
   }
 })

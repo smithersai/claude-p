@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "repository": "smithersai/claude-p",
+  "title": "claude-p Engineering Wiki",
+  "worldModel": {
+    "wiki": ".smithers/wiki",
+    "history": ".smithers/history",
+    "objectStore": "https://build.smithers.sh",
+    "mcpEndpoint": "https://smithers.sh/api/mcp"
+  },
+  "pages": [
+    {
+      "id": "index",
+      "title": "System Overview and World Model",
+      "purpose": "High-level architecture of claude-p, module boundaries, invariants, and how the coding factory operates on Smithers Cloud.",
+      "kind": "overview",
+      "document": ".smithers/wiki/pages/index.md",
+      "inputs": ["README.md", "SPEC.md", "CLAUDE.md", "build.zig", "src/root.zig"],
+      "related": ["pty-and-zmux", "hook-relay-and-fifo", "daemon-protocol", "smithers-cloud-factory"]
+    },
+    {
+      "id": "pty-and-zmux",
+      "title": "PTY Lifecycle, zmux Threading, and DEC Queries",
+      "purpose": "How claude-p drives interactive Claude Code inside zmux.NativeSession without deadlocks or Ink terminal hangs.",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/pty-and-zmux.md",
+      "inputs": ["src/terminal.zig", "src/driver.zig", "build.zig.zon"],
+      "related": ["index", "startup-dialogs-and-paste", "hook-relay-and-fifo"]
+    },
+    {
+      "id": "startup-dialogs-and-paste",
+      "title": "Startup Dialog FSM and macOS TTYHOG Safe Paste",
+      "purpose": "Intent-gated Claude Code 2.1 dialog confirmation, PasteChunker 512B UTF-8 chunking, and prompt acceptance watchdogs.",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/startup-dialogs-and-paste.md",
+      "inputs": ["src/driver.zig", "src/args.zig"],
+      "related": ["pty-and-zmux", "daemon-protocol", "fuzzing-and-verification"]
+    },
+    {
+      "id": "hook-relay-and-fifo",
+      "title": "Nonce-Tagged Hook Relay and Ephemeral FIFO",
+      "purpose": "Inline --settings injection, zero ~/.claude mutation, nonce verification, and PermissionRequest fail-fast.",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/hook-relay-and-fifo.md",
+      "inputs": ["src/hook.zig", "src/driver.zig"],
+      "related": ["index", "transcript-and-streaming", "daemon-protocol"]
+    },
+    {
+      "id": "transcript-and-streaming",
+      "title": "Transcript Parsing, Resume Offset Isolation, and Stop Races",
+      "purpose": "Offset-scoped JSONL parsing, UUID and message.id deduplication, pread tailing, and provisional Stop confirmation.",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/transcript-and-streaming.md",
+      "inputs": ["src/transcript.zig", "src/stream.zig", "src/emit.zig"],
+      "related": ["hook-relay-and-fifo", "daemon-protocol"]
+    },
+    {
+      "id": "daemon-protocol",
+      "title": "Multi-Turn NDJSON Daemon Protocol",
+      "purpose": "Long-lived stdin/stdout NDJSON framing, incremental paste scheduling, queue bounds, interrupts, and dual watchdogs.",
+      "kind": "subsystem",
+      "document": ".smithers/wiki/pages/daemon-protocol.md",
+      "inputs": ["src/daemon.zig", "src/main.zig", "src/emit.zig"],
+      "related": ["index", "startup-dialogs-and-paste", "transcript-and-streaming"]
+    },
+    {
+      "id": "supply-chain-and-releases",
+      "title": "Supply-Chain Trust Root and Automated Releases",
+      "purpose": "Bundled checksums.json, SHA256SUMS verification, 4-target Zig cross-compilation, and merge-triggered npm provenance releases.",
+      "kind": "operations",
+      "document": ".smithers/wiki/pages/supply-chain-and-releases.md",
+      "inputs": ["package.json", "bin/claude-p.js", "scripts/install.js", "scripts/publish.mjs", ".github/workflows/release.yml"],
+      "related": ["smithers-cloud-factory", "fuzzing-and-verification"]
+    },
+    {
+      "id": "fuzzing-and-verification",
+      "title": "Property Suites, Coverage-Guided Fuzzing, and Lighthouse Backpressure",
+      "purpose": "How 378+ Zig tests, 31 fuzz targets, 4,000+ JS supply-chain trials, and Uphill Lighthouse audits prevent regressions.",
+      "kind": "quality",
+      "document": ".smithers/wiki/pages/fuzzing-and-verification.md",
+      "inputs": ["tests/prop_fuzz.zig", "tests/integration.zig", "scripts/fuzz-linux.sh", ".agents/uphill/uphill.yaml"],
+      "related": ["supply-chain-and-releases", "smithers-cloud-factory"]
+    },
+    {
+      "id": "smithers-cloud-factory",
+      "title": "Smithers Cloud Factory, Object Store, and Cloud MCP Auth",
+      "purpose": "Shared object store caching, untrusted vs trusted execution boundaries, personalized 3-audience UI, and one-time sandbox auth.",
+      "kind": "operations",
+      "document": ".smithers/wiki/pages/smithers-cloud-factory.md",
+      "inputs": [".smithers/WORKSPACE.ts", ".smithers/PACKAGE.ts", ".smithers/FACTORY.ts", ".smithers/trust-policy.json"],
+      "related": ["index", "contributing-and-triage", "supply-chain-and-releases"]
+    },
+    {
+      "id": "contributing-and-triage",
+      "title": "Contributing, Public TODOs, and Untrusted Execution Policy",
+      "purpose": "How external contributors and BYOA agents participate via Smithers Cloud MCP without risking trunk cache poisoning or gate bypass.",
+      "kind": "governance",
+      "document": ".smithers/wiki/pages/contributing-and-triage.md",
+      "inputs": [".smithers/FACTORY.ts", ".smithers/trust-policy.json", ".smithers/instructions/agent.md"],
+      "related": ["smithers-cloud-factory", "fuzzing-and-verification"]
+    }
+  ]
+}

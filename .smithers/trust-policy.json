@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "repository": "smithersai/claude-p",
+  "cloudUrl": "https://smithers.sh/smithersai/claude-p",
+  "docsUrl": "https://smithersai.github.io/claude-p/",
+  "llmsIndexUrl": "https://smithersai.github.io/claude-p/llms.txt",
+  "mcpEndpoint": "https://smithers.sh/api/mcp",
+  "maintainers": ["roninjin10"],
+  "objectStore": {
+    "endpoint": "https://build.smithers.sh",
+    "contract": "result-only-v1",
+    "readSecret": "SMITHERS_CACHE_READ_TOKEN",
+    "writeSecret": "SMITHERS_CACHE_WRITE_TOKEN",
+    "trustedWriteBranch": "main",
+    "trustedWriteEnvironment": "cache-publish",
+    "untrustedNamespacePrefix": "pr-",
+    "untrustedCanWriteTrunk": false
+  },
+  "executionTiers": {
+    "trusted_maintainer_sandbox": {
+      "label": "Trusted Maintainer Sandbox",
+      "allowedActors": ["roninjin10", "smithers-cloud-sandbox", "github-actions-main"],
+      "cacheRead": true,
+      "cacheWriteTrunk": true,
+      "canSatisfyMergeGates": true,
+      "canTriggerRelease": true,
+      "canPublishDocs": true
+    },
+    "untrusted_contributor": {
+      "label": "Untrusted Contributor Execution",
+      "encouraged": true,
+      "cacheRead": true,
+      "cacheWriteTrunk": false,
+      "cacheNamespacePolicy": "pr-scoped-or-local-only",
+      "canSatisfyMergeGates": false,
+      "canTriggerRelease": false,
+      "canPublishDocs": false,
+      "receiptTrustTag": "untrusted"
+    }
+  },
+  "readOnlyFlows": ["checks/review", "pr-triage"],
+  "personOnlyActions": [
+    "pr/merge",
+    "todo/commit",
+    "todo/drop",
+    "release/publish",
+    "secret/write"
+  ],
+  "protectedPaths": [
+    "src/driver.zig",
+    "src/hook.zig",
+    "src/daemon.zig",
+    "build.zig.zon",
+    "build.zig",
+    "package.json",
+    "bin/claude-p.js",
+    "scripts/install.js",
+    "scripts/publish.mjs",
+    "scripts/build-in-linux.sh",
+    "scripts/fuzz-linux.sh",
+    "scripts/smthrs",
+    "scripts/smithers-auth.mjs",
+    ".github/workflows/**",
+    ".smithers/**",
+    ".agents/uphill/**"
+  ]
+}

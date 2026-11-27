@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   uphill:
-    name: Uphill metrics
+    name: Uphill Lighthouse Audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -34,3 +34,15 @@ jobs:
 
       - name: Run Uphill
         uses: wevm/uphill@main
+
+      - name: Render Lighthouse-style Audit Report (untrusted PR provenance)
+        run: node .smithers/audit/generate-lighthouse.mjs --no-run --skip-docs
+
+      - name: Upload Lighthouse Audit Report artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lighthouse-audit-pr
+          path: |
+            .smithers/reports/audit.html
+            .smithers/reports/audit.json
+          retention-days: 14

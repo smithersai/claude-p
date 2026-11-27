@@ -1,5 +1,5 @@
 {
-  "summary": "claude-p: local-first incremental Zig/JS CI, Claude Code CLI compatibility probes, PTY reliability review, and maintainer triage.",
+  "summary": "claude-p: Zig/JS CI on Smithers Cloud, Lighthouse audit backpressure, wiki, mythical history, and MCP flows.",
   "flows": [
     {
       "id": "checks/review",
@@ -159,7 +159,7 @@
     {
       "id": "claude-compat-probe",
       "description": "Probe the installed Claude Code CLI release for flag drift, hook suppression, and rejected-flag coverage using only read-only version and help output.",
-      "summary": "Inspect a Claude Code CLI release with read-only --version/--help for flag drift, hook-suppressing flags, and rejected-flag coverage.",
+      "summary": "Inspect a Claude Code CLI release with read-only --version/--help for flag drift and rejected-flag coverage.",
       "featured": true,
       "kind": "mdx",
       "path": ".smithers/flows/claude-compat-probe/flow.mdx",
@@ -194,18 +194,156 @@
         "tokens": 64000,
         "milliseconds": 1200000
       }
+    },
+    {
+      "id": "uphill",
+      "description": "Run Uphill continuous metrics, validate metric definitions, and generate the Lighthouse-style audit report.",
+      "summary": "Run Uphill continuous metrics and generate the Lighthouse-style audit report.",
+      "featured": true,
+      "kind": "ts",
+      "path": ".smithers/flows/uphill/flow.ts",
+      "capabilities": [
+        "proc:spawn:uphill *",
+        "proc:spawn:node .smithers/audit/generate-lighthouse.mjs"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "flows": []
+    },
+    {
+      "id": "wiki",
+      "description": "Verify Engineering Wiki citations, source freshness digests, and wikilinks, then sync Obsidian-compatible pages into Starlight docs and llms.txt.",
+      "summary": "Verify Engineering Wiki citations and source digests, then sync pages into Starlight docs and llms.txt.",
+      "featured": false,
+      "kind": "ts",
+      "path": ".smithers/flows/wiki/flow.ts",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:docs/src/content/docs/wiki/**",
+        "proc:spawn:node .smithers/flows/wiki/sync-wiki.mjs *"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "flows": []
+    },
+    {
+      "id": "mythical-history",
+      "description": "Reconstruct the Mythical History of claude-p from jj commits, releases, PRs, and fuzzing bug kills into CHRONICLE.md, history.json, and Starlight docs.",
+      "summary": "Reconstruct the Mythical History of claude-p from jj commits, releases, PRs, and fuzzing discoveries.",
+      "featured": false,
+      "kind": "ts",
+      "path": ".smithers/flows/mythical-history/flow.ts",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:.smithers/history/**",
+        "fs:write:docs/src/content/docs/history/**",
+        "proc:spawn:node .smithers/flows/mythical-history/generate.mjs *",
+        "proc:spawn:jj --no-pager log *"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "flows": []
+    },
+    {
+      "id": "docs-deploy",
+      "description": "Rebuild the Starlight documentation site, Engineering Wiki, Mythical History, Lighthouse audit report, and llms.txt index on merge to main.",
+      "summary": "Rebuild and verify Starlight docs, Lighthouse audit report, wiki, mythical history, and llms.txt on merge.",
+      "featured": false,
+      "kind": "ts",
+      "path": ".smithers/flows/docs-deploy/flow.ts",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:docs/**",
+        "proc:spawn:node .smithers/**",
+        "proc:spawn:npm *"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "flows": []
+    },
+    {
+      "id": "release",
+      "description": "Verify version lockstep, tests, and Lighthouse audit gates, cross-compile all four platform binaries with SHA256SUMS and checksums.json, ask maintainer approval, and publish to GitHub Releases and npm.",
+      "summary": "Verify gates, cross-compile four targets with checksums, request maintainer approval, and publish.",
+      "featured": false,
+      "kind": "ts",
+      "path": ".smithers/flows/release/flow.ts",
+      "capabilities": [
+        "fs:read:**",
+        "fs:write:release-assets/**",
+        "proc:spawn:node scripts/publish.mjs *",
+        "proc:spawn:node --test *",
+        "proc:spawn:node .smithers/audit/generate-lighthouse.mjs *",
+        "proc:spawn:sh .smithers/run-zig.sh *"
+      ],
+      "model": null,
+      "modelInvocable": false,
+      "flows": []
+    },
+    {
+      "id": "sandbox-auth",
+      "description": "Mint and print short-lived, attenuated one-time authentication and MCP bootstrap configuration for sandboxes and BYOA coding agents without exposing master secrets.",
+      "summary": "Mint short-lived attenuated one-time auth and Cloud MCP bootstrap config for sandboxes and agents.",
+      "featured": false,
+      "kind": "ts",
+      "path": ".smithers/flows/sandbox-auth/flow.ts",
+      "capabilities": [
+        "proc:spawn:node scripts/smithers-auth.mjs *"
+      ],
+      "model": null,
+      "modelInvocable": true,
+      "flows": []
     }
   ],
   "on": [
     {
+      "event": "issue.labeled:todo",
+      "flow": "issue/poc",
+      "description": "Implement every maintainer-accepted TODO with failing tests first"
+    },
+    {
+      "event": "change.opened",
+      "flow": "checks/review",
+      "description": "Review every Change through PTY, Zig memory, wire parity, and supply-chain lenses"
+    },
+    {
+      "event": "change.updated",
+      "flow": "checks/review",
+      "description": "Re-review every updated Change"
+    },
+    {
+      "event": "change.landed",
+      "flow": [
+        "wiki",
+        "mythical-history",
+        "docs-deploy"
+      ],
+      "description": "Refresh wiki, mythical history, audit report, and live docs after landing"
+    },
+    {
+      "event": "github.push:main",
+      "flow": [
+        "uphill",
+        "wiki",
+        "mythical-history",
+        "docs-deploy"
+      ],
+      "description": "Run Lighthouse audit and publish docs, wiki, and history on every merge to main"
+    },
+    {
       "event": "schedule:0 15 * * 1",
       "flow": "claude-compat-probe",
       "description": "Weekly Monday probe against the latest Claude Code CLI release"
+    },
+    {
+      "event": "schedule:0 6 * * *",
+      "flow": "uphill",
+      "description": "Daily Uphill Lighthouse audit check across all codebase categories"
     }
   ],
   "github": {
     "mirror": "pull",
-    "issues": "read",
+    "issues": "two-way",
     "changes": "send-upstream",
     "protectedPaths": [
       "src/driver.zig",
@@ -218,8 +356,12 @@
       "scripts/install.js",
       "scripts/publish.mjs",
       "scripts/build-in-linux.sh",
+      "scripts/fuzz-linux.sh",
+      "scripts/smthrs",
+      "scripts/smithers-auth.mjs",
       ".github/workflows/**",
-      ".smithers/**"
+      ".smithers/**",
+      ".agents/uphill/**"
     ],
     "maintainers": [
       "roninjin10"

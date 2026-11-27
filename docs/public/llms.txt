@@ -1,6 +1,6 @@
 # claude-p
 
-> Emulates `claude -p` (not a drop-in or wire-compatible replacement) by driving the interactive `claude` UI inside an in-process zmux PTY session. Version 0.1.3, Zig 0.15.2, macOS and Linux (arm64/x64).
+> Emulates `claude -p` (not a drop-in or wire-compatible replacement) by driving the interactive `claude` UI inside an in-process zmux PTY session. Version 0.1.3, Zig 0.15.2, macOS and Linux (arm64/x64). Public Smithers Cloud factory at https://smithers.sh/smithersai/claude-p.
 
 ## Quick facts
 
@@ -10,11 +10,27 @@
 - Rejected CLI flags (exit `2`): `-p`, `--print`, `--settings` (use `--extra-hook` or `--setting-json`), `--bare`, `--safe-mode`, `--no-session-persistence`, and the print-mode-only `--input-format`, `--json-schema`, `--max-budget-usd`, `--max-turns`, `--fallback-model`, `--include-partial-messages`, `--forward-subagent-text`, `--replay-user-messages`, `--verbose-thinking`.
 - Exit codes: `0` success, `1` assistant `is_error`, `2` CLI/wrapper error, `124` every timeout (one-shot timeouts and daemon `session_start_timeout`/`idle_timeout`/`transcript_stalled`), `128+sig` after `SIGINT`/`SIGTERM`/`SIGHUP` (set by the native binary; the npm shim passes it through).
 - Never mutates `~/.claude/`; uses per-run `$TMPDIR/claude-p-<pid>-<rand>/` FIFO + relay script.
+- Smithers Cloud MCP: `https://smithers.sh/api/mcp` · Shared object store: `https://build.smithers.sh`.
 
 ## Start here
 
 - [Overview](https://smithersai.github.io/claude-p/): Splash page, quick commands, mode comparison, and design principles.
 - [Getting Started](https://smithersai.github.io/claude-p/getting-started/): Prerequisites, install with SHA-256 verification, and first text/json/stream-json runs.
+
+## Coding factory, audit, wiki, and mythical history
+
+- [Lighthouse Backpressure Audit](https://smithersai.github.io/claude-p/factory/audit/): Overview of Uphill continuous metrics, trust provenance, and live interactive Lighthouse gauges at https://smithersai.github.io/claude-p/audit/.
+- [Mythical History](https://smithersai.github.io/claude-p/history/): Chronological commit, release, review, and fuzzing bug-kill chronicle reconstructed from jj history.
+- [Wiki: System Overview and World Model](https://smithersai.github.io/claude-p/wiki/): Module map, architecture diagram, and invariants.
+- [Wiki: PTY Lifecycle, zmux Threading, and DEC Queries](https://smithersai.github.io/claude-p/wiki/pty-and-zmux/): EventSink threading rules and streaming DecDecoder.
+- [Wiki: Startup Dialog FSM and macOS TTYHOG Safe Paste](https://smithersai.github.io/claude-p/wiki/startup-dialogs-and-paste/): Claude Code 2.1 trust dialog confirmation and PasteChunker.
+- [Wiki: Nonce-Tagged Hook Relay and Ephemeral FIFO](https://smithersai.github.io/claude-p/wiki/hook-relay-and-fifo/): Inline settings, nonce verification, and PermissionRequest fail-fast.
+- [Wiki: Transcript Parsing, Resume Offset Isolation, and Stop Races](https://smithersai.github.io/claude-p/wiki/transcript-and-streaming/): Offset-scoped parsing, deduplication, and provisional Stop confirmation.
+- [Wiki: Multi-Turn NDJSON Daemon Protocol](https://smithersai.github.io/claude-p/wiki/daemon-protocol/): Stdin/stdout frames, incremental paste, and dual watchdogs.
+- [Wiki: Supply-Chain Trust Root and Automated Releases](https://smithersai.github.io/claude-p/wiki/supply-chain-and-releases/): checksums.json trust root and merge-triggered releases.
+- [Wiki: Property Suites, Coverage-Guided Fuzzing, and Lighthouse Backpressure](https://smithersai.github.io/claude-p/wiki/fuzzing-and-verification/): 378+ Zig tests, 31 fuzz targets, and Uphill backpressure.
+- [Wiki: Smithers Cloud Factory, Object Store, and Cloud MCP Auth](https://smithersai.github.io/claude-p/wiki/smithers-cloud-factory/): Shared cache split, personalized UI, and one-time sandbox auth.
+- [Wiki: Contributing, Public TODOs, and Untrusted Execution Policy](https://smithersai.github.io/claude-p/wiki/contributing-and-triage/): Untrusted execution welcome policy and person-only governance.
 
 ## Tutorials
 

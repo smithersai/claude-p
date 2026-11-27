@@ -46,3 +46,14 @@ Keep Zig public declarations documented, Markdown links valid, and Astro docs fr
 - Document public Zig functions and constants with `///` doc comments (target >= 90%). At least 90.
 - Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.
 - Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.
+
+## Factory & Trust
+
+Enforce Smithers Cloud shared object-store caching, non-poisoning trust boundaries, personalized 3-audience UI, wiki freshness, mythical history, and one-time MCP sandbox auth.
+
+- Configure .smithers/WORKSPACE.ts with https://build.smithers.sh and separate SMITHERS_CACHE_READ_TOKEN and SMITHERS_CACHE_WRITE_TOKEN secrets.
+- Pass .smithers/tests/trust-boundaries.test.mjs to prevent cache poisoning and untrusted gate bypasses.
+- Keep .smithers/home.json personalized across maintainer, contributor, and everyone audiences with an https:// docs llms.txt URL.
+- Keep all Engineering Wiki citations and source digests fresh (`node .smithers/flows/wiki/sync-wiki.mjs --write`).
+- Keep Mythical History generated and verified (`node .smithers/flows/mythical-history/generate.mjs --write`).
+- Keep scripts/smithers-auth.mjs valid and able to print attenuated sandbox and Cloud MCP bootstrap config.

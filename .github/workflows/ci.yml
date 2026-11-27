@@ -12,6 +12,12 @@ permissions:
 jobs:
   hygiene:
     runs-on: ubuntu-latest
+    env:
+      # PRs and untrusted runs may read from the shared Smithers Cloud object
+      # store (https://build.smithers.sh) but NEVER receive write tokens and
+      # isolate any local namespace to pr-<n>.
+      SMITHERS_CACHE_READ_TOKEN: ${{ secrets.SMITHERS_CACHE_READ_TOKEN }}
+      SMITHERS_CACHE_NAMESPACE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -27,17 +33,20 @@ jobs:
       - name: Versions agree (package.json, build.zig.zon, src/root.zig)
         run: node scripts/publish.mjs --check-versions
 
-      - name: Release scripts parse & SHA256 installer tests
+      - name: Release, auth, and wrapper scripts parse & supply-chain tests
         run: |
-          node --check scripts/install.js && node --check scripts/publish.mjs && node --check bin/claude-p.js
-          sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh
+          node --check scripts/install.js && node --check scripts/publish.mjs && node --check scripts/smithers-auth.mjs && node --check bin/claude-p.js
+          sh -n scripts/build-in-linux.sh && bash -n scripts/fuzz-linux.sh && sh -n scripts/smthrs && sh -n .smithers/run-zig.sh
           node --test .smithers/tests/install-checksum.test.mjs
           node --test tests/prop/js_supplychain_prop.mjs
 
-      - name: Factory projections are not stale (.smithers/factory.json, home.json)
-        # Re-derives projected fields from flow.mdx frontmatter and FACTORY.ts.
-        # On failure run: smthrs target //.smithers:factory-write --write
-        run: node --test .smithers/tests/factory-projections.test.mjs
+      - name: Factory projections, trust boundaries, wiki, mythical history, and MCP auth dry-run
+        run: |
+          node --test .smithers/tests/factory-projections.test.mjs
+          node --test .smithers/tests/trust-boundaries.test.mjs
+          node .smithers/flows/wiki/sync-wiki.mjs --check
+          node .smithers/flows/mythical-history/generate.mjs --check
+          node scripts/smithers-auth.mjs --dry-run --format json >/dev/null
 
   test:
     strategy:
@@ -45,6 +54,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
+    env:
+      SMITHERS_CACHE_READ_TOKEN: ${{ secrets.SMITHERS_CACHE_READ_TOKEN }}
+      SMITHERS_CACHE_NAMESPACE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,11 +67,14 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: zig fmt --check
+        run: zig fmt --check src/ tests/
+
       - name: zig build
         run: zig build -Doptimize=ReleaseSafe
 
       - name: zig build test
-        run: zig build test
+        run: zig build test --summary all
 
       - name: Coverage-guided Zig fuzz (all targets, 60s)
         if: runner.os == 'Linux'
@@ -92,3 +107,47 @@ jobs:
 
       - name: Binary exists
         run: test -s out/bin/claude-p && file out/bin/claude-p
+
+  cache-publish:
+    # Trusted trunk publication ONLY on push to main inside the cache-publish
+    # environment. Untrusted PRs can never execute this job or poison trunk cache.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [hygiene, test, cross-compile]
+    runs-on: ubuntu-latest
+    environment: cache-publish
+    env:
+      SMITHERS_TRUST_TIER: trusted_maintainer_sandbox
+      SMITHERS_CACHE_READ_TOKEN: ${{ secrets.SMITHERS_CACHE_READ_TOKEN }}
+      SMITHERS_CACHE_WRITE_TOKEN: ${{ secrets.SMITHERS_CACHE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install zig 0.15.2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Verify shared Smithers Cloud object store health
+        run: curl -fsS https://build.smithers.sh/healthz
+
+      - name: Run Uphill Lighthouse audit on trusted main
+        uses: wevm/uphill@main
+
+      - name: Generate trusted Lighthouse audit artifact
+        run: node .smithers/audit/generate-lighthouse.mjs --no-run --skip-docs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lighthouse-audit-report
+          path: |
+            .smithers/reports/audit.html
+            .smithers/reports/audit.json
+          retention-days: 30

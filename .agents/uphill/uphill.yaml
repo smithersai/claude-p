@@ -93,3 +93,26 @@ documentation:
   # Every Starlight documentation page under docs/src/content/docs/ must declare both title and description frontmatter.
   docs-frontmatter:
     description: Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.
+
+factory:
+  title: Factory & Trust
+  description: Enforce Smithers Cloud shared object-store caching, non-poisoning trust boundaries, personalized 3-audience UI, wiki freshness, mythical history, and one-time MCP sandbox auth.
+  run: bun .agents/uphill/metrics/factory.ts
+  # Shared Smithers Cloud object store (https://build.smithers.sh) with split read and write secrets.
+  remote-cache-config:
+    description: Configure .smithers/WORKSPACE.ts with https://build.smithers.sh and separate SMITHERS_CACHE_READ_TOKEN and SMITHERS_CACHE_WRITE_TOKEN secrets.
+  # Trust boundary invariants: untrusted runs read cache only, never write trunk, never skip gates, and triage flows spawn zero processes.
+  trust-boundaries:
+    description: Pass .smithers/tests/trust-boundaries.test.mjs to prevent cache poisoning and untrusted gate bypasses.
+  # Personalized 3-audience factory UI (maintainer, contributor, everyone) with https:// llms.txt docs index.
+  personalized-ui:
+    description: Keep .smithers/home.json personalized across maintainer, contributor, and everyone audiences with an https:// docs llms.txt URL.
+  # Engineering Wiki citations, wikilinks, and source digests stay fresh and synced to Starlight docs.
+  wiki-freshness:
+    description: Keep all Engineering Wiki citations and source digests fresh (`node .smithers/flows/wiki/sync-wiki.mjs --write`).
+  # Mythical History chronicle and timeline JSON stay valid and synced.
+  mythical-history:
+    description: Keep Mythical History generated and verified (`node .smithers/flows/mythical-history/generate.mjs --write`).
+  # One-time attenuated sandbox and Cloud MCP auth CLI passes dry-run verification.
+  mcp-sandbox-auth:
+    description: Keep scripts/smithers-auth.mjs valid and able to print attenuated sandbox and Cloud MCP bootstrap config.

@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "outputs": {
+    ".smithers/factory.json": {
+      "flow": "factory-write",
+      "source": ".smithers/FACTORY.ts",
+      "inputs": [
+        {
+          "path": ".smithers/FACTORY.ts",
+          "sha256": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc"
+        },
+        {
+          "path": ".smithers/WORKSPACE.ts",
+          "sha256": "8871f00efe67180a608bac58307301daeb41ef8d433f6ae05b99884b0677ad61"
+        },
+        {
+          "path": ".smithers/PACKAGE.ts",
+          "sha256": "0fa9f933b74bd051ca49564e344de56823e0de94c0fa92843eea6608d5eb727f"
+        }
+      ],
+      "sha256": "2c9b409fd46cff116885bde3d5fcf4825f60699448f4990641fa065a039bf558"
+    },
+    ".smithers/home.json": {
+      "flow": "factory-write",
+      "source": ".smithers/FACTORY.ts",
+      "inputs": [
+        {
+          "path": ".smithers/FACTORY.ts",
+          "sha256": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc"
+        }
+      ],
+      "sha256": "1865d24fe7138c14ec91d43a779dff34cf0d3974900f791205b13bcf4f42642d"
+    },
+    ".smithers/wiki/snapshot.json": {
+      "flow": "wiki",
+      "source": ".smithers/flows/wiki/sync-wiki.mjs",
+      "inputs": [
+        {
+          "path": ".smithers/coding-project.json",
+          "sha256": "51e28679c71d0b0c3ceeb7e98eaf03cec0b46907b56c965ff8c26f0552a1d86c"
+        },
+        {
+          "path": ".smithers/wiki/pages/index.md",
+          "sha256": "296ba6ecc592ae716cd7af67bb14208202823da6e5da413054062954241576df"
+        }
+      ],
+      "sha256": "fbf985d8cc1aadd8c8044742d6a4f27ac92f2383f888f1e9adf2c9b5105f2922"
+    },
+    ".smithers/history/CHRONICLE.md": {
+      "flow": "mythical-history",
+      "source": ".smithers/flows/mythical-history/generate.mjs",
+      "inputs": [
+        {
+          "path": ".smithers/flows/mythical-history/generate.mjs",
+          "sha256": "0be193accd1d97bd7efb863dc0d175866fcf0d759e1834b357934bb7a807a3a1"
+        },
+        {
+          "path": "package.json",
+          "sha256": "df1c1f8cb34761ad6f3b3319b215bfe0eace7437e5bd091d72df47a8406abb78"
+        }
+      ],
+      "sha256": "9ae31a2a48487e5fd6c74a45d37821d14712bc222f369b725d41c187565f0b04"
+    },
+    ".smithers/history/history.json": {
+      "flow": "mythical-history",
+      "source": ".smithers/flows/mythical-history/generate.mjs",
+      "inputs": [
+        {
+          "path": ".smithers/flows/mythical-history/generate.mjs",
+          "sha256": "0be193accd1d97bd7efb863dc0d175866fcf0d759e1834b357934bb7a807a3a1"
+        },
+        {
+          "path": "package.json",
+          "sha256": "df1c1f8cb34761ad6f3b3319b215bfe0eace7437e5bd091d72df47a8406abb78"
+        }
+      ],
+      "sha256": "ffd7d142ce4db18ef07cc8b71395f9ce2873cb207a5f0ffb6c2584b9ec45d4eb"
+    },
+    "docs/public/audit/index.html": {
+      "flow": "uphill",
+      "source": ".smithers/audit/generate-lighthouse.mjs",
+      "inputs": [
+        {
+          "path": ".agents/uphill/uphill.yaml",
+          "sha256": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
+        },
+        {
+          "path": ".agents/uphill/uphill.baseline.yaml",
+          "sha256": "a5b3743c0cad2ef837f9e65509b37f1889ed03586837c33615329ec13b3a15ad"
+        },
+        {
+          "path": ".smithers/trust-policy.json",
+          "sha256": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c"
+        }
+      ],
+      "sha256": "c87f1c7ca2783aa9c76119e05235cbc13c013b56ae53dab33419e8d3595470ce"
+    },
+    "docs/public/audit/audit.json": {
+      "flow": "uphill",
+      "source": ".smithers/audit/generate-lighthouse.mjs",
+      "inputs": [
+        {
+          "path": ".agents/uphill/uphill.yaml",
+          "sha256": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
+        },
+        {
+          "path": ".agents/uphill/uphill.baseline.yaml",
+          "sha256": "a5b3743c0cad2ef837f9e65509b37f1889ed03586837c33615329ec13b3a15ad"
+        },
+        {
+          "path": ".smithers/trust-policy.json",
+          "sha256": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c"
+        }
+      ],
+      "sha256": "cc953bf4fc3f05e4297a3f64810c8ba158347c519eca6cb0add9ac964dc5930a"
+    },
+    ".agents/uphill/rules.md": {
+      "flow": "uphill",
+      "source": ".agents/uphill/uphill.yaml",
+      "inputs": [
+        {
+          "path": ".agents/uphill/uphill.yaml",
+          "sha256": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
+        }
+      ],
+      "sha256": "ad20904371fa27a91e178a03794ae68e554777d13c6963ef60af30858f3a6f74"
+    }
+  }
+}

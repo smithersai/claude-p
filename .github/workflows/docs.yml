@@ -1,11 +1,20 @@
 name: Deploy Docs
 
+# Automatically rebuilds and publishes the Starlight documentation site,
+# Engineering Wiki, Mythical History, live Lighthouse Uphill Audit Report,
+# and llms.txt whenever changes merge to main (from Smithers Cloud or GitHub).
+
 on:
   push:
     branches:
       - main
     paths:
       - 'docs/**'
+      - 'src/**'
+      - 'README.md'
+      - 'SPEC.md'
+      - '.smithers/**'
+      - '.agents/uphill/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -21,16 +30,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      SMITHERS_TRUST_TIER: trusted_maintainer_sandbox
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install zig 0.15.2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: docs/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Run Uphill metrics for live Lighthouse audit
+        uses: wevm/uphill@main
+
+      - name: Sync Engineering Wiki and render Lighthouse Audit Report
+        run: |
+          node .smithers/flows/wiki/sync-wiki.mjs --write
+          node .smithers/audit/generate-lighthouse.mjs --no-run
 
       - name: Install docs dependencies
         working-directory: docs
@@ -39,6 +66,12 @@ jobs:
       - name: Build Starlight site
         working-directory: docs
         run: npm run build
+
+      - name: Verify llms.txt and live Lighthouse audit output
+        run: |
+          test -s docs/dist/llms.txt
+          test -s docs/dist/audit/index.html
+          test -s docs/dist/audit/audit.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
@@ -55,9 +88,6 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
