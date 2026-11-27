@@ -262,6 +262,7 @@ const DaemonLoop = struct {
     }
 
     fn handleHookEvent(self: *DaemonLoop, ev: hook_mod.HookLine) !?u8 {
+        std.debug.assert(@intFromPtr(self.shared) != 0);
         if (self.opts.debug) std.debug.print("hook: {s}\n", .{@tagName(ev.event)});
         switch (ev.event) {
             .session_start => {
@@ -306,6 +307,7 @@ const DaemonLoop = struct {
     }
 
     fn handlePermissionRequest(self: *DaemonLoop, payload: []const u8) !void {
+        std.debug.assert(@intFromPtr(self.session) != 0);
         const allow = self.state == .busy and self.injections > 0 and
             !driver_mod.hasExtraHook(self.opts.extra_hooks, "PermissionRequest");
         if (!allow) return;
@@ -334,6 +336,7 @@ const DaemonLoop = struct {
 
     fn handleStopHook(self: *DaemonLoop, ev: hook_mod.HookLine) !void {
         if (!stopBelongsToTurn(self.state, self.prompt_acked)) return;
+        std.debug.assert(self.active_prompt != null);
         try self.transcript.observePath(self.allocator, ev.payload);
         self.transcript.refresh(self.allocator, self.active_prompt.?, true);
         turn.clearStop(self.allocator, &self.pending_stop);
@@ -422,6 +425,7 @@ const DaemonLoop = struct {
 
     fn drainStdin(self: *DaemonLoop, read_buf: *[4096]u8, age: u64) !void {
         if (self.stdin_eof or !protocol.fdReadable(self.stdin_fd)) return;
+        std.debug.assert(read_buf.len > 0);
         const n = try std.posix.read(self.stdin_fd, read_buf);
         self.stdin_eof = n == 0;
         var chunk: []const u8 = read_buf[0..n];
@@ -446,6 +450,7 @@ const DaemonLoop = struct {
 
     fn handleInterruptFrame(self: *DaemonLoop, age: u64) !void {
         if (self.state != .busy or self.interrupt_deadline_ns != null) return;
+        std.debug.assert(self.active_prompt != null);
         if (self.pending_paste) |paste| {
             try paste.cancel(self.session);
             self.pending_paste = null;
@@ -484,6 +489,7 @@ const DaemonLoop = struct {
     }
 
     fn checkExitAndTimeouts(self: *DaemonLoop, now_ns: i128, age: u64) !?u8 {
+        std.debug.assert(now_ns >= self.trace_start);
         if (self.stdin_eof and self.state != .busy and self.prompt_queue_head == self.prompt_queue.items.len) return 0;
         if (childExited(self.shared, self.session)) {
             if (self.exit_seen_ns == null) self.exit_seen_ns = @intCast(now_ns);
@@ -658,6 +664,7 @@ const DaemonLoop = struct {
 
     fn stepPendingPaste(self: *DaemonLoop) void {
         if (self.pending_paste) |*paste| {
+            std.debug.assert(self.state == .busy);
             const finished = paste.advance(self.session) catch |err| failed: {
                 traceFmt(self.opts, self.trace_start, "prompt write failed: {s}", .{@errorName(err)});
                 paste.cancel(self.session) catch |cancel_err| {
@@ -678,6 +685,7 @@ const DaemonLoop = struct {
     }
 
     fn runLoop(self: *DaemonLoop) !u8 {
+        std.debug.assert(self.state == .waiting_for_ready);
         var read_buf: [4096]u8 = undefined;
         while (true) {
             if (interrupted()) {

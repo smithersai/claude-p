@@ -26,7 +26,7 @@
       "sha256": "b1cc63bbea71ab65782aca7f9a6d896f0fc181f3ee4dfb8a054bd9803c7fbb81",
       "inputs": {
         "src/terminal.zig": "be5a1f8a4c7096582424dc5f5b8a6de3774d32871395d2d390bd0a0fa702327b",
-        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7",
+        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d",
         "build.zig.zon": "50c91239704786a2e292aa34c0488da21da254a0cdebe9672c04518340d529cc"
       }
     },
@@ -37,8 +37,8 @@
       "document": ".smithers/wiki/pages/startup-dialogs-and-paste.md",
       "sha256": "5f7cc3d70f3233160aedb69c460d01c425f49edcc9f79d93f2d6589aca5670b8",
       "inputs": {
-        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7",
-        "src/args.zig": "44789e7e1f8645e923072b30d1dc472fa0a07ab5a985228d870b3e4aca36fb6d"
+        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d",
+        "src/args.zig": "b07656d61f0a1ea4f22b824108be9865198f67b06bc0f8d9a6500375bebc2d45"
       }
     },
     {
@@ -48,8 +48,8 @@
       "document": ".smithers/wiki/pages/hook-relay-and-fifo.md",
       "sha256": "8319a21be452a507360bf169d64d6da2f8ee651fb9f12e0dc7a8d6c222aa745c",
       "inputs": {
-        "src/hook.zig": "ee3b6838243eb3e322d7e1e16eb5843820ce5dc447421f82a7c709d77975c080",
-        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7"
+        "src/hook.zig": "6f72dc555756d7560d1cf31c50c38b870e63df135a41a12f0635afc51ec00704",
+        "src/driver.zig": "018c3417c620bb31f1dbd3b46ed53c73296ade1de469be072039feda9f123c3d"
       }
     },
     {
@@ -71,8 +71,8 @@
       "document": ".smithers/wiki/pages/daemon-protocol.md",
       "sha256": "cb608f4c05e34a001e61cc9fceab6350b5722a1ee94fb692281b9276e173c0a9",
       "inputs": {
-        "src/daemon.zig": "05d42c05331958018e171bed3e238569285269646d6a1bf5d83aeca862f316ab",
-        "src/main.zig": "8faafffef4574571c7d7284cfd9911d1707defdf3b533cb78a39c60b15982629",
+        "src/daemon.zig": "7e62a106fd4b6a48a72d4bf33bcc91dabf02dbd48613c1d591662bea9bbd03ac",
+        "src/main.zig": "38ba7d8a4987389a1ebc1c12bf13dcfd662432a3921afd469e5d918e76661ea9",
         "src/emit.zig": "bdc8d24f6ac672696ae331b216cfaba4ad37cd843e6130fdda68baeb6e72bcaa"
       }
     },
@@ -97,7 +97,7 @@
       "document": ".smithers/wiki/pages/fuzzing-and-verification.md",
       "sha256": "13bf65547e1ad2df850a5f6f49d60ab99fd165fb3f050b9b5d7643e7b011625b",
       "inputs": {
-        "tests/prop_fuzz.zig": "25fbfb9a356614c1c84becc64afcf1372da277e40372dd8675a4967864ac51f5",
+        "tests/prop_fuzz.zig": "52d625e5f3308f8f2f87b651b95a1469e3970a6ca7d073d7dda4c46e977df908",
         "tests/integration.zig": "fae01c73fff7b1ff4f75c510147bb62c316ab200a5d1ef2f5e42a96d36bef764",
         "scripts/fuzz-linux.sh": "4ac164d6b81d9421fddd96f83818627fb4228e574fcbaf544325d728936a8034",
         ".agents/uphill/uphill.yaml": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
@@ -129,5 +129,5 @@
       }
     }
   ],
-  "digest": "e272e791ee9261132cc539c886adeec125b1fd25d9221f9bddafce6088fe129b"
+  "digest": "9117ba86d1df4281eabcff5f6f2e02c6f2bfbb8848c34061711b4eb9c3a1f58a"
 }
