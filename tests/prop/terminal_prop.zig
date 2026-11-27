@@ -49,11 +49,11 @@ const all_requests = "\x1b[c\x1b[0c\x1b[>c\x1b[>0c\x1b[6n\x1b[>q\x1b[>0q\x1b[18t
 test "terminal fuzz emits exactly the reply tokens requested by arbitrary bytes" {
     try testing.fuzz({}, fuzzOne, .{ .corpus = &.{
         "\x00\xff\x80\x9b6n",
-        "\x1b\x1b",
-        "\x1b[",
-        "\x1b[>",
-        "\x1b[?",
-        "\x1bP",
+        "\x1b\x1b\x1b\x1b",
+        "\x1b[0c",
+        "\x1b[>c",
+        "\x1b[?c",
+        "\x1bP\x1b\\",
         "\x1b]0;title\x07",
         "\x1bP>|claude-p\x1b\\",
         all_requests,

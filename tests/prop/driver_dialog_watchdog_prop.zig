@@ -59,8 +59,15 @@ fn checkStrip(_: void, raw: []const u8) !void {
     }
 }
 
+const escapes_fuzz_corpus = [_][]const u8{
+    "\x1b[38;5;",       "\x1b[ !",         "\x1b[?25h",        "\x1b[0m",
+    "\x1b]0;title\x07", "\x1b]unfinished", "\x1b]title\x1b\\", "\x1bPpayload\x07\x1b\\",
+    "\x1bXabc\x1b\\",   "\x1b^abc\x1b\\",  "\x1b_abc\x1b\\",   "\x1bP\x1b\\",
+    "\x1b\xff\x1b[",    "\x00\xff❯a",    "a\r\nb",
+};
+
 test "fuzz stripping arbitrary raw PTY bytes into bounded buffers" {
-    try testing.fuzz({}, checkStrip, .{ .corpus = &escapes });
+    try testing.fuzz({}, checkStrip, .{ .corpus = &escapes_fuzz_corpus });
 }
 
 test "strip properties across 3000 mixed binary and truncated control streams" {
@@ -129,7 +136,7 @@ fn checkDialogBytes(_: void, input: []const u8) !void {
 
 test "fuzz classification and decisions on arbitrary PTY screens and partial repaints" {
     try testing.fuzz({}, checkDialogBytes, .{ .corpus = &.{
-        "\x00\xff\xe2\x9d",                                           "❯",                                                          "\x1b]trust folder\x07\x1bP❯ Yes, I trust\x1b\\",
+        "\x00\xff\xe2\x9d",                                           "❯ Yes",                                                      "\x1b]trust folder\x07\x1bP❯ Yes, I trust\x1b\\",
         "folder trust\r\n❯\x1b[4GNo,\nexit\r\nYes, I trust",        "folder trust ❯ Yes, proceed\r❯ No, exit",                  "bypass permissions\n❯ 2. Yes, I accept",
         "loading development channels\n❯ 1. I am using\r\n2. Exit", "Trust folder\n❯ No, exit\n❯ Yes, I trust\n? FORSHORTCUTS", "1" ** 80 ++ ". Yes, I trust this folder\n❯ 9 . No, exit\x1b[38;",
     } });
@@ -510,8 +517,8 @@ test "fuzz failure screens stay bounded, printable, and free of blank lines" {
         "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\n",
         "\xe2\x9d\xaf No, exit\r\n  Yes, I trust this folder\r\n",
         "\x1b]0;title\x07text\x1b[",
-        "\x1b[",
-        "\xff\xfe\x80",
+        "\x1b[31m",
+        "\xff\xfe\x80\x81",
     } });
 }
 

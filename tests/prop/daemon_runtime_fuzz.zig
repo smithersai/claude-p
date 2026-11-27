@@ -195,19 +195,19 @@ test "fuzz: daemon.ptyTraceInterval total over arbitrary env values" {
     try testing.fuzz({}, fuzzPtyTrace, .{
         .corpus = &.{
             "   \t\r\n ",
-            "00",
-            " 0",
-            "off",
-            "OFF",
+            "0000",
+            " 0  ",
+            "off ",
+            "OFF ",
             "False",
-            "NO",
-            "01",
-            "60",
+            "NO  ",
+            "01  ",
+            "60  ",
             "4294967295",
             "4294967296",
-            "-1",
+            "-1  ",
             " 15\n",
-            "on",
+            "on  ",
             "garbage",
         },
     });
@@ -276,7 +276,7 @@ test "fuzz: daemon.emitSystemInit, emitPong, and toDriverOptions" {
             "sid-123",
             "quote\"\\\n\r\t\x01\x1f",
             "utf8-🌿-❯",
-            "\xff\xfe",
+            "\xff\xfe\xfd\xfc",
         },
     });
 }

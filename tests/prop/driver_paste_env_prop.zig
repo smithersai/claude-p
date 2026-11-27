@@ -337,7 +337,7 @@ fn fuzzPaste(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: PasteChunker / writeBracketedPasteTo / typePromptTo" {
     try testing.fuzz({}, fuzzPaste, .{ .corpus = &.{
-        "~",
+        "~~~~",
         "hello",
         paste_end,
         paste_start ++ "x" ++ paste_end,
@@ -672,8 +672,8 @@ fn fuzzTruncated(_: void, input: []const u8) anyerror!void {
 test "fuzz: isPromptTruncated(expected, received)" {
     const long = "The quick brown fox jumps over the lazy dog, then writes a property test. " ** 3;
     try testing.fuzz({}, fuzzTruncated, .{ .corpus = &.{
-        "\x00\x00",
-        "\xff\xff",
+        "\x00\x00\x00\x00",
+        "\xff\xff\xff\xff",
         "\x80abcabc",
         "\xe0" ++ long ++ long[0..40],
         "\xf0" ++ long ++ "[Pasted text #1 +12 lines]",
@@ -1279,8 +1279,8 @@ fn fuzzShellQuote(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: shellQuoteArgv POSIX round trip" {
     try testing.fuzz({}, fuzzShellQuote, .{ .corpus = &.{
-        "\x00\x00",
-        "''",
+        "\x00\x00\x00\x00",
+        "''''",
         "''\x00'\\''\x00\\",
         "claude\x00--settings\x00{\"hooks\":{\"Stop\":[{\"command\":\"sh '/tmp/a b/hook.sh'\"}]}}",
         "$(rm -rf /)\x00`id`\x00${IFS}\x00;\x00&&\x00|",

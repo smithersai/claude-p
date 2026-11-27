@@ -810,14 +810,13 @@ fn fuzzParseLine(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: parseLine never panics and keeps its structural invariant" {
     try testing.fuzz({}, fuzzParseLine, .{ .corpus = &.{
-        "\t\t",
-        "\n\n",
-        "\r\r",
-        "\r\n",
-        "\n\r",
-        "\t\n",
-        "\t\r\n",
-        "\t\t\t",
+        "\t\t\t\t",
+        "\n\n\n\n",
+        "\r\r\r\r",
+        "\r\n\r\n",
+        "\n\r\n\r",
+        "\t\n\t\n",
+        "\t\r\n\t",
         "Stop",
         "Stop\t",
         "Stop\t{}",
@@ -1003,11 +1002,11 @@ fn fuzzExtractors(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: extractors never crash or leak on arbitrary payloads" {
     try testing.fuzz({}, fuzzExtractors, .{ .corpus = &.{
-        "{}",
-        "[]",
+        "{  }",
+        "[  ]",
         "null",
         "not-json",
-        "{",
+        "{   ",
         "{\"prompt\":",
         "{\"prompt\":\"hi\"}",
         "{\"prompt\":\"hi\"} trailing",
@@ -1047,7 +1046,7 @@ test "fuzz: extractors never crash or leak on arbitrary payloads" {
         "{\"prompt\":\"x\",}",
         "true",
         "\"prompt\"",
-        "0",
+        "0000",
     } });
 }
 
@@ -1667,9 +1666,17 @@ fn fuzzSettingsJson(_: void, input: []const u8) anyerror!void {
 }
 
 test "fuzz: buildSettingsJson with arbitrary extra_settings_json bytes" {
-    try testing.fuzz({}, fuzzSettingsJson, .{ .corpus = &(malformed_settings[1..].* ++ evil_hooks_values ++ [_][]const u8{
-        "{}",
+    try testing.fuzz({}, fuzzSettingsJson, .{ .corpus = &.{
         " { } ",
+        "null",
+        "[  ]",
+        "{} trailing",
+        "{\"a\":1,}",
+        "{\"a\":NaN}",
+        "{\"a\":\"\\ud800\"}",
+        "\xef\xbb\xbf{}",
+        "{}\x00\x00",
+        "{\"a\":[1,2}",
         "{\"env\":{\"FOO\":\"bar\"},\"includeCoAuthoredBy\":false,\"precision\":0.1234567890123456789}",
         "{\"hooks\":{}}",
         "{\"disableAllHooks\":true}",
@@ -1696,7 +1703,7 @@ test "fuzz: buildSettingsJson with arbitrary extra_settings_json bytes" {
         "{\"a\":\"" ++ "[{" ** 200 ++ "\"}",
         "{\"hooks\":" ++ "[" ** 300 ++ "]" ** 300 ++ "}",
         "{\"permissions\":{\"allow\":[\"Bash(ls:*)\"],\"deny\":[]},\"env\":{\"A\":\"1\"}}",
-    }) });
+    } });
 }
 
 /// Byte-driven decoder: turns fuzz input into a script path, extra hooks, and
@@ -1758,7 +1765,7 @@ fn fuzzSettingsStructured(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: buildSettingsJson with byte-decoded path, hooks, and settings" {
     try testing.fuzz({}, fuzzSettingsStructured, .{ .corpus = &.{
-        "\x00\x00\x00",
+        "\x00\x00\x00\x00",
         "\x0c/tmp/hook.sh\x00\x00",
         "\x0c/tmp/hook.sh\x02\x02\x07echo hi\x05\x04Evnt\x03a|b\x01{\"model\":\"opus\"}",
         "\x0c/tmp/it's sh\x03\x00\x04$(x)\x01\x02`y`\x02\x06'; x '\x01{\"hooks\":\"evil\",\"a\":[1,2]}",

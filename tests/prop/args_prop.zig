@@ -779,13 +779,11 @@ const parse_corpus = [_][]const u8{
     "hello world",
     "daemon",
     "daemon\x00daemon",
-    "--",
     "--\x00--",
     "--\x00-p",
     "--\x00--bare\x00extra",
-    "-",
-    "\x00",
-    "\x00\x00\x00",
+    "-\x00--\x00",
+    "\x00\x00\x00\x00",
     "-p\x00hi",
     "--print=1",
     "-p=1",
@@ -1571,10 +1569,10 @@ fn fuzzExtraHookOne(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: --extra-hook value matches the first-`=` split model" {
     try testing.fuzz({}, fuzzExtraHookOne, .{ .corpus = &.{
-        "= ",       "==",           "Stop",                     "Stop=",
-        "=echo hi", "Stop=echo hi", "PostToolUse=env A=1 true", "a=b=c=d",
-        "a==",      "\x00=\x00",    "Stop=\n",                  "--=--",
-        "=\xff",    "\xff=\xff",    "Stop =x",
+        "=   ",          "====",          "Stop",                     "Stop=",
+        "=echo hi",      "Stop=echo hi",  "PostToolUse=env A=1 true", "a=b=c=d",
+        "a===",          "\x00=\x00\x00", "Stop=\n",                  "--=--",
+        "=\xff\xff\xff", "\xff=\xff\xff", "Stop =x",
     } });
 }
 
@@ -1815,10 +1813,10 @@ fn fuzzFormatOne(_: void, input: []const u8) anyerror!void {
 
 test "fuzz: OutputFormat.fromString exact-match model and parse agreement" {
     try testing.fuzz({}, fuzzFormatOne, .{ .corpus = &.{
-        "text",     "json",       "stream-json",  "stream_json",
-        "Text",     "JSON",       "stream-json ", " json",
-        "json\x00", "streamjson", "stream-jsonl", "tex",
-        "yaml",     "--verbose",  "- ",           "--",
-        "\xff\xff", "text\n",     "stream-",
+        "text",             "json",       "stream-json",  "stream_json",
+        "Text",             "JSON",       "stream-json ", " json",
+        "json\x00",         "streamjson", "stream-jsonl", "text ",
+        "yaml",             "--verbose",  "-   ",         "--  ",
+        "\xff\xff\xff\xff", "text\n",     "stream-",
     } });
 }

@@ -79,13 +79,13 @@ fn fuzzIsForwardable(_: void, input: []const u8) anyerror!void {
 test "fuzz: stream.isForwardable matches JSON-object non-result oracle" {
     try testing.fuzz({}, fuzzIsForwardable, .{
         .corpus = &.{
-            "{}",
+            "{  }",
             "{\"type\":\"assistant\",\"text\":\"hi\"}",
             "{\"type\":\"result\",\"result\":\"ok\"}",
             "{\"type\":\"result\",\"type\":\"assistant\"}",
             "{\"type\":\"assistant\",\"type\":\"result\"}",
             "{\"type\":123}",
-            "[]",
+            "[  ]",
             "null",
             "\"result\"",
             "{\"a\":1}\r\n",
@@ -334,7 +334,7 @@ test "fuzz: transcript.parseFileFromOffsetWithOptions matches in-memory slice pa
         .corpus = &.{
             "\x01\x00\x00{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
             "\x00\x04\x00{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"new\"}]}}\n",
-            "\x01\x03\x00",
+            "\x01\x03\x00\n",
         },
     });
 }

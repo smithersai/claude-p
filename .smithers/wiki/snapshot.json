@@ -99,7 +99,7 @@
       "inputs": {
         "tests/prop_fuzz.zig": "5db1d1edccd1585bf5839c783da4f14be4d6cc122102aebbf066dd2615593a60",
         "tests/integration.zig": "fae01c73fff7b1ff4f75c510147bb62c316ab200a5d1ef2f5e42a96d36bef764",
-        "scripts/fuzz-linux.sh": "4ac164d6b81d9421fddd96f83818627fb4228e574fcbaf544325d728936a8034",
+        "scripts/fuzz-linux.sh": "c110f842f713fbeb2f51598a56433ef90fb4d4ceb8f5111854c1e48dcd08b098",
         ".agents/uphill/uphill.yaml": "4eb8a91e1c67efea92c6a02f8e5bc4963ff4f8cf493cf485b74b0bd36e1405ac"
       }
     },
@@ -129,5 +129,5 @@
       }
     }
   ],
-  "digest": "8e6cfe9be3936e1a27ff30b5a386994d2a0f1546499135a0ddb793375d07df74"
+  "digest": "349d8f921c568779f4494208d6b8520f2b7806a08a25599910498c792a0c11ba"
 }
