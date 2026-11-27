@@ -1,0 +1,95 @@
+# .agents/uphill/uphill.yaml — Continuous metrics for claude-p (Zig PTY daemon + npm launcher).
+
+footprint:
+  title: Footprint
+  description: Keep Zig PTY/daemon modules and JS supply-chain scripts small, modular, and dependency-minimal.
+  run: bun .agents/uphill/metrics/footprint.ts
+  # Non-test line count per Zig module in src/. Target of 500 encourages splitting monolithic driver/daemon loops.
+  module-prod-lines:
+    poor: 1800
+    description: Keep each Zig source module under 500 production lines by factoring state machines into cohesive files.
+  # Raw byte size of each Zig module and JS CLI/installer script. Target of 20 kB prevents uncontrolled growth.
+  module-bytes:
+    poor: 80kB
+    description: Keep each Zig source file and JS installer/launcher script lean and free of duplicated logic.
+  # Tripwire: external Zig dependencies declared in build.zig.zon.
+  zig-dependencies:
+    description: Avoid adding unnecessary Zig package dependencies in build.zig.zon.
+  # Tripwire: runtime npm dependencies in package.json (claude-p ships with zero runtime npm deps).
+  npm-dependencies:
+    description: Keep package.json free of runtime npm dependencies so npx claude-p stays fast and auditable.
+
+style:
+  title: Style & TigerStyle
+  description: Enforce zig fmt and TigerStyle limits on function length, line width, and assertion density.
+  run: bun .agents/uphill/metrics/style.ts
+  # Every Zig file in src/ and tests/ must pass `zig fmt --check`.
+  zig-fmt:
+    description: Format all Zig source and property-test files with `zig fmt`.
+  # Longest production function per src/*.zig module. TigerStyle caps functions at 70 lines.
+  max-fn-lines:
+    poor: 160
+    description: Keep every Zig function at or under 70 lines (TigerStyle rule); split event loops and parsers into helpers.
+  # Every production line in src/*.zig should stay at or under 120 characters.
+  line-length:
+    description: Wrap Zig lines at or under 120 columns for readability.
+  # Runtime `std.debug.assert` calls per 1,000 production lines (TigerStyle invariant checking).
+  assert-density:
+    better: higher
+    poor: 2
+    description: Assert protocol, offset, and PTY state invariants with `std.debug.assert` (target >= 15 per kLOC).
+
+correctness:
+  title: Correctness
+  description: Enforce version lockstep, release script syntax, Smithers factory projection freshness, and panic-free Zig code.
+  run: bun .agents/uphill/metrics/correctness.ts
+  # package.json, build.zig.zon, and src/root.zig must declare the exact same version (`scripts/publish.mjs --check-versions`).
+  version-lockstep:
+    description: Keep package.json, build.zig.zon, and src/root.zig versions identical; verify with `node scripts/publish.mjs --check-versions`.
+  # All JS/shell launcher and release scripts must pass syntax checking (`node --check`, `sh -n`, `bash -n`).
+  script-syntax:
+    description: Keep bin/claude-p.js and scripts/* syntactically valid under node/sh/bash.
+  # `.smithers/factory.json` and `home.json` projections must match flow frontmatter and FACTORY.ts.
+  factory-projections:
+    description: Keep Smithers factory projections fresh (`smthrs target //.smithers:factory-write --write`).
+  # Production code in src/*.zig must return explicit errors instead of calling @panic or unreachable.
+  no-panic:
+    description: Return typed Zig errors instead of `@panic`, `unreachable`, or `catch unreachable` in production code.
+  # Production code in src/*.zig must handle or log errors instead of silently swallowing them with `catch {}`.
+  no-empty-catch:
+    description: Handle errors explicitly instead of silently swallowing them with `catch {}`.
+  # No unresolved TODO/FIXME/XXX/HACK markers in production Zig code.
+  no-todo:
+    description: Resolve TODO/FIXME markers instead of leaving them in production Zig modules.
+
+testing:
+  title: Testing
+  description: Verify installer supply-chain tests pass and every Zig module has deep unit and property/fuzz coverage.
+  run: bun .agents/uphill/metrics/testing.ts
+  # Fast Node supply-chain, checksum, and launcher property tests must pass (`node --test`).
+  js-supplychain-tests:
+    description: Keep all JS installer checksum and supply-chain property tests passing.
+  # Inline `test "..."` block count per non-root src/*.zig module. Target of 20 drives thorough edge-case coverage.
+  unit-tests:
+    better: higher
+    poor: 5
+    description: Keep thorough inline unit tests in every src/*.zig module (target >= 20 tests per module).
+  # Every core Zig module should be exercised by a property or fuzz suite under tests/prop/.
+  prop-fuzz-coverage:
+    description: Pair every core src/*.zig module with property or fuzz tests under `tests/prop/`.
+
+documentation:
+  title: Documentation
+  description: Keep Zig public declarations documented, Markdown links valid, and Astro docs frontmatter complete.
+  run: bun .agents/uphill/metrics/documentation.ts
+  # Share (%) of top-level `pub fn` and `pub const` declarations in src/*.zig with `///` doc comments.
+  pub-doc-coverage:
+    better: higher
+    poor: 25
+    description: Document public Zig functions and constants with `///` doc comments (target >= 90%).
+  # Relative file links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md must resolve to existing files.
+  markdown-links:
+    description: Keep relative links in README.md, SPEC.md, CLAUDE.md, and AGENTS.md valid.
+  # Every Starlight documentation page under docs/src/content/docs/ must declare both title and description frontmatter.
+  docs-frontmatter:
+    description: Include both `title` and `description` frontmatter in every docs page under `docs/src/content/docs/`.

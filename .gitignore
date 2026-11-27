@@ -11,3 +11,4 @@ docs/.astro/
 zig-pkg/
 .smithers/cache/
 .smithers/reports/
+.uphill/

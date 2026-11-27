@@ -1,5 +1,7 @@
 # CLAUDE.md — repository instructions for agents
 
+Follow the [Uphill rules](.agents/uphill/rules.md), which `uphill rules --write` rewrites from each metric's description: @.agents/uphill/rules.md
+
 > **Start here on every session or after compaction.** Re-read
 > [SPEC.md](./SPEC.md) and [README.md](./README.md) before modifying code. The
 > source tree and `SPEC.md` are authoritative—never assume prior conversation

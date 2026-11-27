@@ -1,0 +1,125 @@
+# Each measurement's `baseline`, the size, count, or check `uphill --update` accepted, and its
+# `target`. Edit a target here, and each run reports what changed since the baseline.
+
+footprint:
+  module-prod-lines:
+    "*": { target: 500 }
+    src/args.zig: { baseline: 665 }
+    src/daemon.zig: { baseline: 1332 }
+    src/driver.zig: { baseline: 2545 }
+    src/emit.zig: { baseline: 224 }
+    src/hook.zig: { baseline: 606 }
+    src/main.zig: { baseline: 601 }
+    src/root.zig: { baseline: 30 }
+    src/stream.zig: { baseline: 163 }
+    src/terminal.zig: { baseline: 173 }
+    src/transcript.zig: { baseline: 417 }
+  module-bytes:
+    "*": { target: 20kB }
+    bin/claude-p.js: { baseline: 1860B }
+    scripts/install.js: { baseline: 24140B }
+    scripts/publish.mjs: { baseline: 28180B }
+    src/args.zig: { baseline: 60780B }
+    src/daemon.zig: { baseline: 93580B }
+    src/driver.zig: { baseline: 171.6kB }
+    src/emit.zig: { baseline: 14370B }
+    src/hook.zig: { baseline: 43.1kB }
+    src/main.zig: { baseline: 42270B }
+    src/root.zig: { baseline: 1170B }
+    src/stream.zig: { baseline: 11740B }
+    src/terminal.zig: { baseline: 10330B }
+    src/transcript.zig: { baseline: 25.4kB }
+  zig-dependencies: { baseline: 1 }
+  npm-dependencies: { baseline: 0 }
+
+style:
+  zig-fmt:
+    "*": { baseline: pass }
+    tests/prop/args_prop.zig: { baseline: fail }
+    tests/prop/driver_dialog_watchdog_prop.zig: { baseline: fail }
+    tests/prop/driver_paste_env_prop.zig: { baseline: fail }
+    tests/prop/hook_prop.zig: { baseline: fail }
+  max-fn-lines:
+    "*": { target: 70 }
+    src/args.zig: { baseline: 147 }
+    src/daemon.zig: { baseline: 465 }
+    src/driver.zig: { baseline: 514 }
+    src/emit.zig: { baseline: 49 }
+    src/hook.zig: { baseline: 53 }
+    src/main.zig: { baseline: 159 }
+    src/root.zig: { baseline: 3 }
+    src/stream.zig: { baseline: 51 }
+    src/terminal.zig: { baseline: 45 }
+    src/transcript.zig: { baseline: 208 }
+  line-length:
+    "*": { baseline: fail }
+    src/emit.zig: { baseline: pass }
+    src/root.zig: { baseline: pass }
+    src/stream.zig: { baseline: pass }
+    src/terminal.zig: { baseline: pass }
+  assert-density:
+    "*": { target: 15 }
+    src/args.zig: { baseline: 0 }
+    src/daemon.zig: { baseline: 0 }
+    src/driver.zig: { baseline: 0 }
+    src/emit.zig: { baseline: 0 }
+    src/hook.zig: { baseline: 0 }
+    src/main.zig: { baseline: 0 }
+    src/root.zig: { baseline: 0 }
+    src/stream.zig: { baseline: 0 }
+    src/terminal.zig: { baseline: 0 }
+    src/transcript.zig: { baseline: 0 }
+
+correctness:
+  version-lockstep: { baseline: pass }
+  script-syntax:
+    "*": { baseline: pass }
+  factory-projections: { baseline: pass }
+  no-panic:
+    "*": { baseline: pass }
+    src/driver.zig: { baseline: fail }
+    src/hook.zig: { baseline: fail }
+    src/terminal.zig: { baseline: fail }
+  no-empty-catch:
+    "*": { baseline: pass }
+    src/daemon.zig: { baseline: fail }
+    src/driver.zig: { baseline: fail }
+    src/hook.zig: { baseline: fail }
+    src/main.zig: { baseline: fail }
+  no-todo:
+    "*": { baseline: pass }
+
+testing:
+  js-supplychain-tests:
+    "*": { baseline: pass }
+  unit-tests:
+    "*": { target: 20 }
+    src/args.zig: { baseline: 57 }
+    src/daemon.zig: { baseline: 43 }
+    src/driver.zig: { baseline: 54 }
+    src/emit.zig: { baseline: 10 }
+    src/hook.zig: { baseline: 28 }
+    src/main.zig: { baseline: 20 }
+    src/stream.zig: { baseline: 6 }
+    src/terminal.zig: { baseline: 10 }
+    src/transcript.zig: { baseline: 16 }
+  prop-fuzz-coverage:
+    "*": { baseline: pass }
+
+documentation:
+  pub-doc-coverage:
+    "*": { target: 90 }
+    src/args.zig: { baseline: 67 }
+    src/daemon.zig: { baseline: 79 }
+    src/driver.zig: { baseline: 60 }
+    src/emit.zig: { baseline: 22 }
+    src/hook.zig: { baseline: 57 }
+    src/main.zig: { baseline: 17 }
+    src/root.zig: { baseline: 0 }
+    src/stream.zig: { baseline: 0 }
+    src/terminal.zig: { baseline: 60 }
+    src/transcript.zig: { baseline: 33 }
+  markdown-links:
+    "*": { baseline: pass }
+  docs-frontmatter:
+    "*": { baseline: pass }
