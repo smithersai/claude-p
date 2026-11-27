@@ -51,7 +51,9 @@ fn onSignal(sig: i32) callconv(.c) void {
         .escalate => {
             // The graceful unwind is stuck; die the default way.
             resetSignal(sig);
-            std.posix.raise(@intCast(sig)) catch {};
+            std.posix.raise(@intCast(sig)) catch |err| switch (err) {
+                else => {},
+            };
         },
     }
 }
@@ -81,8 +83,12 @@ fn installSignalHandlers(daemon: bool) void {
 fn exitIfSignaled() void {
     const sig = received_signal.load(.seq_cst);
     if (sig == 0) return;
-    if (stdout_writer != null) stdoutWriter().flush() catch {};
-    stderrWriter().flush() catch {};
+    if (stdout_writer != null) stdoutWriter().flush() catch |err| switch (err) {
+        else => {},
+    };
+    stderrWriter().flush() catch |err| switch (err) {
+        else => {},
+    };
     std.process.exit(@intCast(128 + sig));
 }
 
@@ -107,6 +113,7 @@ const max_prompt_bytes = 16 * 1024 * 1024;
 /// leaves an open-but-silent pipe must not hang the run forever.
 const stdin_grace_ms = 3000;
 
+/// Resolution of where the CLI obtains the user prompt bytes.
 pub const PromptSource = enum {
     /// Positional prompt only.
     positional,
@@ -120,6 +127,7 @@ pub const PromptSource = enum {
     tty_empty,
 };
 
+/// Decide where the prompt should be read from given CLI flags and stdin TTY state.
 pub fn promptSource(has_positional: bool, has_input_file: bool, stdin_is_tty: bool) PromptSource {
     if (has_positional and has_input_file) return .conflict;
     if (has_input_file) return .input_file;
@@ -138,11 +146,16 @@ fn composePrompt(allocator: std.mem.Allocator, stdin_text: []const u8, prompt: [
 /// Print `error: <msg>` to stderr and exit 2 (usage / input error).
 fn usageExit(comptime fmt: []const u8, fmt_args: anytype) noreturn {
     const w = stderrWriter();
-    w.print("error: " ++ fmt ++ "\n", fmt_args) catch {};
-    w.flush() catch {};
+    w.print("error: " ++ fmt ++ "\n", fmt_args) catch |err| switch (err) {
+        else => {},
+    };
+    w.flush() catch |err| switch (err) {
+        else => {},
+    };
     std.process.exit(2);
 }
 
+/// Outcome of reading stdin with a byte cap, optional first-byte grace, and deadline.
 pub const BoundedRead = union(enum) {
     /// EOF reached. Caller owns the bytes.
     complete: []u8,
@@ -156,6 +169,7 @@ pub const BoundedRead = union(enum) {
     too_large,
 };
 
+/// Limits and cancellation controls for `readBounded`.
 pub const BoundedReadOptions = struct {
     max_bytes: usize,
     /// Give up with `.silent` when the first byte (or EOF) takes longer than
@@ -246,8 +260,12 @@ fn readStdin(allocator: std.mem.Allocator, first_byte_grace_ms: ?u64, deadline_n
                     "received {d} bytes and did not run the incomplete prompt. " ++
                     "Close the pipe, redirect stdin (< /dev/null), or raise --timeout\n",
                 .{ timeout_seconds, received },
-            ) catch {};
-            w.flush() catch {};
+            ) catch |err| switch (err) {
+                else => {},
+            };
+            w.flush() catch |err| switch (err) {
+                else => {},
+            };
             std.process.exit(124);
         },
     }
@@ -261,6 +279,7 @@ fn readInputFile(allocator: std.mem.Allocator, path: []const u8) []u8 {
         usageExit("cannot read --input-file '{s}': {s}", .{ path, @errorName(err) });
 }
 
+/// Entry point for the `claude-p` CLI binary (one-shot and daemon modes).
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
@@ -347,8 +366,12 @@ pub fn main() !void {
         .positional_with_stdin => blk: {
             const piped = readStdin(allocator, stdin_grace_ms, stdin_deadline_ns, opts.timeout_seconds) orelse {
                 const w = stderrWriter();
-                w.print("warning: no stdin data received in {d}s, proceeding without it; redirect stdin (< /dev/null) to skip the wait\n", .{stdin_grace_ms / 1000}) catch {};
-                w.flush() catch {};
+                w.print("warning: no stdin data received in {d}s, proceeding without it; redirect stdin (< /dev/null) to skip the wait\n", .{stdin_grace_ms / 1000}) catch |err| switch (err) {
+                    else => {},
+                };
+                w.flush() catch |err| switch (err) {
+                    else => {},
+                };
                 break :blk opts.prompt.?;
             };
             defer allocator.free(piped);
@@ -424,8 +447,12 @@ pub fn main() !void {
 /// The result could not be written to stdout (closed pipe, full disk).
 fn outputFailureExit(err: anyerror) noreturn {
     const w = stderrWriter();
-    w.print("claude-p: cannot write the result to stdout: {s}\n", .{@errorName(err)}) catch {};
-    w.flush() catch {};
+    w.print("claude-p: cannot write the result to stdout: {s}\n", .{@errorName(err)}) catch |write_err| switch (write_err) {
+        else => {},
+    };
+    w.flush() catch |flush_err| switch (flush_err) {
+        else => {},
+    };
     std.process.exit(2);
 }
 
@@ -645,9 +672,13 @@ test "onSignal: the first signal requests an interrupt; an immediate duplicate d
 
 const PipeWriter = struct {
     fn slow(fd: std.posix.fd_t) void {
-        _ = std.posix.write(fd, "a") catch {};
+        _ = std.posix.write(fd, "a") catch |err| switch (err) {
+            else => {},
+        };
         std.Thread.sleep(150 * std.time.ns_per_ms);
-        _ = std.posix.write(fd, "b") catch {};
+        _ = std.posix.write(fd, "b") catch |err| switch (err) {
+            else => {},
+        };
         std.posix.close(fd);
     }
 };
@@ -783,7 +814,9 @@ const GroupKiller = struct {
             if (self.done.load(.seq_cst)) return;
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
-        std.posix.kill(-self.pgid, std.posix.SIG.KILL) catch {};
+        std.posix.kill(-self.pgid, std.posix.SIG.KILL) catch |err| switch (err) {
+            else => {},
+        };
     }
 };
 

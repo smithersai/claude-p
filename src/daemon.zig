@@ -73,12 +73,14 @@ pub const Options = struct {
     extra_settings_json: ?[]const u8 = null,
 };
 
+/// Error set returned by persistent daemon initialization and I/O failures.
 pub const RunError = error{
     InvalidExtraSettings,
     InvalidOptions,
     IoFailure,
 } || std.mem.Allocator.Error;
 
+/// Lifecycle state of the persistent multi-turn daemon.
 pub const State = enum {
     /// Spawned, waiting for SessionStart hook.
     waiting_for_ready,
@@ -140,6 +142,7 @@ fn monotonicNs() i64 {
     return @intCast(driver_mod.monotonicNs());
 }
 
+/// Signal the running daemon session to interrupt cleanly.
 pub const requestInterrupt = driver_mod.requestInterrupt;
 const interrupted = driver_mod.isInterrupted;
 
@@ -745,6 +748,7 @@ fn settleBeforePrompt(
     }
 }
 
+/// Compute the periodic PTY diagnostic trace interval in nanoseconds, or null when disabled.
 pub fn ptyTraceInterval(debug: bool, setting: ?[]const u8) ?i128 {
     const default: ?i128 = if (debug) 60 * std.time.ns_per_s else null;
     const raw = std.mem.trim(u8, setting orelse return default, " \t\r\n");
@@ -995,7 +999,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
                         .permission_request => if (state == .busy and injections > 0 and !driver_mod.hasExtraHook(opts.extra_hooks, "PermissionRequest")) {
                             if (pending_paste) |paste| try paste.cancel(session);
                             pending_paste = null;
-                            session.writeInput("\x1b") catch {};
+                            session.writeInput("\x1b") catch |err| {
+                                traceFmt(opts, trace_start, "ESC on permission_request failed: {s}", .{@errorName(err)});
+                            };
                             const tool = hook_mod.extractPermissionTool(allocator, ev.payload);
                             defer if (tool) |name| allocator.free(name);
                             try emit_mod.emitErrorResultDetail(stdout, "error_during_execution", "permission_prompt_blocked", session_id orelse "", elapsedMs(turn_start_ns, monotonicNs()), .{ .message = tool orelse "unknown tool" });
@@ -1084,7 +1090,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
                                 continue;
                             }
                         }
-                        session.writeInput("\x1b") catch {};
+                        session.writeInput("\x1b") catch |err| {
+                            traceFmt(opts, trace_start, "ESC on interrupt failed: {s}", .{@errorName(err)});
+                        };
                         interrupt_deadline_ns = @as(i128, monotonicNs()) + interrupt_window_ms * std.time.ns_per_ms;
                     },
                     .user => |content| {
@@ -1166,7 +1174,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
                 .wait => {},
                 .reinject => {
                     traceFmt(opts, trace_start, "retrying prompt after {d} unacknowledged injections", .{injections});
-                    session.writeInput("\x15") catch {};
+                    session.writeInput("\x15") catch |err| {
+                        traceFmt(opts, trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
+                    };
                     settleBeforePrompt(&shared, session, 0, 0, driver_mod.ink_enter_debounce_ms);
                     settleBeforePrompt(&shared, session, driver_mod.ink_quiescence_ms, driver_mod.ink_max_wait_ms, 0);
                     if (interrupted() or childExited(&shared, session)) continue;
@@ -1174,7 +1184,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
                 },
                 .give_up => {
                     try writeError(allocator, stdout, "prompt_not_accepted", sid, age);
-                    session.writeInput("\x15") catch {};
+                    session.writeInput("\x15") catch |err| {
+                        traceFmt(opts, trace_start, "Ctrl-U before reinject failed: {s}", .{@errorName(err)});
+                    };
                     after_interrupt = true;
                     state = .idle;
                 },
@@ -1205,7 +1217,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
                     prompt_queue.shrinkRetainingCapacity(pending.len);
                     prompt_queue_head = 0;
                 }
-                if (after_interrupt) session.writeInput("\x15") catch {};
+                if (after_interrupt) session.writeInput("\x15") catch |err| {
+                    traceFmt(opts, trace_start, "Ctrl-U after interrupt failed: {s}", .{@errorName(err)});
+                };
                 // Snapshot immediately before typing, including any idle-time
                 // writes or resumed history that appeared during settling.
                 transcript.begin(allocator, after_interrupt);
@@ -1222,7 +1236,9 @@ fn runWithIo(backing_allocator: std.mem.Allocator, opts: Options, stdin_fd: std.
         if (pending_paste) |*paste| {
             const attempt_finished = paste.advance(session) catch |err| failed: {
                 traceFmt(opts, trace_start, "prompt write failed: {s}", .{@errorName(err)});
-                paste.cancel(session) catch {};
+                paste.cancel(session) catch |cancel_err| {
+                    traceFmt(opts, trace_start, "paste cancel failed: {s}", .{@errorName(cancel_err)});
+                };
                 // A child exit can race the write. Let FIFO drain, exit
                 // detection and the acceptance watchdog resolve this attempt.
                 break :failed true;

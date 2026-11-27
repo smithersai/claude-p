@@ -8,20 +8,24 @@ const transcript_mod = @import("transcript.zig");
 const stream = @import("stream.zig");
 const Summary = transcript_mod.Summary;
 const args_mod = @import("args.zig");
+/// Re-export of the CLI output format enum (`text`, `json`, `stream_json`).
 pub const OutputFormat = args_mod.OutputFormat;
 
+/// Summary payload and timing metadata rendered by `emit`.
 pub const ResultEnvelope = struct {
     summary: *const Summary,
     duration_ms: u64,
     error_reason: ?[]const u8 = null,
 };
 
+/// Render `env` to `writer` according to `fmt`.
 pub fn emit(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
     fmt: OutputFormat,
     env: ResultEnvelope,
 ) !void {
+    std.debug.assert(@intFromPtr(writer) != 0);
     switch (fmt) {
         .text => try emitText(writer, env),
         .json => try emitJson(allocator, writer, env),
@@ -29,11 +33,15 @@ pub fn emit(
     }
 }
 
+/// Write final assistant text followed by a single trailing newline.
 pub fn emitText(writer: *std.Io.Writer, env: ResultEnvelope) !void {
+    const needs_nl = !std.mem.endsWith(u8, env.summary.final_text, "\n");
+    std.debug.assert(needs_nl or env.summary.final_text.len > 0);
     try writer.writeAll(env.summary.final_text);
-    if (!std.mem.endsWith(u8, env.summary.final_text, "\n")) try writer.writeByte('\n');
+    if (needs_nl) try writer.writeByte('\n');
 }
 
+/// Serialize a single `type: "result"` JSON envelope terminated by `\n`.
 pub fn emitJson(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
@@ -41,6 +49,8 @@ pub fn emitJson(
 ) !void {
     _ = allocator;
     const s = env.summary;
+    const safe_cost = if (std.math.isFinite(s.total_cost_usd)) s.total_cost_usd else @as(f64, 0.0);
+    std.debug.assert(std.math.isFinite(safe_cost));
     var jw = std.json.Stringify{ .writer = writer, .options = .{} };
     try jw.beginObject();
     try jw.objectField("type");
@@ -64,7 +74,7 @@ pub fn emitJson(
     try jw.objectField("num_turns");
     try jw.write(s.num_turns);
     try jw.objectField("total_cost_usd");
-    try jw.write(if (std.math.isFinite(s.total_cost_usd)) s.total_cost_usd else @as(f64, 0.0));
+    try jw.write(safe_cost);
     try jw.objectField("usage");
     try jw.beginObject();
     try jw.objectField("input_tokens");
@@ -84,11 +94,13 @@ pub fn emitJson(
     try writer.writeAll("\n");
 }
 
+/// Replay forwardable transcript JSONL lines and append the final result JSON object.
 pub fn emitStreamJson(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
     env: ResultEnvelope,
 ) !void {
+    std.debug.assert(@intFromPtr(env.summary) != 0);
     var lines = std.mem.tokenizeScalar(u8, env.summary.jsonl_replay, '\n');
     while (lines.next()) |line| {
         if (try stream.isForwardable(allocator, line)) {
@@ -101,6 +113,7 @@ pub fn emitStreamJson(
 
 /// Reject an input frame without completing the caller's active turn.
 pub fn writeProtocolError(writer: *std.Io.Writer, reason: []const u8) !void {
+    std.debug.assert(@intFromPtr(writer) != 0);
     try std.json.Stringify.value(.{ .type = "error", .@"error" = reason }, .{}, writer);
     try writer.writeByte('\n');
     try writer.flush();
@@ -122,6 +135,7 @@ pub fn emitErrorResult(
     return emitErrorResultDetail(writer, subtype, error_reason, session_id, duration_ms, .{});
 }
 
+/// Emit a structured error result line with optional `stage` and `message` diagnostic fields.
 pub fn emitErrorResultDetail(
     writer: *std.Io.Writer,
     subtype: []const u8,
@@ -130,6 +144,7 @@ pub fn emitErrorResultDetail(
     duration_ms: u64,
     detail: struct { stage: ?[]const u8 = null, message: ?[]const u8 = null },
 ) !void {
+    std.debug.assert(@intFromPtr(writer) != 0);
     var jw = std.json.Stringify{ .writer = writer, .options = .{} };
     try jw.beginObject();
     try jw.objectField("type");
@@ -355,4 +370,199 @@ test "emitErrorResult: strings are JSON-escaped and stay on one line" {
     try testing.expectEqualStrings("err\"or", obj.get("subtype").?.string);
     try testing.expectEqualStrings(reason, obj.get("error").?.string);
     try testing.expectEqualStrings(sid, obj.get("session_id").?.string);
+}
+
+test "emit text: empty final_text emits single newline" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = false,
+        .num_turns = 0,
+        .total_cost_usd = 0,
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = &.{},
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitText(&aw.writer, .{ .summary = &s, .duration_ms = 0 });
+    buf = aw.toArrayList();
+    try testing.expectEqualStrings("\n", buf.items);
+}
+
+test "emit json: non-finite total_cost_usd clamps to 0.0" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = false,
+        .num_turns = 0,
+        .total_cost_usd = std.math.nan(f64),
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = &.{},
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitJson(testing.allocator, &aw.writer, .{ .summary = &s, .duration_ms = 5 });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const cost = parsed.value.object.get("total_cost_usd").?;
+    try testing.expect(cost == .integer and cost.integer == 0 or cost == .float and cost.float == 0.0);
+}
+
+test "emit json: includes error field when error_reason is set" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = true,
+        .num_turns = 0,
+        .total_cost_usd = 0,
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = &.{},
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitJson(testing.allocator, &aw.writer, .{
+        .summary = &s,
+        .duration_ms = 9,
+        .error_reason = "watchdog_expired",
+    });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("watchdog_expired", parsed.value.object.get("error").?.string);
+    try testing.expectEqualStrings("error_during_execution", parsed.value.object.get("subtype").?.string);
+}
+
+test "emit json: omits error field when error_reason is null" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = false,
+        .num_turns = 0,
+        .total_cost_usd = 0,
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = &.{},
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitJson(testing.allocator, &aw.writer, .{ .summary = &s, .duration_ms = 1 });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("error") == null);
+}
+
+test "emit json: serializes all four token usage counters" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = false,
+        .total_cost_usd = 0,
+        .jsonl_replay = &.{},
+        .usage = .{
+            .input_tokens = 11,
+            .output_tokens = 22,
+            .cache_read_input_tokens = 33,
+            .cache_creation_input_tokens = 44,
+        },
+        .duration_api_ms = 55,
+        .num_turns = 3,
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitJson(testing.allocator, &aw.writer, .{ .summary = &s, .duration_ms = 66 });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const u = parsed.value.object.get("usage").?.object;
+    try testing.expectEqual(@as(i64, 11), u.get("input_tokens").?.integer);
+    try testing.expectEqual(@as(i64, 22), u.get("output_tokens").?.integer);
+    try testing.expectEqual(@as(i64, 33), u.get("cache_read_input_tokens").?.integer);
+    try testing.expectEqual(@as(i64, 44), u.get("cache_creation_input_tokens").?.integer);
+    try testing.expectEqual(@as(i64, 55), parsed.value.object.get("duration_api_ms").?.integer);
+    try testing.expectEqual(@as(i64, 3), parsed.value.object.get("num_turns").?.integer);
+}
+
+test "emit stream-json: filters upstream result lines and invalid lines" {
+    const jsonl =
+        \\corrupt-line
+        \\{"type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"ok"}]}}
+        \\{"type":"result","session_id":"s","result":"upstream"}
+        \\
+    ;
+    const out = try parseAndEmit(testing.allocator, .stream_json, jsonl);
+    defer testing.allocator.free(out);
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    const l1 = it.next().?;
+    const l2 = it.next().?;
+    try testing.expect(it.next() == null);
+    try testing.expect(std.mem.indexOf(u8, l1, "\"type\":\"assistant\"") != null);
+    try testing.expect(std.mem.indexOf(u8, l2, "\"type\":\"result\"") != null);
+}
+
+test "writeProtocolError: emits single-line error JSON frame" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try writeProtocolError(&aw.writer, "turn_in_progress");
+    buf = aw.toArrayList();
+    try testing.expectEqualStrings("{\"type\":\"error\",\"error\":\"turn_in_progress\"}\n", buf.items);
+}
+
+test "emitErrorResultDetail: includes optional stage and message fields" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitErrorResultDetail(&aw.writer, "error", "startup_timeout", "sid", 900, .{
+        .stage = "session_start",
+        .message = "timed out waiting for hook",
+    });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("session_start", parsed.value.object.get("stage").?.string);
+    try testing.expectEqualStrings("timed out waiting for hook", parsed.value.object.get("message").?.string);
+}
+
+test "emitErrorResultDetail: omits stage and message when null" {
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emitErrorResultDetail(&aw.writer, "error", "child_exited", "sid", 10, .{});
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("stage") == null);
+    try testing.expect(parsed.value.object.get("message") == null);
+}
+
+test "emit: inf cost clamps to 0.0 in json format" {
+    var s: Summary = .{
+        .final_text = &.{},
+        .session_id = &.{},
+        .is_error = false,
+        .num_turns = 0,
+        .total_cost_usd = std.math.inf(f64),
+        .duration_api_ms = 0,
+        .usage = .{},
+        .jsonl_replay = &.{},
+    };
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(testing.allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    try emit(testing.allocator, &aw.writer, .json, .{ .summary = &s, .duration_ms = 2 });
+    buf = aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const cost = parsed.value.object.get("total_cost_usd").?;
+    try testing.expect(cost == .integer and cost.integer == 0 or cost == .float and cost.float == 0.0);
 }

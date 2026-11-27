@@ -12,6 +12,7 @@
 //! field. We never write to it.
 const std = @import("std");
 
+/// Aggregated token usage counters across assistant or result records.
 pub const Usage = struct {
     input_tokens: u64 = 0,
     output_tokens: u64 = 0,
@@ -27,12 +28,14 @@ pub const Usage = struct {
     }
 
     fn add(total: *Usage, usage: Usage) void {
+        std.debug.assert(@intFromPtr(total) != 0);
         inline for (std.meta.fields(Usage)) |field| {
             @field(total, field.name) +|= @field(usage, field.name);
         }
     }
 };
 
+/// Parsed summary of a Claude Code session JSONL transcript slice.
 pub const Summary = struct {
     /// Heap-allocated. Owned by the caller; freed by `deinit`.
     final_text: []u8,
@@ -57,6 +60,7 @@ pub const Summary = struct {
     }
 };
 
+/// Error set returned when parsing JSONL transcript bytes.
 pub const ParseError = error{
     NoAssistantMessage,
     OutOfMemory,
@@ -66,6 +70,7 @@ pub const ParseError = error{
 // Dynamic JSON stores integers outside i64 as number strings. Accept the
 // full destination range and ignore invalid counters like other mistyped fields.
 fn unsignedField(comptime T: type, obj: std.json.ObjectMap, name: []const u8) ?T {
+    std.debug.assert(name.len > 0);
     const value = obj.get(name) orelse return null;
     return switch (value) {
         .integer => |n| std.math.cast(T, n),
@@ -75,11 +80,13 @@ fn unsignedField(comptime T: type, obj: std.json.ObjectMap, name: []const u8) ?T
 }
 
 fn stringField(obj: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    std.debug.assert(name.len > 0);
     const value = obj.get(name) orelse return null;
     return if (value == .string) value.string else null;
 }
 
 fn objectField(obj: std.json.ObjectMap, name: []const u8) ?std.json.ObjectMap {
+    std.debug.assert(name.len > 0);
     const value = obj.get(name) orelse return null;
     return if (value == .object) value.object else null;
 }
@@ -94,6 +101,7 @@ fn appendText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), msg: std.js
     }
 }
 
+/// Optional controls for replay retention and stop-text prefix matching.
 pub const ParseOptions = struct { keep_replay: bool = true, stop_text: ?[]const u8 = null };
 
 /// Parse a transcript from raw JSONL bytes.
@@ -101,10 +109,12 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Summary
     return parseWithOptions(allocator, bytes, .{});
 }
 
+/// Parse raw JSONL bytes with replay and stop-text matching controls.
 pub fn parseWithOptions(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOptions) ParseError!Summary {
     var matched_end: usize = 0;
     var summary = try parseRecords(allocator, bytes, opts, &matched_end);
     if (matched_end > 0 and !textMatches(summary.final_text, opts.stop_text.?)) {
+        std.debug.assert(matched_end <= bytes.len);
         summary.deinit(allocator);
         return parseRecords(allocator, bytes[0..matched_end], .{ .keep_replay = opts.keep_replay }, &matched_end);
     }
@@ -115,213 +125,239 @@ fn textMatches(text: []const u8, wanted: []const u8) bool {
     return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), std.mem.trim(u8, wanted, " \t\r\n"));
 }
 
-fn parseRecords(allocator: std.mem.Allocator, bytes: []const u8, opts: ParseOptions, matched_end: *usize) ParseError!Summary {
-    var final_text_buf: std.ArrayList(u8) = .{};
-    errdefer final_text_buf.deinit(allocator);
+const RecordAcc = struct {
+    allocator: std.mem.Allocator,
+    final_text: std.ArrayList(u8) = .{},
+    session_id: std.ArrayList(u8) = .{},
+    replay: std.ArrayList(u8) = .{},
+    usage: Usage = .{},
+    result_usage: Usage = .{},
+    result_fields: std.EnumSet(std.meta.FieldEnum(Usage)) = .initEmpty(),
+    permission_denials: ?[]u8 = null,
+    usage_by_id: std.StringHashMapUnmanaged(Usage) = .{},
+    id_arena: std.heap.ArenaAllocator,
+    seen_records: std.StringHashMapUnmanaged(void) = .{},
+    last_msg_id: ?[]const u8 = null,
+    is_error: bool = false,
+    subtype: ?[]u8 = null,
+    num_turns: u32 = 0,
+    result_turns: ?u32 = null,
+    total_cost_usd: f64 = 0.0,
+    duration_api_ms: u64 = 0,
+    saw_assistant: bool = false,
 
-    var session_id_buf: std.ArrayList(u8) = .{};
-    errdefer session_id_buf.deinit(allocator);
+    fn init(allocator: std.mem.Allocator) RecordAcc {
+        return .{
+            .allocator = allocator,
+            .id_arena = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
 
-    var replay_buf: std.ArrayList(u8) = .{};
-    errdefer replay_buf.deinit(allocator);
+    fn deinitOwned(self: *RecordAcc) void {
+        if (self.permission_denials) |v| self.allocator.free(v);
+        if (self.subtype) |v| self.allocator.free(v);
+        self.final_text.deinit(self.allocator);
+        self.session_id.deinit(self.allocator);
+        self.replay.deinit(self.allocator);
+        self.usage_by_id.deinit(self.allocator);
+        self.id_arena.deinit();
+    }
 
-    var usage: Usage = .{};
-    var result_usage: Usage = .{};
-    var result_fields = std.EnumSet(std.meta.FieldEnum(Usage)).initEmpty();
-    var permission_denials: ?[]u8 = null;
-    errdefer if (permission_denials) |value| allocator.free(value);
-    var usage_by_id = std.StringHashMap(Usage).init(allocator);
-    var id_arena = std.heap.ArenaAllocator.init(allocator);
-    defer id_arena.deinit();
-    var seen_records = std.StringHashMap(void).init(id_arena.allocator());
-    defer usage_by_id.deinit();
-    var last_msg_id: ?[]const u8 = null;
-    var is_error = false;
-    var subtype: ?[]u8 = null;
-    errdefer if (subtype) |value| allocator.free(value);
-    var num_turns: u32 = 0;
-    var result_turns: ?u32 = null;
-    var total_cost_usd: f64 = 0.0;
-    var duration_api_ms: u64 = 0;
-    var saw_assistant = false;
+    fn resetTerminalOverrides(self: *RecordAcc) void {
+        self.result_fields = .initEmpty();
+        self.result_turns = null;
+        self.total_cost_usd = 0;
+        self.duration_api_ms = 0;
+        if (self.permission_denials) |old| self.allocator.free(old);
+        self.permission_denials = null;
+    }
 
-    var line_iter = std.mem.splitScalar(u8, bytes, '\n');
-    while (line_iter.next()) |raw_line| {
-        // Trim trailing \r and skip empty lines.
-        var line = raw_line;
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        if (line.len == 0) continue;
-
-        if (opts.keep_replay) {
-            try replay_buf.appendSlice(allocator, line);
-            try replay_buf.append(allocator, '\n');
+    fn applyAssistant(self: *RecordAcc, obj: std.json.ObjectMap) ParseError!?[]const u8 {
+        self.saw_assistant = true;
+        const msg = objectField(obj, "message") orelse std.json.ObjectMap.init(self.allocator);
+        const id = stringField(msg, "id");
+        if (id == null or self.last_msg_id == null or !std.mem.eql(u8, id.?, self.last_msg_id.?)) {
+            self.final_text.clearRetainingCapacity();
         }
+        const msg_usage = objectField(msg, "usage");
+        if (id) |key| {
+            const entry = try self.usage_by_id.getOrPut(self.allocator, key);
+            if (!entry.found_existing) {
+                entry.key_ptr.* = try self.id_arena.allocator().dupe(u8, key);
+                entry.value_ptr.* = .{};
+                self.num_turns +|= 1;
+            }
+            if (msg_usage) |u| {
+                inline for (std.meta.fields(Usage)) |field| {
+                    const n = unsignedField(u64, u, field.name) orelse 0;
+                    if (n != 0) @field(entry.value_ptr.*, field.name) = n;
+                }
+            }
+            self.last_msg_id = entry.key_ptr.*;
+        } else {
+            self.last_msg_id = null;
+            self.num_turns +|= 1;
+            if (msg_usage) |u| self.usage.add(Usage.fromObject(u));
+        }
+        try appendText(self.allocator, &self.final_text, msg);
+        const api_error = obj.get("isApiErrorMessage") orelse .null;
+        self.is_error = (api_error == .bool and api_error.bool) or
+            std.mem.eql(u8, stringField(msg, "model") orelse "", "<synthetic>");
+        return if (self.is_error) "error_during_execution" else null;
+    }
 
+    fn applyResult(self: *RecordAcc, obj: std.json.ObjectMap) ParseError!?[]const u8 {
+        self.last_msg_id = null;
+        const next_subtype = stringField(obj, "subtype");
+        const flag = obj.get("is_error") orelse .null;
+        if (flag == .bool) {
+            self.is_error = flag.bool;
+        } else if (next_subtype) |kind| {
+            self.is_error = std.mem.startsWith(u8, kind, "error");
+        } else if (stringField(obj, "result")) |text| {
+            if (!textMatches(text, self.final_text.items)) self.is_error = false;
+        }
+        try self.applyResultText(obj);
+        if (objectField(obj, "usage")) |u| {
+            inline for (std.meta.fields(Usage)) |field| {
+                if (unsignedField(u64, u, field.name)) |n| {
+                    @field(self.result_usage, field.name) = n;
+                    self.result_fields.insert(@field(std.meta.FieldEnum(Usage), field.name));
+                }
+            }
+        }
+        if (obj.get("permission_denials")) |denials| {
+            if (denials == .array) {
+                self.permission_denials = try std.json.Stringify.valueAlloc(self.allocator, denials, .{});
+            }
+        }
+        self.result_turns = unsignedField(u32, obj, "num_turns");
+        if (obj.get("total_cost_usd")) |x| switch (x) {
+            .float => if (std.math.isFinite(x.float)) {
+                self.total_cost_usd = x.float;
+            },
+            .integer => self.total_cost_usd = @floatFromInt(x.integer),
+            else => {},
+        };
+        if (unsignedField(u64, obj, "duration_api_ms")) |n| self.duration_api_ms = n;
+        return next_subtype;
+    }
+
+    fn applyResultText(self: *RecordAcc, obj: std.json.ObjectMap) ParseError!void {
+        if (stringField(obj, "result")) |result| {
+            self.final_text.clearRetainingCapacity();
+            try self.final_text.appendSlice(self.allocator, result);
+            self.saw_assistant = true;
+            return;
+        }
+        if (!self.is_error) return;
+        const errors = obj.get("errors") orelse return;
+        if (errors != .array) return;
+        self.final_text.clearRetainingCapacity();
+        self.saw_assistant = true;
+        var first = true;
+        for (errors.array.items) |item| {
+            if (item != .string) continue;
+            if (!first) try self.final_text.append(self.allocator, '\n');
+            try self.final_text.appendSlice(self.allocator, item.string);
+            first = false;
+        }
+    }
+
+    fn processLine(self: *RecordAcc, line: []const u8) ParseError!bool {
+        std.debug.assert(line.len > 0);
         var parsed = std.json.parseFromSlice(
             std.json.Value,
-            allocator,
+            self.allocator,
             line,
             .{ .ignore_unknown_fields = true },
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            // Skip malformed lines without aborting the whole parse.
-            else => continue,
+            else => return false,
         };
         defer parsed.deinit();
-
-        const root = parsed.value;
-        if (root != .object) continue;
-        const obj = root.object;
-
+        if (parsed.value != .object) return false;
+        const obj = parsed.value.object;
         if (stringField(obj, "uuid")) |uuid| {
-            const seen = try seen_records.getOrPut(uuid);
-            if (seen.found_existing) continue;
-            seen.key_ptr.* = try id_arena.allocator().dupe(u8, uuid);
+            const seen = try self.seen_records.getOrPut(self.id_arena.allocator(), uuid);
+            if (seen.found_existing) return false;
+            seen.key_ptr.* = try self.id_arena.allocator().dupe(u8, uuid);
         }
-
-        // Session id (every event has one). Field is `sessionId` in real
-        // Claude transcripts and `session_id` in the legacy stream-json
-        // format. Accept both.
-        if (session_id_buf.items.len == 0) {
-            if (obj.get("sessionId")) |v| {
-                if (v == .string) try session_id_buf.appendSlice(allocator, v.string);
-            } else if (obj.get("session_id")) |v| {
-                if (v == .string) try session_id_buf.appendSlice(allocator, v.string);
-            }
+        if (self.session_id.items.len == 0) {
+            const sid = stringField(obj, "sessionId") orelse stringField(obj, "session_id");
+            if (sid) |s| try self.session_id.appendSlice(self.allocator, s);
         }
-
-        const ty = stringField(obj, "type") orelse continue;
-        var next_subtype: ?[]const u8 = null;
+        const ty = stringField(obj, "type") orelse return false;
         const assistant = std.mem.eql(u8, ty, "assistant");
-        if (!assistant and !std.mem.eql(u8, ty, "result")) continue;
-        // Only the current terminal record can override the assistant totals.
-        result_fields = .initEmpty();
-        result_turns = null;
-        total_cost_usd = 0;
-        duration_api_ms = 0;
-        if (permission_denials) |old| allocator.free(old);
-        permission_denials = null;
-        if (assistant) {
-            saw_assistant = true;
-            const msg = objectField(obj, "message") orelse std.json.ObjectMap.init(allocator);
-            const id = stringField(msg, "id");
-            if (id == null or last_msg_id == null or !std.mem.eql(u8, id.?, last_msg_id.?)) {
-                final_text_buf.clearRetainingCapacity();
-            }
-            const msg_usage = objectField(msg, "usage");
-            if (id) |key| {
-                const entry = try usage_by_id.getOrPut(key);
-                if (!entry.found_existing) {
-                    // Parsed strings can belong to the per-line JSON arena.
-                    entry.key_ptr.* = try id_arena.allocator().dupe(u8, key);
-                    entry.value_ptr.* = .{};
-                    num_turns +|= 1;
-                }
-                if (msg_usage) |u| {
-                    inline for (std.meta.fields(Usage)) |field| {
-                        const n = unsignedField(u64, u, field.name) orelse 0;
-                        if (n != 0) @field(entry.value_ptr.*, field.name) = n;
-                    }
-                }
-                last_msg_id = entry.key_ptr.*;
-            } else {
-                last_msg_id = null;
-                num_turns +|= 1;
-                if (msg_usage) |u| usage.add(Usage.fromObject(u));
-            }
-            try appendText(allocator, &final_text_buf, msg);
+        if (!assistant and !std.mem.eql(u8, ty, "result")) return false;
+        self.resetTerminalOverrides();
+        const next_subtype = if (assistant) try self.applyAssistant(obj) else try self.applyResult(obj);
+        const owned = if (next_subtype) |v| try self.allocator.dupe(u8, v) else null;
+        if (self.subtype) |old| self.allocator.free(old);
+        self.subtype = owned;
+        return true;
+    }
 
-            const api_error = obj.get("isApiErrorMessage") orelse .null;
-            is_error = (api_error == .bool and api_error.bool) or
-                std.mem.eql(u8, stringField(msg, "model") orelse "", "<synthetic>");
-            if (is_error) next_subtype = "error_during_execution";
-        } else {
-            last_msg_id = null;
-            next_subtype = stringField(obj, "subtype");
-            const flag = obj.get("is_error") orelse .null;
-            if (flag == .bool) {
-                is_error = flag.bool;
-            } else if (next_subtype) |kind| {
-                is_error = std.mem.startsWith(u8, kind, "error");
-            } else if (stringField(obj, "result")) |text| {
-                if (!textMatches(text, final_text_buf.items)) is_error = false;
+    fn finish(self: *RecordAcc) ParseError!Summary {
+        if (!self.saw_assistant) return error.NoAssistantMessage;
+        var usage_iter = self.usage_by_id.valueIterator();
+        while (usage_iter.next()) |u| self.usage.add(u.*);
+        inline for (std.meta.fields(Usage)) |field| {
+            if (self.result_fields.contains(@field(std.meta.FieldEnum(Usage), field.name))) {
+                @field(self.usage, field.name) = @field(self.result_usage, field.name);
             }
-            if (stringField(obj, "result")) |result| {
-                final_text_buf.clearRetainingCapacity();
-                try final_text_buf.appendSlice(allocator, result);
-                saw_assistant = true;
-            } else if (is_error) {
-                if (obj.get("errors")) |errors| {
-                    if (errors == .array) {
-                        final_text_buf.clearRetainingCapacity();
-                        saw_assistant = true;
-                        var first = true;
-                        for (errors.array.items) |item| {
-                            if (item != .string) continue;
-                            if (!first) try final_text_buf.append(allocator, '\n');
-                            try final_text_buf.appendSlice(allocator, item.string);
-                            first = false;
-                        }
-                    }
-                }
-            }
-            if (objectField(obj, "usage")) |u| {
-                inline for (std.meta.fields(Usage)) |field| {
-                    if (unsignedField(u64, u, field.name)) |n| {
-                        @field(result_usage, field.name) = n;
-                        result_fields.insert(@field(std.meta.FieldEnum(Usage), field.name));
-                    }
-                }
-            }
-            if (obj.get("permission_denials")) |denials| {
-                if (denials == .array) permission_denials = try std.json.Stringify.valueAlloc(allocator, denials, .{});
-            }
-            result_turns = unsignedField(u32, obj, "num_turns");
-            if (obj.get("total_cost_usd")) |x| switch (x) {
-                .float => if (std.math.isFinite(x.float)) {
-                    total_cost_usd = x.float;
-                },
-                .integer => total_cost_usd = @floatFromInt(x.integer),
-                else => {},
-            };
-            if (unsignedField(u64, obj, "duration_api_ms")) |n| duration_api_ms = n;
         }
+        const final_text = try self.final_text.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(final_text);
+        const session_id = try self.session_id.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(session_id);
+        const replay = try self.replay.toOwnedSlice(self.allocator);
+        const out: Summary = .{
+            .final_text = final_text,
+            .session_id = session_id,
+            .is_error = self.is_error,
+            .subtype = self.subtype,
+            .permission_denials = self.permission_denials,
+            .num_turns = self.result_turns orelse self.num_turns,
+            .total_cost_usd = self.total_cost_usd,
+            .duration_api_ms = self.duration_api_ms,
+            .usage = self.usage,
+            .jsonl_replay = replay,
+        };
+        self.subtype = null;
+        self.permission_denials = null;
+        self.usage_by_id.deinit(self.allocator);
+        self.id_arena.deinit();
+        return out;
+    }
+};
 
-        const owned_subtype = if (next_subtype) |value| try allocator.dupe(u8, value) else null;
-        if (subtype) |old| allocator.free(old);
-        subtype = owned_subtype;
+fn parseRecords(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    opts: ParseOptions,
+    matched_end: *usize,
+) ParseError!Summary {
+    var acc = RecordAcc.init(allocator);
+    errdefer acc.deinitOwned();
+    var line_iter = std.mem.splitScalar(u8, bytes, '\n');
+    while (line_iter.next()) |raw_line| {
+        var line = raw_line;
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        if (line.len == 0) continue;
+        if (opts.keep_replay) {
+            try acc.replay.appendSlice(allocator, line);
+            try acc.replay.append(allocator, '\n');
+        }
+        if (!try acc.processLine(line)) continue;
         if (opts.stop_text) |wanted| {
-            if (wanted.len > 0 and textMatches(final_text_buf.items, wanted)) {
+            if (wanted.len > 0 and textMatches(acc.final_text.items, wanted)) {
                 matched_end.* = line_iter.index orelse bytes.len;
+                std.debug.assert(matched_end.* <= bytes.len);
             }
         }
     }
-
-    if (!saw_assistant) return error.NoAssistantMessage;
-    var usage_iter = usage_by_id.valueIterator();
-    while (usage_iter.next()) |u| usage.add(u.*);
-    inline for (std.meta.fields(Usage)) |field| {
-        if (result_fields.contains(@field(std.meta.FieldEnum(Usage), field.name))) {
-            @field(usage, field.name) = @field(result_usage, field.name);
-        }
-    }
-
-    const final_text = try final_text_buf.toOwnedSlice(allocator);
-    errdefer allocator.free(final_text);
-    const session_id = try session_id_buf.toOwnedSlice(allocator);
-    errdefer allocator.free(session_id);
-    return Summary{
-        .final_text = final_text,
-        .session_id = session_id,
-        .is_error = is_error,
-        .subtype = subtype,
-        .permission_denials = permission_denials,
-        .num_turns = result_turns orelse num_turns,
-        .total_cost_usd = total_cost_usd,
-        .duration_api_ms = duration_api_ms,
-        .usage = usage,
-        .jsonl_replay = try replay_buf.toOwnedSlice(allocator),
-    };
+    return acc.finish();
 }
 
 /// Convenience: parse from a file path.
@@ -340,6 +376,7 @@ pub fn parseFileFromOffset(allocator: std.mem.Allocator, path: []const u8, start
     return parseFileFromOffsetWithOptions(allocator, path, start_offset, .{});
 }
 
+/// Validate that `path` is an absolute path without NUL bytes or `..` segments.
 pub fn validateTranscriptPath(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
     var components = std.mem.tokenizeScalar(u8, path, '/');
@@ -347,11 +384,13 @@ pub fn validateTranscriptPath(path: []const u8) bool {
     return true;
 }
 
+/// Alias for `openTranscriptRegularFile` used by transcript readers and tailers.
 pub const openTranscriptFile = openTranscriptRegularFile;
 
 /// Open nonblocking so checking the descriptor kind also works for an idle FIFO.
 pub fn openTranscriptRegularFile(path: []const u8) !std.fs.File {
     if (!validateTranscriptPath(path)) return error.InvalidTranscriptPath;
+    std.debug.assert(path.len > 0 and path[0] == '/');
     const file: std.fs.File = .{ .handle = try std.posix.open(path, .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
@@ -364,11 +403,18 @@ pub fn openTranscriptRegularFile(path: []const u8) !std.fs.File {
     return file;
 }
 
-pub fn parseFileFromOffsetWithOptions(allocator: std.mem.Allocator, path: []const u8, start_offset: u64, opts: ParseOptions) !Summary {
+/// Parse a transcript file starting at `start_offset` with custom `ParseOptions`.
+pub fn parseFileFromOffsetWithOptions(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    start_offset: u64,
+    opts: ParseOptions,
+) !Summary {
     const file = try openTranscriptFile(path);
     defer file.close();
     const size = (try file.stat()).size;
     if (size <= start_offset) return ParseError.NoAssistantMessage;
+    std.debug.assert(size > start_offset);
     if (size - start_offset > 64 * 1024 * 1024) return error.FileTooBig;
     try file.seekTo(start_offset);
     const bytes = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
@@ -492,15 +538,13 @@ test "parse: multi-block text concatenation" {
 }
 
 const offset_turn1 =
-    \\{"type":"user","sessionId":"s1","message":{"content":"first question"}}
-    \\{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"old answer"}],"usage":{"input_tokens":5,"output_tokens":2}}}
-    \\
-;
+    "{\"type\":\"user\",\"sessionId\":\"s1\",\"message\":{\"content\":\"first question\"}}\n" ++
+    "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"message\":{\"content\":[{\"type\":\"text\"," ++
+    "\"text\":\"old answer\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n";
 const offset_turn2 =
-    \\{"type":"user","sessionId":"s1","message":{"content":"second question"}}
-    \\{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"new answer"}],"usage":{"input_tokens":7,"output_tokens":4}}}
-    \\
-;
+    "{\"type\":\"user\",\"sessionId\":\"s1\",\"message\":{\"content\":\"second question\"}}\n" ++
+    "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"message\":{\"content\":[{\"type\":\"text\"," ++
+    "\"text\":\"new answer\"}],\"usage\":{\"input_tokens\":7,\"output_tokens\":4}}}\n";
 
 fn writeOffsetFixture(tmp: *std.testing.TmpDir, parts: []const []const u8) ![]u8 {
     var f = try tmp.dir.createFile("t.jsonl", .{});
@@ -599,4 +643,57 @@ test "Stop metadata belongs to the matching terminal record" {
     try testing.expectEqualStrings("success", s.subtype.?);
     try testing.expect(!s.is_error);
     try testing.expectEqual(7, s.usage.input_tokens);
+}
+
+test "parse: deduplicates records with identical uuid" {
+    const data =
+        \\{"uuid":"u1","type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":4,"output_tokens":2}}}
+        \\{"uuid":"u1","type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":4,"output_tokens":2}}}
+    ;
+    var s = try parse(testing.allocator, data);
+    defer s.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 1), s.num_turns);
+    try testing.expectEqual(@as(u64, 4), s.usage.input_tokens);
+}
+
+test "parse: merges streamed chunks sharing message id without double-counting turns" {
+    const data =
+        \\{"type":"assistant","session_id":"s","message":{"id":"m1","content":[{"type":"text","text":"he"}],"usage":{"input_tokens":10,"output_tokens":1}}}
+        \\{"type":"assistant","session_id":"s","message":{"id":"m1","content":[{"type":"text","text":"llo"}],"usage":{"input_tokens":10,"output_tokens":5}}}
+    ;
+    var s = try parse(testing.allocator, data);
+    defer s.deinit(testing.allocator);
+    try testing.expectEqualStrings("hello", s.final_text);
+    try testing.expectEqual(@as(u32, 1), s.num_turns);
+    try testing.expectEqual(@as(u64, 5), s.usage.output_tokens);
+}
+
+test "parse: synthetic model and isApiErrorMessage set error_during_execution" {
+    const data =
+        \\{"type":"assistant","session_id":"s","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"rate limited"}]}}
+    ;
+    var s = try parse(testing.allocator, data);
+    defer s.deinit(testing.allocator);
+    try testing.expect(s.is_error);
+    try testing.expectEqualStrings("error_during_execution", s.subtype.?);
+    try testing.expectEqualStrings("rate limited", s.final_text);
+}
+
+test "parse: result errors array joins strings and keep_replay false omits replay" {
+    const data =
+        \\{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["first err",42,"second err"]}
+    ;
+    var s = try parseWithOptions(testing.allocator, data, .{ .keep_replay = false });
+    defer s.deinit(testing.allocator);
+    try testing.expect(s.is_error);
+    try testing.expectEqualStrings("first err\nsecond err", s.final_text);
+    try testing.expectEqual(@as(usize, 0), s.jsonl_replay.len);
+}
+
+test "validateTranscriptPath: rejects relative, empty, nul, and parent-traversal paths" {
+    try testing.expect(!validateTranscriptPath(""));
+    try testing.expect(!validateTranscriptPath("relative/path.jsonl"));
+    try testing.expect(!validateTranscriptPath("/tmp/../etc/passwd"));
+    try testing.expect(!validateTranscriptPath("/tmp/a\x00b.jsonl"));
+    try testing.expect(validateTranscriptPath("/tmp/valid..name/session.jsonl"));
 }

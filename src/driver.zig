@@ -10,6 +10,7 @@ const hook_mod = @import("hook.zig");
 const terminal_mod = @import("terminal.zig");
 const stream_mod = @import("stream.zig");
 
+/// Configuration options for a single-shot PTY Claude Code session run.
 pub const Options = struct {
     prompt: []const u8,
     output_format: args_mod.OutputFormat = .text,
@@ -58,6 +59,7 @@ pub const Options = struct {
     retain_replay: bool = true,
 };
 
+/// Outcome of a completed single-shot run, owning its parsed `Summary`.
 pub const Result = struct {
     summary: transcript_mod.Summary,
     duration_ms: u64,
@@ -88,6 +90,7 @@ pub const Result = struct {
     }
 };
 
+/// Error set returned by single-shot PTY session orchestration.
 pub const RunError = error{
     WriteFailed,
     PermissionPromptBlocked,
@@ -125,6 +128,7 @@ pub var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false)
 var interrupt_generation = std.atomic.Value(u32).init(0);
 threadlocal var active_generation: ?u32 = null;
 
+/// RAII guard capturing the current interrupt generation for a single session.
 pub const InterruptScope = struct {
     previous: ?u32,
 
@@ -145,12 +149,16 @@ pub fn requestInterrupt() void {
     interrupted.store(true, .seq_cst);
 }
 
+/// Reset the global interrupt flag after an interrupted session unwinds.
 pub fn clearInterrupt() void {
     interrupted.store(false, .seq_cst);
 }
 
+/// Return true if a global interrupt was requested since this scope began.
 pub fn isInterrupted() bool {
-    return interrupted.load(.seq_cst) or (active_generation != null and active_generation.? != interrupt_generation.load(.seq_cst));
+    const gen_changed = active_generation != null and
+        active_generation.? != interrupt_generation.load(.seq_cst);
+    return interrupted.load(.seq_cst) or gen_changed;
 }
 
 var clock_once = std.once(initClock);
@@ -204,6 +212,7 @@ fn resolveCwd(allocator: std.mem.Allocator, path: []const u8) RunError![]u8 {
     return resolved;
 }
 
+/// Error set returned when locating the `claude` binary fails.
 pub const ResolveError = error{
     /// No executable regular file at the override path or on `PATH`.
     ClaudeNotFound,
@@ -267,7 +276,12 @@ pub fn buildShellCommand(allocator: std.mem.Allocator, argv: []const []const u8)
     return buildShellCommandInDir(allocator, argv, null);
 }
 
-pub fn buildShellCommandInDir(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) ![]u8 {
+/// Build the `/bin/sh -l -c` command string, optionally changing into `cwd` before `exec`.
+pub fn buildShellCommandInDir(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: ?[]const u8,
+) ![]u8 {
     const quoted = try shellQuoteArgv(allocator, argv);
     defer allocator.free(quoted);
     if (cwd) |dir| {
@@ -445,6 +459,7 @@ pub const prompt_accept_timeout_ms: u64 = 4000;
 /// failing fast with `RunError.PromptNotAccepted`.
 pub const max_prompt_injections: u32 = 4;
 
+/// Action chosen by the prompt-acknowledgement watchdog on each tick.
 pub const WatchdogAction = enum { wait, reinject, give_up };
 
 /// Prompt-acceptance watchdog decision. Pure so policy is unit-testable
@@ -639,6 +654,7 @@ pub fn buildChildEnv(allocator: std.mem.Allocator, fifo_path: []const u8) !std.A
     return buildChildEnvFromMap(allocator, &env_map, fifo_path);
 }
 
+/// Construct the sanitized child environment list from `env_map`.
 pub fn buildChildEnvFromMap(
     allocator: std.mem.Allocator,
     env_map: *const std.process.EnvMap,
@@ -671,6 +687,7 @@ fn appendEnv(allocator: std.mem.Allocator, list: *std.ArrayList([]u8), name: []c
     try list.append(allocator, entry);
 }
 
+/// Free all owned `KEY=VALUE` entries in a child environment list.
 pub fn freeChildEnv(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
     for (list.items) |entry| allocator.free(entry);
     list.deinit(allocator);
@@ -680,7 +697,9 @@ pub fn freeChildEnv(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) vo
 // Chunked bracketed paste (macOS TTYHOG = 1024 safety)
 // ---------------------------------------------------------------------------
 
+/// DECSET 2004 bracketed-paste start escape sequence.
 pub const paste_start = "\x1b[200~";
+/// DECSET 2004 bracketed-paste end escape sequence.
 pub const paste_end = "\x1b[201~";
 
 /// Max bytes per PTY write chunk (half of macOS's 1024-byte `TTYHOG` kernel
@@ -727,6 +746,7 @@ pub const PasteChunker = struct {
     }
 };
 
+/// Write `text` to `sink` wrapped in bracketed-paste escapes with inter-chunk gaps.
 pub fn writeBracketedPasteTo(sink: anytype, text: []const u8, gap_ns: u64) !void {
     return writePasteUntil(sink, text, gap_ns, std.math.maxInt(i128));
 }
@@ -758,6 +778,7 @@ fn writePasteUntil(sink: anytype, text: []const u8, gap_ns: u64, deadline_ns: i1
     try sink.writeInput(paste_end);
 }
 
+/// Paste `text` to `sink`, wait `enter_debounce_ns`, and send `\r` to submit.
 pub fn typePromptTo(sink: anytype, text: []const u8, gap_ns: u64, enter_debounce_ns: u64) !void {
     return typePromptUntil(sink, text, gap_ns, enter_debounce_ns, std.math.maxInt(i128));
 }
@@ -798,11 +819,13 @@ pub fn typePrompt(session: *zmux.NativeSession, text: []const u8) !void {
 // Pre-SessionStart startup dialog state machine (Claude Code 2.1.330 verified)
 // ---------------------------------------------------------------------------
 
+/// Recognised interactive startup dialogs shown by Claude Code before `SessionStart`.
 pub const DialogKind = enum { none, trust, bypass_permissions, dev_channels };
 
 /// Which option the dialog's `❯` cursor currently highlights.
 pub const DialogSelection = enum { affirmative, negative, unknown };
 
+/// Parsed cursor position and option layout of a startup dialog frame.
 pub const DialogAnalysis = struct {
     selection: DialogSelection = .unknown,
     /// Digit labeling the affirmative option when options are numbered (e.g.
@@ -814,6 +837,7 @@ pub const DialogAnalysis = struct {
     affirmative_below: bool = false,
 };
 
+/// Next keystroke or state transition emitted by the startup-dialog state machine.
 pub const DialogAction = union(enum) {
     /// Send nothing.
     none,
@@ -828,6 +852,7 @@ pub const DialogAction = union(enum) {
     settled,
 };
 
+/// Pair of detected startup dialog kind and the action to take for it.
 pub const DialogDecision = struct {
     kind: DialogKind = .none,
     action: DialogAction = .none,
@@ -888,16 +913,25 @@ const ExtraFlags = struct {
     }
 };
 
+/// Reject options or forwarded flags that are unsupported in PTY print mode.
 pub fn validateOptions(opts: Options) RunError!void {
     if (opts.max_turns != null or opts.fallback_model != null) return error.InvalidOptions;
     var flags: ExtraFlags = .{ .args = opts.extra_args };
+    const extra_rejected = [_][]const u8{
+        "--max-turns",
+        "--fallback-model",
+        "--include-partial-messages",
+        "--forward-subagent-text",
+        "--replay-user-messages",
+    };
     while (flags.next()) |arg| {
-        for (args_mod.rejected_flags ++ [_][]const u8{ "--max-turns", "--fallback-model", "--include-partial-messages", "--forward-subagent-text", "--replay-user-messages" }) |flag| {
+        for (args_mod.rejected_flags ++ extra_rejected) |flag| {
             if (std.mem.eql(u8, flag, arg.name)) return error.InvalidOptions;
         }
     }
 }
 
+/// Return true when `opts` explicitly authorizes auto-confirming `kind`.
 pub fn dialogConfirmAllowed(opts: Options, kind: DialogKind) bool {
     var mode = opts.permission_mode;
     var skip = opts.skip_permissions;
@@ -1229,7 +1263,9 @@ pub fn maybeHandleStartupDialogs(
         st.keys_sent + 1,
         max_dialog_keys,
     });
-    session.writeInput(keys) catch {};
+    session.writeInput(keys) catch |err| {
+        traceFmt(opts, trace_start, "dialog key write failed: {s}", .{@errorName(err)});
+    };
     st.kind = decision.kind;
     st.last = decision.action;
     st.last_key_ns = @intCast(monotonicNs());
@@ -1261,7 +1297,9 @@ pub fn flushPendingToPty(shared: *SharedState, session: *zmux.NativeSession) voi
         }
         shared.write_mutex.unlock();
         if (n == 0) return;
-        session.writeInput(buf[0..n]) catch {};
+        session.writeInput(buf[0..n]) catch |err| switch (err) {
+            else => return,
+        };
     }
 }
 
@@ -1330,6 +1368,7 @@ pub fn validateTranscriptPath(path: []const u8) bool {
     return transcript_mod.validateTranscriptPath(path);
 }
 
+/// Extract and validate `transcript_path` from a hook JSON payload.
 pub fn extractSafeTranscriptPath(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
     const path = (try hook_mod.extractTranscriptPath(allocator, payload_json)) orelse return null;
     if (!validateTranscriptPath(path)) {
@@ -1346,7 +1385,9 @@ pub fn formatHookTrace(buf: []u8, event: hook_mod.HookEvent, payload_len: usize)
     return std.fmt.bufPrint(buf, "hook: {s} payload_bytes={d}", .{ @tagName(event), payload_len }) catch "hook: (trace overflow)";
 }
 
+/// Maximum non-blank lines included in a failure screen diagnostic excerpt.
 pub const failure_screen_max_lines: usize = 15;
+/// Maximum byte length of a failure screen diagnostic excerpt.
 pub const failure_screen_max_bytes: usize = 1024;
 
 /// Render the tail of raw PTY output for a failure diagnostic: escape
@@ -1401,11 +1442,14 @@ pub fn formatFailureScreen(out: *[failure_screen_max_bytes]u8, raw: []const u8) 
     return out[0..text.len];
 }
 
+/// Write a formatted failure diagnostic and optional PTY tail to stderr.
 pub fn reportFailure(shared: ?*SharedState, debug_screen: bool, comptime fmt: []const u8, args: anytype) void {
     var buf: [2048]u8 = undefined;
     var stderr = std.fs.File.stderr().writerStreaming(&buf);
     writeFailure(&stderr.interface, shared, debug_screen, fmt, args) catch return;
-    stderr.interface.flush() catch {};
+    stderr.interface.flush() catch |err| switch (err) {
+        else => {},
+    };
 }
 
 fn writeFailure(writer: *std.Io.Writer, shared: ?*SharedState, debug_screen: bool, comptime fmt: []const u8, args: anytype) !void {
@@ -1429,20 +1473,24 @@ fn transcriptSize(path: ?[]const u8) ?u64 {
     return (file.stat() catch return null).size;
 }
 
+/// Return true when `hooks` contains an extra hook registered for `event`.
 pub fn hasExtraHook(hooks: []const hook_mod.ExtraHook, event: []const u8) bool {
     for (hooks) |hook| if (std.mem.eql(u8, hook.event, event)) return true;
     return false;
 }
 
+/// Return the stop-confirmation grace window in nanoseconds given configured extra hooks.
 pub fn stopConfirmationNs(hooks: []const hook_mod.ExtraHook) i128 {
     const ms: i128 = if (hasExtraHook(hooks, "Stop")) 2000 else 150;
     return ms * std.time.ns_per_ms;
 }
 
+/// Return true when failure screen capture is enabled by `--debug` or `CLAUDE_P_DEBUG_SCREEN=1`.
 pub fn debugScreenEnabled(debug: bool) bool {
     return debug or std.mem.eql(u8, std.posix.getenv("CLAUDE_P_DEBUG_SCREEN") orelse "", "1");
 }
 
+/// Classification of a post-Stop transcript record during blocking-Stop detection.
 pub const StopSummaryStatus = enum { none, confirmed, continued };
 
 fn normalizedPromptEqual(a: []const u8, b: []const u8) bool {
@@ -1470,7 +1518,13 @@ fn userPromptMatches(allocator: std.mem.Allocator, obj: std.json.ObjectMap, prom
     return normalizedPromptEqual(joined.items, prompt);
 }
 
-pub fn isContinuationRecord(allocator: std.mem.Allocator, line: []const u8, stop_last: ?[]const u8, current_prompt: ?[]const u8) !bool {
+/// Return true when a JSONL transcript line indicates a blocking Stop hook continued the turn.
+pub fn isContinuationRecord(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    stop_last: ?[]const u8,
+    current_prompt: ?[]const u8,
+) !bool {
     return try stopRecordStatus(allocator, line, stop_last, current_prompt) == .continued;
 }
 
@@ -1600,6 +1654,7 @@ fn scanForPrompt(allocator: std.mem.Allocator, path: []const u8, prompt: []const
     return last;
 }
 
+/// Return the byte offset of the last user record matching `prompt` in `path`, if found.
 pub fn findPromptTurnOffset(allocator: std.mem.Allocator, path: []const u8, prompt: []const u8) ?u64 {
     return scanForPrompt(allocator, path, prompt) catch null;
 }
@@ -1624,6 +1679,7 @@ fn traceFmt(opts: Options, start: i128, comptime fmt: []const u8, args: anytype)
 // Thread-shared state & zmux callback
 // ---------------------------------------------------------------------------
 
+/// Thread-shared PTY telemetry, DEC reply queue, and startup-dialog state.
 pub const SharedState = struct {
     session: *zmux.NativeSession,
     debug: bool,
@@ -1654,19 +1710,24 @@ pub const SharedState = struct {
     dialog: DialogState = .{},
 };
 
+/// Maximum bytes retained in the rolling startup-dialog PTY output buffer.
 pub const recent_capacity: usize = 8192;
 
+/// Fixed scratch capacity for `decRepliesInto` convenience replies.
 pub const dec_reply_capacity = 256;
 
 /// Fixed-buffer convenience for callers that only need a prefix of the replies.
 /// The PTY callback uses its growable queue for lossless handling of arbitrary bursts.
 pub fn decRepliesInto(shared: *SharedState, reply_buf: *[dec_reply_capacity]u8, data: []const u8) []const u8 {
     var backing = std.heap.FixedBufferAllocator.init(reply_buf);
-    var replies = std.ArrayList(u8).initCapacity(backing.allocator(), reply_buf.len) catch unreachable;
-    shared.dec.feed(backing.allocator(), data, &replies) catch {};
+    var replies = std.ArrayList(u8).initCapacity(backing.allocator(), reply_buf.len) catch return &.{};
+    shared.dec.feed(backing.allocator(), data, &replies) catch |err| switch (err) {
+        else => {},
+    };
     return replies.items;
 }
 
+/// zmux EventSink callback invoked on the reader thread; never writes back to the PTY directly.
 pub fn onZmuxEvent(ctx: *anyopaque, event: zmux.native.Event) void {
     const shared: *SharedState = @ptrCast(@alignCast(ctx));
     switch (event) {
@@ -1674,7 +1735,9 @@ pub fn onZmuxEvent(ctx: *anyopaque, event: zmux.native.Event) void {
             // Feed the entire chunk into the growable reply queue, preserving
             // decoder state across callbacks and arbitrary query bursts.
             shared.write_mutex.lock();
-            shared.dec.feed(std.heap.page_allocator, po.data, &shared.pending_to_pty) catch {};
+            shared.dec.feed(std.heap.page_allocator, po.data, &shared.pending_to_pty) catch |err| switch (err) {
+                else => {},
+            };
             shared.write_mutex.unlock();
             const now_ns: i64 = @intCast(monotonicNs());
             if (shared.startup_done.load(.seq_cst)) {
@@ -1695,7 +1758,9 @@ pub fn onZmuxEvent(ctx: *anyopaque, event: zmux.native.Event) void {
                 // consistent `(bytes_seen, recent)` snapshot.
                 shared.recent_mutex.lock();
                 defer shared.recent_mutex.unlock();
-                shared.recent.appendSlice(std.heap.page_allocator, po.data) catch {};
+                shared.recent.appendSlice(std.heap.page_allocator, po.data) catch |err| switch (err) {
+                    else => {},
+                };
                 if (shared.recent.items.len > recent_capacity) {
                     const drop = shared.recent.items.len - recent_capacity;
                     std.mem.copyForwards(
@@ -1790,6 +1855,7 @@ pub fn pumpStream(tailer: *stream_mod.Tailer, writer: *std.Io.Writer) error{ Wri
     return n;
 }
 
+/// Execute a single-shot Claude Code PTY session with interrupt scoping and full cleanup.
 pub fn run(allocator: std.mem.Allocator, opts: Options) RunError!Result {
     const scope = InterruptScope.enter();
     defer scope.exit();
@@ -2148,7 +2214,9 @@ fn runSession(caller_allocator: std.mem.Allocator, opts: Options) RunError!Resul
                         prompt_injections + 1,
                         max_prompt_injections,
                     });
-                    session.writeInput("\x15") catch {}; // Ctrl-U: clear residual input
+                    session.writeInput("\x15") catch |err| {
+                        traceFmt(opts, trace_start, "Ctrl-U before re-inject failed: {s}", .{@errorName(err)});
+                    }; // Ctrl-U: clear residual input
                     sleepPumpingDec(&shared, session, ink_enter_debounce_ms);
                     _ = waitForOutputQuiet(opts, trace_start, &shared, session, ink_quiescence_ms, ink_max_wait_ms);
                     if (isInterrupted()) return RunError.Interrupted;

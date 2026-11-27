@@ -17,7 +17,9 @@
 //! Callers append the response bytes (if any) from `out` back to the PTY.
 const std = @import("std");
 
+/// Default terminal row count reported to window-size queries.
 pub const default_rows: u16 = 40;
+/// Default terminal column count reported to window-size queries.
 pub const default_cols: u16 = 120;
 
 /// Streaming DEC / XTerm query responder. One instance per PTY; not
@@ -42,6 +44,7 @@ pub const DecDecoder = struct {
         chunk: []const u8,
         out: *std.ArrayList(u8),
     ) !void {
+        std.debug.assert(self.carry_len <= self.carry.len);
         for (chunk) |b| {
             if (self.carry_len == 0) {
                 if (b == 0x1b) self.start();
@@ -75,6 +78,7 @@ pub const DecDecoder = struct {
                 continue;
             }
 
+            std.debug.assert(self.carry_len >= 2 and self.carry_len <= self.carry.len);
             const body = self.carry[2..self.carry_len];
             // An ESC interrupts the unfinished CSI and starts a new sequence.
             if (b == 0x1b) self.start() else self.carry_len = 0;
@@ -85,11 +89,13 @@ pub const DecDecoder = struct {
     /// Drop any pending incomplete sequence.
     pub fn reset(self: *DecDecoder) void {
         self.carry_len = 0;
+        std.debug.assert(self.carry_len == 0);
     }
 
     fn start(self: *DecDecoder) void {
         self.carry[0] = 0x1b;
         self.carry_len = 1;
+        std.debug.assert(self.carry[0] == 0x1b);
     }
 
     fn reply(
@@ -125,7 +131,10 @@ pub const DecDecoder = struct {
             't' => {
                 if (!private_gt and std.mem.eql(u8, params, "18")) {
                     var buf: [24]u8 = undefined;
-                    const text = std.fmt.bufPrint(&buf, "\x1b[8;{d};{d}t", .{ self.rows, self.cols }) catch unreachable;
+                    const text = std.fmt.bufPrint(&buf, "\x1b[8;{d};{d}t", .{ self.rows, self.cols }) catch {
+                        return error.OutOfMemory;
+                    };
+                    std.debug.assert(text.len <= buf.len);
                     try out.appendSlice(allocator, text);
                 }
             },
@@ -262,4 +271,84 @@ test "DecDecoder reset drops the pending sequence" {
     decoder.reset();
     try decoder.feed(testing.allocator, "n", &out);
     try testing.expectEqualStrings("", out.items);
+}
+
+test "DA1 explicit 0 parameter gets a response" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[0c", &out);
+    try testing.expectEqualStrings("\x1b[?1;2c", out.items);
+}
+
+test "DA1 non-zero parameter is ignored" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[1c\x1b[2c", &out);
+    try testing.expectEqualStrings("", out.items);
+}
+
+test "DA2 explicit 0 parameter gets a response" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[>0c", &out);
+    try testing.expectEqualStrings("\x1b[>0;0;0c", out.items);
+}
+
+test "DA2 non-zero parameter is ignored" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[>1c", &out);
+    try testing.expectEqualStrings("", out.items);
+}
+
+test "XTVERSION explicit 0 parameter responds and non-zero is ignored" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[>0q\x1b[>1q\x1b[q", &out);
+    try testing.expectEqualStrings("\x1bP>|claude-p\x1b\\", out.items);
+}
+
+test "DSR non-6 and private-gt 6n are ignored" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[5n\x1b[>6n\x1b[n", &out);
+    try testing.expectEqualStrings("", out.items);
+}
+
+test "window-size query ignores non-18 and private-gt 18t" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[19t\x1b[>18t\x1b[t", &out);
+    try testing.expectEqualStrings("", out.items);
+}
+
+test "ESC interrupting an incomplete CSI starts a fresh query" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[6\x1b[c", &out);
+    try testing.expectEqualStrings("\x1b[?1;2c", out.items);
+}
+
+test "repeated ESC bytes before bracket still recognise CSI" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b\x1b[6n", &out);
+    try testing.expectEqualStrings("\x1b[1;1R", out.items);
+}
+
+test "intermediate bytes after params prevent false matches" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    try respondToDecQueries(testing.allocator, "\x1b[0 c\x1b[6 n\x1b[18 t", &out);
+    try testing.expectEqualStrings("", out.items);
+}
+
+test "empty chunk and non-bracket ESC sequence produce no reply" {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(testing.allocator);
+    var decoder: DecDecoder = .{};
+    try decoder.feed(testing.allocator, "", &out);
+    try decoder.feed(testing.allocator, "\x1b(B\x1b]0;title\x07", &out);
+    try testing.expectEqualStrings("", out.items);
+    try testing.expectEqual(@as(usize, 0), decoder.carry_len);
 }

@@ -15,11 +15,13 @@ const std = @import("std");
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: c_uint) c_int;
 
+/// Additional user-configured hook command bound to a Claude Code hook event.
 pub const ExtraHook = struct {
     event: []const u8,
     command: []const u8,
 };
 
+/// Options controlling extra hooks and extra `--settings` JSON merged into a harness.
 pub const CreateOptions = struct {
     /// Appended after the relay hook for the same event, or added under a new
     /// event key. Relay hooks always remain first and authoritative.
@@ -38,6 +40,7 @@ pub const CreateOptions = struct {
 /// rejected with `error.InvalidExtraSettings` instead of crashing.
 pub const max_extra_settings_depth: usize = 128;
 
+/// Ephemeral temp directory, FIFO, relay script, nonce, and settings JSON for one session.
 pub const HookHarness = struct {
     allocator: std.mem.Allocator,
     /// `$TMPDIR/claude-p-<pid>-<rand>/`
@@ -52,17 +55,25 @@ pub const HookHarness = struct {
     /// front of every line. Pass it to `parseLineWithNonce`.
     nonce: [nonce_len]u8,
 
+    /// Remove temporary FIFO, relay script, and directory, then free owned buffers.
     pub fn deinit(self: *HookHarness) void {
-        // Best-effort cleanup.
-        std.fs.cwd().deleteFile(self.fifo_path) catch {};
-        std.fs.cwd().deleteFile(self.script_path) catch {};
-        std.fs.cwd().deleteDir(self.tmp_dir) catch {};
+        // Best-effort cleanup; files may already have been unlinked on partial failure.
+        cleanupPath(std.fs.cwd().deleteFile(self.fifo_path));
+        cleanupPath(std.fs.cwd().deleteFile(self.script_path));
+        cleanupPath(std.fs.cwd().deleteDir(self.tmp_dir));
         self.allocator.free(self.tmp_dir);
         self.allocator.free(self.fifo_path);
         self.allocator.free(self.script_path);
         self.allocator.free(self.settings_json);
     }
 };
+
+fn cleanupPath(res: anyerror!void) void {
+    res catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {},
+    };
+}
 
 /// Length of the per-run relay nonce: 64 random bits as lowercase hex.
 pub const nonce_len = 16;
@@ -181,13 +192,14 @@ pub fn createWithOptions(allocator: std.mem.Allocator, opts: CreateOptions) !Hoo
     const root = try tmpRoot(allocator);
     defer allocator.free(root);
 
-    var nonce: [nonce_len]u8 = undefined;
-    _ = std.fmt.bufPrint(&nonce, "{x:0>16}", .{std.crypto.random.int(u64)}) catch unreachable;
+    var nonce_bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&nonce_bytes);
+    const nonce = std.fmt.bytesToHex(nonce_bytes, .lower);
 
     const pid: i32 = @intCast(std.posix.system.getpid());
     const tmp_dir = try makeExclusiveTmpDir(allocator, root, pid, cryptoSuffix);
     errdefer allocator.free(tmp_dir);
-    errdefer std.fs.cwd().deleteDir(tmp_dir) catch {};
+    errdefer cleanupPath(std.fs.cwd().deleteDir(tmp_dir));
 
     const fifo_path = try std.fmt.allocPrint(allocator, "{s}/events.fifo", .{tmp_dir});
     errdefer allocator.free(fifo_path);
@@ -207,12 +219,12 @@ pub fn createWithOptions(allocator: std.mem.Allocator, opts: CreateOptions) !Hoo
     if (mkfifo(c_fifo_path.ptr, 0o600) != 0) {
         return error.MkfifoFailed;
     }
-    errdefer std.fs.cwd().deleteFile(fifo_path) catch {};
+    errdefer cleanupPath(std.fs.cwd().deleteFile(fifo_path));
 
     // Write the relay script. Exclusive creation never follows or truncates
     // something already at the path.
     var script_file = try std.fs.cwd().createFile(script_path, .{ .exclusive = true, .mode = 0o700 });
-    errdefer std.fs.cwd().deleteFile(script_path) catch {};
+    errdefer cleanupPath(std.fs.cwd().deleteFile(script_path));
     {
         defer script_file.close();
         try script_file.writeAll(script);
@@ -287,6 +299,7 @@ fn parseExtraSettings(scratch: std.mem.Allocator, opts: CreateOptions) !?std.jso
     return parsed.object;
 }
 
+/// Build the inline `--settings` JSON string wiring relay and extra hooks.
 pub fn buildSettingsJson(
     allocator: std.mem.Allocator,
     script_path: []const u8,
@@ -399,6 +412,7 @@ fn writeMatcherEntry(js: *std.json.Stringify, command: []const u8) !void {
     try js.endObject();
 }
 
+/// Hook lifecycle events relayed from Claude Code over the harness FIFO.
 pub const HookEvent = enum {
     session_start,
     user_prompt_submit,
@@ -418,6 +432,7 @@ pub const HookEvent = enum {
     }
 };
 
+/// Parsed FIFO event record pairing a `HookEvent` with its borrowed JSON payload.
 pub const HookLine = struct {
     event: HookEvent,
     payload: []const u8, // borrowed from the input buffer
@@ -498,6 +513,7 @@ pub fn extractPrompt(allocator: std.mem.Allocator, payload_json: []const u8) !?[
     return try extractStringField(allocator, payload_json, "prompt");
 }
 
+/// Return true when a Stop payload reports `stop_hook_active: true`.
 pub fn parseStopHookActive(allocator: std.mem.Allocator, payload_json: []const u8) bool {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch return false;
     defer parsed.deinit();
@@ -506,6 +522,7 @@ pub fn parseStopHookActive(allocator: std.mem.Allocator, payload_json: []const u
     return flag == .bool and flag.bool;
 }
 
+/// Extract the requested tool name (or fallback message) from a `PermissionRequest` payload.
 pub fn extractPermissionTool(allocator: std.mem.Allocator, payload_json: []const u8) ?[]u8 {
     if (extractStringField(allocator, payload_json, "tool_name") catch null) |name| {
         if (name.len > 0) return name;
@@ -514,12 +531,21 @@ pub fn extractPermissionTool(allocator: std.mem.Allocator, payload_json: []const
     return extractStringField(allocator, payload_json, "message") catch null;
 }
 
+/// Extract a best-effort error message from a `StopFailure` payload, returning null on error.
 pub fn extractErrorMessage(allocator: std.mem.Allocator, payload_json: []const u8) ?[]u8 {
     return extractErrorMessageAlloc(allocator, payload_json) catch null;
 }
 
+/// Extract the first present error text field from a `StopFailure` payload, propagating OOM.
 pub fn extractErrorMessageAlloc(allocator: std.mem.Allocator, payload_json: []const u8) !?[]u8 {
-    return extractFirstMessage(allocator, payload_json, &.{ "last_assistant_message", "error_details", "error", "message", "reason" });
+    const fields = [_][]const u8{
+        "last_assistant_message",
+        "error_details",
+        "error",
+        "message",
+        "reason",
+    };
+    return extractFirstMessage(allocator, payload_json, &fields);
 }
 
 fn extractFirstMessage(allocator: std.mem.Allocator, payload_json: []const u8, fields: []const []const u8) !?[]u8 {

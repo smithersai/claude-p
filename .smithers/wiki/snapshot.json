@@ -15,7 +15,7 @@
         "SPEC.md": "399ec4291c9f11cda899df734e36e8dbe90dbb5674886e08cee656bb6da4261c",
         "CLAUDE.md": "29a9d506881b441a18e5e72ce69832ff091a40ed8fcc25759ea1378630592beb",
         "build.zig": "1ab295800bb83ad3db0b3f5da76188ffff3bd38ca2e7805c286c46a594c42cbc",
-        "src/root.zig": "efd96f1353582dfcb97a8556007cb8f8cb82a80255bad774097d4cf05bdb4cb6"
+        "src/root.zig": "308edd5f0c4f005448d76afc5e44d5736a0bf75faa635ffdcd1cb24014f758cc"
       }
     },
     {
@@ -25,8 +25,8 @@
       "document": ".smithers/wiki/pages/pty-and-zmux.md",
       "sha256": "b1cc63bbea71ab65782aca7f9a6d896f0fc181f3ee4dfb8a054bd9803c7fbb81",
       "inputs": {
-        "src/terminal.zig": "e5893c2f1598befcaa70a49dc7b3f6f9f429e22a20f3b033a10596221526c91c",
-        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6",
+        "src/terminal.zig": "be5a1f8a4c7096582424dc5f5b8a6de3774d32871395d2d390bd0a0fa702327b",
+        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7",
         "build.zig.zon": "50c91239704786a2e292aa34c0488da21da254a0cdebe9672c04518340d529cc"
       }
     },
@@ -37,8 +37,8 @@
       "document": ".smithers/wiki/pages/startup-dialogs-and-paste.md",
       "sha256": "5f7cc3d70f3233160aedb69c460d01c425f49edcc9f79d93f2d6589aca5670b8",
       "inputs": {
-        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6",
-        "src/args.zig": "c57ad2b80985f7afac90c9cdf6c9bd24b14c70b09490dcf8ef56af832d1fceae"
+        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7",
+        "src/args.zig": "44789e7e1f8645e923072b30d1dc472fa0a07ab5a985228d870b3e4aca36fb6d"
       }
     },
     {
@@ -48,8 +48,8 @@
       "document": ".smithers/wiki/pages/hook-relay-and-fifo.md",
       "sha256": "8319a21be452a507360bf169d64d6da2f8ee651fb9f12e0dc7a8d6c222aa745c",
       "inputs": {
-        "src/hook.zig": "5f15b85a37ea8cd3bdcb679fa059f3017084352fb5803c4d8ca7fd6469445ff0",
-        "src/driver.zig": "0424c2b560428a9afb8a39adab6cccfcad79762fc17372fe77d5e007490d3cc6"
+        "src/hook.zig": "ee3b6838243eb3e322d7e1e16eb5843820ce5dc447421f82a7c709d77975c080",
+        "src/driver.zig": "53c079d955a27a5ac3fa88d47351e4c829d3a71aaf3b514d635893c738d35aa7"
       }
     },
     {
@@ -59,9 +59,9 @@
       "document": ".smithers/wiki/pages/transcript-and-streaming.md",
       "sha256": "fca2389b84f8c2a9a16d360f8b4452ed1a8655dcdc091dc706f66537146cabc3",
       "inputs": {
-        "src/transcript.zig": "b8d60a27b4c39ea0d0b94f4706acccdafc525b409f989d2efbf99af0977d27db",
-        "src/stream.zig": "c1012b23549f5c336967ae2bf4abd7258800142926e507d5fb78041c7f7795fa",
-        "src/emit.zig": "d373b9c4a50db28f2b46a3c36733d2acd2ccf5a2a935860270ee8c69bdad12e0"
+        "src/transcript.zig": "2496888228597ae3d26b831b6ebf9c3e82eb69698b4c57683aa4559d381b67cd",
+        "src/stream.zig": "aea2c97794506bfef30dce8ff55afb0cfb65f9f2f19ccfa6c26155e2d8e12110",
+        "src/emit.zig": "bdc8d24f6ac672696ae331b216cfaba4ad37cd843e6130fdda68baeb6e72bcaa"
       }
     },
     {
@@ -71,9 +71,9 @@
       "document": ".smithers/wiki/pages/daemon-protocol.md",
       "sha256": "cb608f4c05e34a001e61cc9fceab6350b5722a1ee94fb692281b9276e173c0a9",
       "inputs": {
-        "src/daemon.zig": "d4191dfdedf3117a63a68d43e7095fb123748d13cf07e1b67fa7424f6ef66a78",
-        "src/main.zig": "32bc2a3699b825c5a91f883b7a9113b5bbe2f137f2ca6716725e3db1af6af92b",
-        "src/emit.zig": "d373b9c4a50db28f2b46a3c36733d2acd2ccf5a2a935860270ee8c69bdad12e0"
+        "src/daemon.zig": "05d42c05331958018e171bed3e238569285269646d6a1bf5d83aeca862f316ab",
+        "src/main.zig": "8faafffef4574571c7d7284cfd9911d1707defdf3b533cb78a39c60b15982629",
+        "src/emit.zig": "bdc8d24f6ac672696ae331b216cfaba4ad37cd843e6130fdda68baeb6e72bcaa"
       }
     },
     {
@@ -129,5 +129,5 @@
       }
     }
   ],
-  "digest": "d65aff270b6022cf74dd3c98f9564a5db9ac657090723705d946da19edbb87be"
+  "digest": "e272e791ee9261132cc539c886adeec125b1fd25d9221f9bddafce6088fe129b"
 }

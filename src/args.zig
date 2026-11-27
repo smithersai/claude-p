@@ -3,6 +3,7 @@
 const std = @import("std");
 const hook_mod = @import("hook.zig");
 
+/// Supported stdout rendering modes (`text`, `json`, `stream-json`).
 pub const OutputFormat = enum {
     text,
     json,
@@ -16,6 +17,7 @@ pub const OutputFormat = enum {
     }
 };
 
+/// Error set returned when parsing command-line arguments fails.
 pub const ParseError = error{
     BadOutputFormat,
     MissingValue,
@@ -29,6 +31,7 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// Parsed CLI options for both one-shot and persistent daemon invocations.
 pub const Options = struct {
     /// Heap-allocated; owns its strings.
     prompt: ?[]const u8 = null,
@@ -282,6 +285,7 @@ const help_text =
     \\
 ;
 
+/// Return the static `--help` usage text for `claude-p`.
 pub fn helpText() []const u8 {
     return help_text;
 }
