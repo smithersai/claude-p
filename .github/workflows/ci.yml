@@ -118,7 +118,6 @@ jobs:
     env:
       SMITHERS_TRUST_TIER: trusted_maintainer_sandbox
       SMITHERS_CACHE_READ_TOKEN: ${{ secrets.SMITHERS_CACHE_READ_TOKEN }}
-      SMITHERS_CACHE_WRITE_TOKEN: ${{ secrets.SMITHERS_CACHE_WRITE_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -133,13 +132,16 @@ jobs:
         with:
           node-version: 22
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Verify shared Smithers Cloud object store health
+        env:
+          # Write token is scoped strictly to trusted Smithers steps, never third-party actions.
+          SMITHERS_CACHE_WRITE_TOKEN: ${{ secrets.SMITHERS_CACHE_WRITE_TOKEN }}
         run: curl -fsS https://build.smithers.sh/healthz
 
       - name: Run Uphill Lighthouse audit on trusted main
-        uses: wevm/uphill@main
+        uses: wevm/uphill@f71fba4d199409cbc8bf00d713dab4b24d91b980 # main
 
       - name: Generate trusted Lighthouse audit artifact
         run: node .smithers/audit/generate-lighthouse.mjs --no-run --skip-docs

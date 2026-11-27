@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   tag-release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -40,6 +41,10 @@ jobs:
         run: |
           node scripts/publish.mjs --check-versions
           VERSION="$(node -p "require('./package.json').version")"
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::invalid semver version: $VERSION"
+            exit 1
+          fi
           TAG="v${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -60,9 +65,9 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.check.outputs.tag }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
-          TAG="${{ steps.check.outputs.tag }}"
-          VERSION="${{ steps.check.outputs.version }}"
           git config user.name "smithers-release[bot]"
           git config user.email "release@smithers.sh"
           git tag -a "$TAG" -m "Release claude-p ${VERSION}" "$GITHUB_SHA"

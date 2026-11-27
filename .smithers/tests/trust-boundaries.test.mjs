@@ -10,6 +10,7 @@
 // Run: node --test .smithers/tests/trust-boundaries.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,4 +97,35 @@ test("home.json copy obeys house style (no semicolons or em dashes in UI prose)"
   }
   walk(home, "");
   assert.deepEqual(bad, [], `disallowed punctuation in home.json prose:\n${bad.join("\n")}`);
+});
+
+test("protectedPaths covers all security-critical modular subdirectories", () => {
+  const policy = readJson(".smithers/trust-policy.json");
+  for (const required of ["src/driver/**", "src/hook/**", "src/daemon/**", "src/transcript/**", "src/args/**", "src/stdin.zig"]) {
+    assert.ok(policy.protectedPaths.includes(required), `missing protectedPath ${required}`);
+  }
+});
+
+test("GitHub workflows SHA-pin third-party actions and avoid inline expression injection", () => {
+  const wfDir = path.join(ROOT, ".github/workflows");
+  for (const name of fs.readdirSync(wfDir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))) {
+    const src = fs.readFileSync(path.join(wfDir, name), "utf8");
+    const usesLines = src.match(/^\s*-?\s*uses:\s+\S+/gm) ?? [];
+    for (const line of usesLines) {
+      assert.match(line, /@[0-9a-f]{40}\b/, `${name}: action must be SHA-pinned: ${line.trim()}`);
+    }
+    assert.ok(!/RELEASE_TAG="\$\{\{/.test(src), `${name}: pass workflow inputs via env, not inline shell interpolation`);
+  }
+});
+
+test("smithers-auth rejects privileged scopes and excessive TTLs", () => {
+  const script = path.join(ROOT, "scripts/smithers-auth.mjs");
+  const badScope = spawnSync(process.execPath, [script, "--dry-run", "--scope", "approve:runs"], { encoding: "utf8" });
+  assert.equal(badScope.status, 2);
+  const badTtl = spawnSync(process.execPath, [script, "--dry-run", "--ttl", "24h"], { encoding: "utf8" });
+  assert.equal(badTtl.status, 2);
+  const invalidTtl = spawnSync(process.execPath, [script, "--dry-run", "--ttl", "0m"], { encoding: "utf8" });
+  assert.equal(invalidTtl.status, 2);
+  const good = spawnSync(process.execPath, [script, "--dry-run", "--ttl", "15m", "--format", "json"], { encoding: "utf8" });
+  assert.equal(good.status, 0);
 });

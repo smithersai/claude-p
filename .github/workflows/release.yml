@@ -67,8 +67,9 @@ jobs:
           node-version: 22
 
       - name: Verify tag is exactly v<version> (package.json, build.zig.zon, src/root.zig)
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          RELEASE_TAG="${{ inputs.tag || github.ref_name }}"
           node scripts/publish.mjs --check-versions --expect-tag="$RELEASE_TAG"
           node --test .smithers/tests/factory-projections.test.mjs .smithers/tests/trust-boundaries.test.mjs .smithers/tests/install-checksum.test.mjs tests/prop/js_supplychain_prop.mjs
 
@@ -98,6 +99,8 @@ jobs:
 
       - name: Verify darwin-arm64 digest, runner arch, and exact --version
         working-directory: release-assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           arch="$(uname -m)"
           if [ "$arch" != "arm64" ]; then
@@ -107,7 +110,6 @@ jobs:
           grep '  claude-p-darwin-arm64.gz$' SHA256SUMS | shasum -a 256 -c -
           gunzip -c claude-p-darwin-arm64.gz > claude-p
           chmod 0755 claude-p
-          RELEASE_TAG="${{ inputs.tag || github.ref_name }}"
           expected="claude-p ${RELEASE_TAG#v}"
           actual="$(./claude-p --version)"
           if [ "$actual" != "$expected" ]; then
@@ -142,8 +144,9 @@ jobs:
           path: release-assets
 
       - name: Re-check tag against the checkout
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          RELEASE_TAG="${{ inputs.tag || github.ref_name }}"
           node scripts/publish.mjs --check-versions --expect-tag="$RELEASE_TAG"
 
       - name: GitHub release (verifies assets against SHA256SUMS; never overwrites)

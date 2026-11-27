@@ -43,6 +43,21 @@ if (!ALLOWED_SCOPES.has(scope)) {
   process.exit(2);
 }
 
+const MAX_SANDBOX_TTL_SECONDS = 4 * 3600;
+function parseTtlSeconds(raw) {
+  const m = /^(\d+)([smh])$/.exec(raw);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isSafeInteger(n) || n <= 0) return null;
+  const mult = m[2] === "s" ? 1 : m[2] === "m" ? 60 : 3600;
+  return n * mult;
+}
+const ttlSeconds = parseTtlSeconds(ttl);
+if (ttlSeconds === null || ttlSeconds > MAX_SANDBOX_TTL_SECONDS) {
+  console.error(`smithers-auth: invalid or excessive --ttl "${ttl}" (expected <n>[s|m|h], max 4h for sandbox tokens)`);
+  process.exit(2);
+}
+
 const policy = JSON.parse(fs.readFileSync(path.join(ROOT, ".smithers/trust-policy.json"), "utf8"));
 const cloudMcpUrl = policy.mcpEndpoint;
 const repo = policy.repository;
@@ -139,6 +154,20 @@ function mintAttenuatedGatewayToken() {
 async function mintOneTimeWsTicket(bearerToken) {
   const gw = process.env.SMITHERS_GATEWAY_URL;
   if (dryRun || !gw || !bearerToken) return null;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(gw);
+  } catch {
+    return { minted: false, error: "invalid SMITHERS_GATEWAY_URL" };
+  }
+  const isLoopback =
+    parsedUrl.hostname === "127.0.0.1" ||
+    parsedUrl.hostname === "localhost" ||
+    parsedUrl.hostname === "::1" ||
+    parsedUrl.hostname === "[::1]";
+  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopback)) {
+    return { minted: false, error: "refusing to send bearer token to non-HTTPS non-loopback gateway" };
+  }
   try {
     const base = gw.replace(/\/+$/, "");
     const res = await fetch(`${base}/auth/ticket`, {

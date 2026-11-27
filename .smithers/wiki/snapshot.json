@@ -87,7 +87,7 @@
         "bin/claude-p.js": "3a7427f1fa020ddd013c387b164d9075ef5b11beda6e18ef518da3456e5dd813",
         "scripts/install.js": "4d110b8e9f8351cf179128bfc5bd3925480f4e36acda94907ebaeaf66bca3815",
         "scripts/publish.mjs": "3ab011c13c70ec1e92b9a82f4462f8037f9dbd36b6381d17a249731281081156",
-        ".github/workflows/release.yml": "b7f51e79ac6b5740fce0339eeb99960cfad67bf77154acbf903db454a0267fbe"
+        ".github/workflows/release.yml": "1046d0dce236a3d7a8395b341ca1b39472861e0177f7f4cffc7b2b0b6fd9f96d"
       }
     },
     {
@@ -112,8 +112,8 @@
       "inputs": {
         ".smithers/WORKSPACE.ts": "8871f00efe67180a608bac58307301daeb41ef8d433f6ae05b99884b0677ad61",
         ".smithers/PACKAGE.ts": "0fa9f933b74bd051ca49564e344de56823e0de94c0fa92843eea6608d5eb727f",
-        ".smithers/FACTORY.ts": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc",
-        ".smithers/trust-policy.json": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c"
+        ".smithers/FACTORY.ts": "90815635868e424795a3e35555e41910b19cfc2f0630e074ed397e8c1a69a312",
+        ".smithers/trust-policy.json": "3c1b69e81eca95bccaed51be6f0fd69fa713ff39907772ba8fcfa52c8f3180e9"
       }
     },
     {
@@ -123,11 +123,11 @@
       "document": ".smithers/wiki/pages/contributing-and-triage.md",
       "sha256": "94fbf0b87e36ec5776c4163a95fb9d74af86cad2b49bf84f0649655959e52d30",
       "inputs": {
-        ".smithers/FACTORY.ts": "9a4440dc3a0fdb98e053b1700e3b205df3304f4653162e792104ba515a6ad9bc",
-        ".smithers/trust-policy.json": "b5e1ddb44977aa490903fa7a33759f73b1f34c1acfbdb5ec81b5bbb13d5d703c",
+        ".smithers/FACTORY.ts": "90815635868e424795a3e35555e41910b19cfc2f0630e074ed397e8c1a69a312",
+        ".smithers/trust-policy.json": "3c1b69e81eca95bccaed51be6f0fd69fa713ff39907772ba8fcfa52c8f3180e9",
         ".smithers/instructions/agent.md": "3350788c81c5a6f213f4e8ebb059f675adb8581464c2395a0914731a2dd48ef9"
       }
     }
   ],
-  "digest": "c6390674461dd525e737719530dd5279234ccd28d6b432464d959fab19f9da4e"
+  "digest": "f561b48f30cd70aa8b39ba290c7e8b7a5e1cd559f2539b6174c9636770f6b6a1"
 }
