@@ -176,6 +176,20 @@
   font-size: 0.875em;
 }
 
+.sl-markdown-content table td code {
+  white-space: nowrap;
+}
+
+.cp-mermaid {
+  overflow-x: auto;
+}
+
+.cp-mermaid svg {
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}
+
 /* Splash page notice banner */
 .cp-disclaimer {
   margin: 0 auto 2rem;

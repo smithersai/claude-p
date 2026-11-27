@@ -2,7 +2,7 @@
   "version": 1,
   "repository": "smithersai/claude-p",
   "currentVersion": "0.1.3",
-  "commitCount": 60,
+  "commitCount": 66,
   "releaseCount": 6,
   "releases": [
     {
@@ -171,6 +171,42 @@
   ],
   "recentCommits": [
     {
+      "sha": "c141c40f",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "security(ci,auth,policy): SHA-pin all workflow actions, scope cache write token, cap sandbox TTL, and protect modular src subdirs"
+    },
+    {
+      "sha": "1b9fe273",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "docs(factory): sync wiki, mythical history, 97/100 Lighthouse audit, and locked 90-100 Uphill baseline"
+    },
+    {
+      "sha": "7a6469bf",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "refactor(footprint): modularize driver/daemon/args/transcript/stdin/hook to hit 90-100 across all Uphill categories"
+    },
+    {
+      "sha": "f10cc6ba",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "refactor(driver): decompose driver into 5 DAG submodules, 521/521 tests green, style=96"
+    },
+    {
+      "sha": "dcd2786e",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "refactor(args,daemon,hook,main): modularize daemon protocol/turn, embed help text, and enforce TigerStyle limits"
+    },
+    {
+      "sha": "6b2783eb",
+      "date": "2026-11-27",
+      "tags": [],
+      "title": "feat(zig): achieve 100% correctness, pub docs, and unit test targets across all modules"
+    },
+    {
       "sha": "e5dbe23a",
       "date": "2026-11-26",
       "tags": [],
@@ -285,43 +321,7 @@
       "date": "2026-06-06",
       "tags": [],
       "title": "feat(daemon): gate PTY byte-rate trace behind CLAUDE_P_PTY_TRACE"
-    },
-    {
-      "sha": "53919ea1",
-      "date": "2026-06-06",
-      "tags": [],
-      "title": "chore(release): v0.1.1 + Linux container cross-build script"
-    },
-    {
-      "sha": "4287c404",
-      "date": "2026-06-05",
-      "tags": [],
-      "title": "Merge pull request #4 from madogao/feat/pty-byte-rate-trace"
-    },
-    {
-      "sha": "47be2ff1",
-      "date": "2026-06-03",
-      "tags": [],
-      "title": "feat(daemon): periodic PTY byte-rate trace for wedge diagnosis"
-    },
-    {
-      "sha": "ad1c7c41",
-      "date": "2026-05-29",
-      "tags": [],
-      "title": "Merge pull request #3 from madogao/feat/daemon-health-ping"
-    },
-    {
-      "sha": "bb9ee417",
-      "date": "2026-05-26",
-      "tags": [],
-      "title": "feat(daemon): add ping/pong health-probe frame for liveness detection"
-    },
-    {
-      "sha": "3710a408",
-      "date": "2026-05-22",
-      "tags": [],
-      "title": "Merge pull request #2 from madogao/fix/bypass-permissions-dialog"
     }
   ],
-  "digest": "91c0e83d8ba558b214a6bbc2b285aa2df6e0e9b44a68f3fc750014cc1fecc967"
+  "digest": "9a18bd6ebea28214eb1fdb0ef5b70e6def5682e35f846a5b365e2baadd11c801"
 }

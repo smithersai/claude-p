@@ -268,7 +268,7 @@ export const home = S.Factory.Home({
           title: "claude-p",
           tagline: "Emulate claude -p inside an in-process zmux PTY with zero ~/.claude mutation.",
           text: "A Zig 0.15.2 CLI and embeddable library driving interactive Claude Code over a nonce-tagged hook FIFO, with one-shot text/json output and a dual-watchdog NDJSON daemon.",
-          install: "npx claude-p \"Summarize this repository\"",
+          install: "npx claude-p \"Summarize this repo\"",
           actions: [
             { label: "Get started", url: "https://smithersai.github.io/claude-p/getting-started/" },
             { label: "Lighthouse Audit", url: "https://smithersai.github.io/claude-p/audit/" },
@@ -284,7 +284,7 @@ export const home = S.Factory.Home({
           title: "One-shot automation",
           file: "review.sh",
           language: "sh",
-          code: "git diff main | claude-p --output-format json \"Review this diff for regressions\"\n\n# Live transcript streaming plus final claude -p result envelope\nclaude-p --output-format stream-json --verbose \"Explain src/driver.zig\""
+          code: "git diff main | claude-p \\\n  --output-format json \"Review this diff\"\n\n# Live transcript stream + final result envelope\nclaude-p --output-format stream-json --verbose \\\n  \"Explain src/driver.zig\""
         },
         {
           type: "code",

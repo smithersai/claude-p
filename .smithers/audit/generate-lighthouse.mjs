@@ -608,24 +608,40 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
   const sections = [...document.querySelectorAll(".cat-section")];
   const missedBtn = document.getElementById("missed-only");
   const searchInput = document.getElementById("audit-search");
+  const emptyBanner = document.createElement("div");
+  emptyBanner.className = "empty-filter hidden";
+  emptyBanner.style.cssText = "padding:20px;border:1px dashed var(--border);border-radius:12px;text-align:center;color:var(--muted);margin:14px 0;";
+  emptyBanner.textContent = "No audits match the current filter.";
+  if (sections.length > 0) sections[sections.length - 1].after(emptyBanner);
 
   function applyFilters() {
     const q = query.trim().toLowerCase();
+    let visibleSections = 0;
     for (const sec of sections) {
       const catMatch = activeCat === "all" || sec.dataset.category === activeCat;
-      sec.classList.toggle("hidden", !catMatch);
-      if (!catMatch) continue;
+      if (!catMatch) {
+        sec.classList.add("hidden");
+        continue;
+      }
+      let visibleRows = 0;
       for (const row of sec.querySelectorAll(".audit-row")) {
         const isMissed = row.dataset.status === "missed";
         const textMatch = !q || row.textContent.toLowerCase().includes(q);
-        row.classList.toggle("hidden", (missedOnly && !isMissed) || !textMatch);
+        const show = (!missedOnly || isMissed) && textMatch;
+        row.classList.toggle("hidden", !show);
+        if (show) visibleRows += 1;
       }
       const passedGroup = sec.querySelector(".passed-group");
       if (passedGroup) {
         if (q) passedGroup.open = true;
-        passedGroup.classList.toggle("hidden", missedOnly);
+        const visiblePassed = [...passedGroup.querySelectorAll(".audit-row")].some((r) => !r.classList.contains("hidden"));
+        passedGroup.classList.toggle("hidden", missedOnly || (!!q && !visiblePassed));
       }
+      const hideEmpty = (missedOnly || !!q) && visibleRows === 0;
+      sec.classList.toggle("hidden", hideEmpty);
+      if (!hideEmpty) visibleSections += 1;
     }
+    emptyBanner.classList.toggle("hidden", visibleSections > 0);
   }
 
   for (const tab of tabs) {

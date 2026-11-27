@@ -112,7 +112,7 @@
       "inputs": {
         ".smithers/WORKSPACE.ts": "8871f00efe67180a608bac58307301daeb41ef8d433f6ae05b99884b0677ad61",
         ".smithers/PACKAGE.ts": "0fa9f933b74bd051ca49564e344de56823e0de94c0fa92843eea6608d5eb727f",
-        ".smithers/FACTORY.ts": "90815635868e424795a3e35555e41910b19cfc2f0630e074ed397e8c1a69a312",
+        ".smithers/FACTORY.ts": "feedd03c0c19d31c07abc6991d2fc90548a53682ca872ccbaaa9b5312aa066a2",
         ".smithers/trust-policy.json": "3c1b69e81eca95bccaed51be6f0fd69fa713ff39907772ba8fcfa52c8f3180e9"
       }
     },
@@ -123,11 +123,11 @@
       "document": ".smithers/wiki/pages/contributing-and-triage.md",
       "sha256": "94fbf0b87e36ec5776c4163a95fb9d74af86cad2b49bf84f0649655959e52d30",
       "inputs": {
-        ".smithers/FACTORY.ts": "90815635868e424795a3e35555e41910b19cfc2f0630e074ed397e8c1a69a312",
+        ".smithers/FACTORY.ts": "feedd03c0c19d31c07abc6991d2fc90548a53682ca872ccbaaa9b5312aa066a2",
         ".smithers/trust-policy.json": "3c1b69e81eca95bccaed51be6f0fd69fa713ff39907772ba8fcfa52c8f3180e9",
         ".smithers/instructions/agent.md": "3350788c81c5a6f213f4e8ebb059f675adb8581464c2395a0914731a2dd48ef9"
       }
     }
   ],
-  "digest": "f561b48f30cd70aa8b39ba290c7e8b7a5e1cd559f2539b6174c9636770f6b6a1"
+  "digest": "8e6cfe9be3936e1a27ff30b5a386994d2a0f1546499135a0ddb793375d07df74"
 }

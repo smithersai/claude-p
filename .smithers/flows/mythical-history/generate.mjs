@@ -186,7 +186,7 @@ ${pts}`;
   const ledgerRows = data.recentCommits
     .map(
       (c) =>
-        `| [\`${c.sha}\`](https://github.com/smithersai/claude-p/commit/${c.sha}) | ${c.date} | ${c.tags.join(", ") || "—"} | ${c.title.replace(/\|/g, "\\|")} |`,
+        `| [\`${c.sha}\`](https://github.com/smithersai/claude-p/commit/${c.sha}) | \`${c.date}\` | ${c.tags.join(", ") || "-"} | ${c.title.replace(/\|/g, "\\|")} |`,
     )
     .join("\n");
 

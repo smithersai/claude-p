@@ -2,8 +2,8 @@
   "schema": "smithers-lighthouse-audit/v1",
   "repository": "smithersai/claude-p",
   "version": "0.1.3",
-  "commit": "7a6469bfdbf7",
-  "generatedAt": "2026-11-27T14:08:05.983Z",
+  "commit": "c141c40f3d72",
+  "generatedAt": "2026-11-27T14:27:47.833Z",
   "overallScore": 97,
   "overallBand": "good",
   "provenance": {
@@ -5220,69 +5220,5 @@
       "label": "footprint module-bytes"
     }
   ],
-  "changes": [
-    {
-      "category": "footprint",
-      "subject": null,
-      "metric": "module-prod-lines",
-      "item": "src/daemon/turn.zig",
-      "change": "worse",
-      "before": 340,
-      "after": 341
-    },
-    {
-      "category": "footprint",
-      "subject": null,
-      "metric": "module-prod-lines",
-      "item": "src/driver/runtime.zig",
-      "change": "worse",
-      "before": 381,
-      "after": 382
-    },
-    {
-      "category": "footprint",
-      "subject": null,
-      "metric": "module-bytes",
-      "item": "src/daemon/turn.zig",
-      "change": "worse",
-      "before": 23310,
-      "after": 23360
-    },
-    {
-      "category": "footprint",
-      "subject": null,
-      "metric": "module-bytes",
-      "item": "src/driver/runtime.zig",
-      "change": "worse",
-      "before": 23300,
-      "after": 23370
-    },
-    {
-      "category": "style",
-      "subject": null,
-      "metric": "assert-density",
-      "item": "src/daemon/turn.zig",
-      "change": "worse",
-      "before": 24,
-      "after": 23
-    },
-    {
-      "category": "documentation",
-      "subject": null,
-      "metric": "pub-doc-coverage",
-      "item": "src/daemon/turn.zig",
-      "change": "better",
-      "before": 88,
-      "after": 100
-    },
-    {
-      "category": "documentation",
-      "subject": null,
-      "metric": "pub-doc-coverage",
-      "item": "src/driver/runtime.zig",
-      "change": "better",
-      "before": 95,
-      "after": 100
-    }
-  ]
+  "changes": []
 }
