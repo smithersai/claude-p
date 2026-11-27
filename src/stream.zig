@@ -170,156 +170,96 @@ const testing = std.testing;
 test "Tailer: emits a single line written before open" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    var f = try tmp.dir.createFile("t.jsonl", .{ .read = true });
-    try f.writeAll("{\"a\":1}\n");
-    f.close();
-
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"a\":1}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-
-    try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqualStrings("{\"a\":1}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"a\":1}\n", aw.written());
 }
 
 test "Tailer: tails appended lines across multiple pumps" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
     defer f.close();
     try f.writeAll("{\"n\":1}\n");
-
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     _ = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqualStrings("{\"n\":1}\n", buf.items);
-
+    try testing.expectEqualStrings("{\"n\":1}\n", aw.written());
     try f.writeAll("{\"n\":2}\n");
-    var aw2 = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    _ = try t.pump(&aw2.writer);
-    buf = aw2.toArrayList();
-    try testing.expectEqualStrings("{\"n\":1}\n{\"n\":2}\n", buf.items);
+    _ = try t.pump(&aw.writer);
+    try testing.expectEqualStrings("{\"n\":1}\n{\"n\":2}\n", aw.written());
 }
 
 test "Tailer: holds back partial line until newline arrives" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
     var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
     defer f.close();
     try f.writeAll("{\"text\":\"hello, ");
-
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-
-    var lines = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 0), lines);
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
-
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 0), try t.pump(&aw.writer));
     try f.writeAll("world!\"}\n");
-    var aw2 = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    lines = try t.pump(&aw2.writer);
-    buf = aw2.toArrayList();
-    try testing.expectEqual(@as(usize, 1), lines);
-    try testing.expectEqualStrings("{\"text\":\"hello, world!\"}\n", buf.items);
+    try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"text\":\"hello, world!\"}\n", aw.written());
 }
 
 test "Tailer: emits multiple lines in a single pump" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
-    try f.writeAll("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
-    f.close();
-
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 3), n);
-    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 3), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n", aw.written());
 }
 
 test "Tailer: flushPartial terminates a valid trailing object" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
-    try f.writeAll("{\"done\":true}\n{\"final\":true}");
-    f.close();
-
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"done\":true}\n{\"final\":true}" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     _ = try t.pump(&aw.writer);
     try t.flushPartial(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqualStrings("{\"done\":true}\n{\"final\":true}\n", buf.items);
+    try testing.expectEqualStrings("{\"done\":true}\n{\"final\":true}\n", aw.written());
 }
 
 test "Tailer: drops oversized partial line and resumes after newline" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    var f = try tmp.dir.createFile("t.jsonl", .{ .read = true, .truncate = true });
-    defer f.close();
-    try f.writeAll("{\"ok\":1}\n{\"big\":\"0123456789abcdefghijklmnopqrstuvwxyz0123456789\"}\n{\"ok\":2}\n");
-
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"ok\":1}\n{\"big\":\"0123456789abcdefghijklmnopqrstuvwxyz\"}\n{\"ok\":2}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
     defer testing.allocator.free(path);
-
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
     t.max_partial_bytes = 32;
-
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-
-    try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("{\"ok\":1}\n{\"ok\":2}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 2), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"ok\":1}\n{\"ok\":2}\n", aw.written());
     try testing.expect(!t.discarding_oversized);
 }
 
@@ -341,68 +281,52 @@ test "isForwardable: accepts valid non-result objects and non-string type fields
 test "Tailer: filters upstream result envelopes during pump" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("r.jsonl", .{ .read = true });
-    try f.writeAll("{\"type\":\"assistant\"}\n{\"type\":\"result\",\"result\":\"dup\"}\n{\"type\":\"system\"}\n");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "r.jsonl", .data = "{\"type\":\"assistant\"}\n{\"type\":\"result\"}\n{\"type\":\"system\"}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "r.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("{\"type\":\"assistant\"}\n{\"type\":\"system\"}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 2), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"type\":\"assistant\"}\n{\"type\":\"system\"}\n", aw.written());
 }
 
 test "Tailer: skips malformed lines without blocking subsequent valid JSON" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("m.jsonl", .{ .read = true });
-    try f.writeAll("corrupt\n[1]\n{\"ok\":true}\n");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "m.jsonl", .data = "corrupt\n[1]\n{\"ok\":true}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "m.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqualStrings("{\"ok\":true}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
+    try testing.expectEqualStrings("{\"ok\":true}\n", aw.written());
 }
 
 test "Tailer: empty file pump emits zero lines" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    (try tmp.dir.createFile("e.jsonl", .{ .read = true })).close();
+    try tmp.dir.writeFile(.{ .sub_path = "e.jsonl", .data = "" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "e.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 0), try t.pump(&aw.writer));
     try t.flushPartial(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
 }
 
 test "Tailer: reopenAt switches files and starts at given byte offset" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f1 = try tmp.dir.createFile("a.jsonl", .{ .read = true });
-    try f1.writeAll("{\"n\":1}\n");
-    f1.close();
-    var f2 = try tmp.dir.createFile("b.jsonl", .{ .read = true });
+    try tmp.dir.writeFile(.{ .sub_path = "a.jsonl", .data = "{\"n\":1}\n" });
     const skip = "{\"old\":0}\n";
-    try f2.writeAll(skip ++ "{\"new\":2}\n");
-    f2.close();
+    try tmp.dir.writeFile(.{ .sub_path = "b.jsonl", .data = skip ++ "{\"new\":2}\n" });
     const p1 = try tmp.dir.realpathAlloc(testing.allocator, "a.jsonl");
     defer testing.allocator.free(p1);
     const p2 = try tmp.dir.realpathAlloc(testing.allocator, "b.jsonl");
@@ -411,13 +335,10 @@ test "Tailer: reopenAt switches files and starts at given byte offset" {
     defer t.deinit();
     t.max_partial_bytes = 512;
     try t.reopenAt(p2, skip.len);
-    try testing.expectEqual(@as(usize, 512), t.max_partial_bytes);
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
-    buf = aw.toArrayList();
-    try testing.expectEqualStrings("{\"new\":2}\n", buf.items);
+    try testing.expectEqualStrings("{\"new\":2}\n", aw.written());
 }
 
 test "Tailer: oversized unterminated line sets discarding_oversized across chunks" {
@@ -431,162 +352,127 @@ test "Tailer: oversized unterminated line sets discarding_oversized across chunk
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
     t.max_partial_bytes = 16;
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 0), try t.pump(&aw.writer));
     try testing.expect(t.discarding_oversized);
     try f.writeAll("tail\"}\n{\"ok\":3}\n");
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
+    try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
     try testing.expect(!t.discarding_oversized);
-    try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqualStrings("{\"ok\":3}\n", buf.items);
+    try testing.expectEqualStrings("{\"ok\":3}\n", aw.written());
 }
 
 test "Tailer: flushPartial resets discarding_oversized without emitting" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("ov2.jsonl", .{ .read = true });
-    try f.writeAll("{\"a\":\"012345678901234567890123456789");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "ov2.jsonl", .data = "{\"a\":\"01234567890123456789" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "ov2.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
     t.max_partial_bytes = 10;
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     _ = try t.pump(&aw.writer);
     try testing.expect(t.discarding_oversized);
     try t.flushPartial(&aw.writer);
-    buf = aw.toArrayList();
     try testing.expect(!t.discarding_oversized);
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
 }
 
 test "Tailer: flushPartial drops malformed trailing fragment" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("bad.jsonl", .{ .read = true });
-    try f.writeAll("{\"truncated\":");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "bad.jsonl", .data = "{\"truncated\":" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "bad.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     _ = try t.pump(&aw.writer);
     try t.flushPartial(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
 }
 
 test "Tailer: flushPartial filters trailing upstream result envelope" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("res.jsonl", .{ .read = true });
-    try f.writeAll("{\"type\":\"result\",\"result\":\"hidden\"}");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "res.jsonl", .data = "{\"type\":\"result\",\"result\":\"hidden\"}" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "res.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     _ = try t.pump(&aw.writer);
     try t.flushPartial(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
 }
 
 test "Tailer: handles lines spanning the 4096-byte pread boundary" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("big.jsonl", .{ .read = true });
-    try f.writeAll("{\"pad\":\"");
-    const filler = "a" ** 5000;
-    try f.writeAll(filler);
-    try f.writeAll("\"}\n");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "big.jsonl", .data = "{\"pad\":\"" ++ "a" ** 5000 ++ "\"}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "big.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
-    const n = try t.pump(&aw.writer);
-    buf = aw.toArrayList();
-    try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqual(@as(usize, 8 + 5000 + 3), buf.items.len);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
+    try testing.expectEqual(@as(usize, 8 + 5000 + 3), aw.written().len);
 }
 
 test "Tailer: handles exact max_partial_bytes boundary inclusively" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const line = "{\"x\":1}\n";
-    var f = try tmp.dir.createFile("exact.jsonl", .{ .read = true });
-    try f.writeAll(line);
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "exact.jsonl", .data = line });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "exact.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
     t.max_partial_bytes = line.len;
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
-    buf = aw.toArrayList();
-    try testing.expectEqualStrings(line, buf.items);
+    try testing.expectEqualStrings(line, aw.written());
 }
 
 test "Tailer: ignores blank lines between JSON objects" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("blanks.jsonl", .{ .read = true });
-    try f.writeAll("\n\n{\"a\":1}\n\n{\"b\":2}\n\n");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "blanks.jsonl", .data = "\n\n{\"a\":1}\n\n{\"b\":2}\n\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "blanks.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 2), try t.pump(&aw.writer));
-    buf = aw.toArrayList();
-    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n", buf.items);
+    try testing.expectEqualStrings("{\"a\":1}\n{\"b\":2}\n", aw.written());
 }
 
 test "Tailer: repeated pump at EOF is a no-op" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var f = try tmp.dir.createFile("eof.jsonl", .{ .read = true });
-    try f.writeAll("{\"k\":1}\n");
-    f.close();
+    try tmp.dir.writeFile(.{ .sub_path = "eof.jsonl", .data = "{\"k\":1}\n" });
     const path = try tmp.dir.realpathAlloc(testing.allocator, "eof.jsonl");
     defer testing.allocator.free(path);
     var t = try Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    var aw = std.Io.Writer.Allocating.fromArrayList(testing.allocator, &buf);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectEqual(@as(usize, 1), try t.pump(&aw.writer));
     try testing.expectEqual(@as(usize, 0), try t.pump(&aw.writer));
-    buf = aw.toArrayList();
     try testing.expectEqual(@as(u64, 8), t.pos);
 }
 
 test "Tailer: rejects symlink transcript path via openTranscriptFile" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    (try tmp.dir.createFile("real.jsonl", .{})).close();
+    try tmp.dir.writeFile(.{ .sub_path = "real.jsonl", .data = "" });
     try tmp.dir.symLink("real.jsonl", "link.jsonl", .{});
     const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(base);

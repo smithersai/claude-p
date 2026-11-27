@@ -58,9 +58,27 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{ .root_module = exe.root_module, .filters = test_filters });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const fixture_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fixtures.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "claude_p", .module = claude_p },
+                .{ .name = "zmux", .module = zmux_mod },
+            },
+        }),
+        .filters = test_filters,
+    });
+    const run_fixture_tests = b.addRunArtifact(fixture_tests);
+    run_fixture_tests.step.dependOn(b.getInstallStep());
+    run_fixture_tests.setEnvironmentVariable("CLAUDE_P_BIN", b.getInstallPath(.bin, exe.out_filename));
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_fixture_tests.step);
 
     // ------------------------------------------------------------------
     // Property-based & fuzz tests (corpus replay in `zig build test-prop`,

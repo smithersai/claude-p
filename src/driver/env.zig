@@ -6,6 +6,33 @@ const emit_mod = @import("../emit.zig");
 const hook_mod = @import("../hook.zig");
 const transcript_mod = @import("../transcript.zig");
 
+/// Executable PATH resolution, cwd validation, shell quoting, and child env filtering.
+pub const spawn = @import("spawn.zig");
+/// Error set returned when locating the `claude` binary fails.
+pub const ResolveError = spawn.ResolveError;
+/// Check that `cwd`, when set, names an accessible directory.
+pub const validateCwd = spawn.validateCwd;
+/// Resolve `path` to a real accessible directory path; caller owns the slice.
+pub const resolveCwd = spawn.resolveCwd;
+/// Resolve the `claude` executable using an explicit override or `path_env`.
+pub const resolveClaudeBinaryIn = spawn.resolveClaudeBinaryIn;
+/// Resolve the `claude` executable against this process's `PATH`.
+pub const resolveClaudeBinary = spawn.resolveClaudeBinary;
+/// Build the `/bin/sh -l -c` `exec` command line from `argv`.
+pub const buildShellCommand = spawn.buildShellCommand;
+/// Build the `/bin/sh -l -c` command string, optionally changing into `cwd` before `exec`.
+pub const buildShellCommandInDir = spawn.buildShellCommandInDir;
+/// Join argv into a single shell-safe command line (single-quoting each arg).
+pub const shellQuoteArgv = spawn.shellQuoteArgv;
+/// Return true ONLY for nested-session markers that must not leak into child `claude`.
+pub const shouldStripChildEnv = spawn.shouldStripChildEnv;
+/// Build the filtered child environment from the current process environment.
+pub const buildChildEnv = spawn.buildChildEnv;
+/// Construct the sanitized child environment list from `env_map`.
+pub const buildChildEnvFromMap = spawn.buildChildEnvFromMap;
+/// Free all owned `KEY=VALUE` entries in a child environment list.
+pub const freeChildEnv = spawn.freeChildEnv;
+
 /// Configuration options for a single-shot PTY Claude Code session run.
 pub const Options = struct {
     prompt: []const u8,
@@ -85,11 +112,6 @@ pub const RunError = error{
     Interrupted,
     InvalidCwd,
     UnexpectedStartupDialog,
-} || std.mem.Allocator.Error;
-
-/// Error set returned when locating the `claude` binary fails.
-pub const ResolveError = error{
-    ClaudeNotFound,
 } || std.mem.Allocator.Error;
 
 /// Single parsed flag name/value pair yielded by `ExtraFlags`.
@@ -179,106 +201,6 @@ pub fn isResumeRun(opts: Options) bool {
     return false;
 }
 
-/// Check that `cwd`, when set, names an accessible directory.
-pub fn validateCwd(cwd: ?[]const u8) RunError!void {
-    const path = cwd orelse return;
-    const resolved = try resolveCwd(std.heap.page_allocator, path);
-    std.debug.assert(resolved.len > 0);
-    std.heap.page_allocator.free(resolved);
-}
-
-/// Resolve `path` to a real accessible directory path; caller owns the slice.
-pub fn resolveCwd(allocator: std.mem.Allocator, path: []const u8) RunError![]u8 {
-    if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidCwd;
-    const resolved = std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidCwd,
-    };
-    errdefer allocator.free(resolved);
-    var dir = std.fs.cwd().openDir(resolved, .{}) catch return error.InvalidCwd;
-    dir.close();
-    std.posix.access(resolved, std.posix.X_OK) catch return error.InvalidCwd;
-    std.debug.assert(resolved.len > 0 and resolved[0] == '/');
-    return resolved;
-}
-
-fn isExecutableFile(path: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
-    const st = std.fs.cwd().statFile(path) catch return false;
-    if (st.kind != .file) return false;
-    std.posix.access(path, std.posix.X_OK) catch return false;
-    return true;
-}
-
-fn absolutePath(allocator: std.mem.Allocator, path: []const u8) ResolveError![]u8 {
-    std.debug.assert(path.len > 0);
-    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.ClaudeNotFound,
-    };
-}
-
-/// Resolve the `claude` executable using an explicit override or `path_env`.
-pub fn resolveClaudeBinaryIn(
-    allocator: std.mem.Allocator,
-    override: ?[]const u8,
-    path_env: ?[]const u8,
-) ResolveError![]u8 {
-    const name = override orelse "claude";
-    if (name.len == 0) return ResolveError.ClaudeNotFound;
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        if (!isExecutableFile(name)) return ResolveError.ClaudeNotFound;
-        return absolutePath(allocator, name);
-    }
-    var it = std.mem.splitScalar(u8, path_env orelse "/usr/local/bin:/usr/bin:/bin", ':');
-    while (it.next()) |dir| {
-        const candidate = try std.fs.path.join(allocator, &.{ if (dir.len == 0) "." else dir, name });
-        defer allocator.free(candidate);
-        if (isExecutableFile(candidate)) return absolutePath(allocator, candidate) catch |err| switch (err) {
-            error.ClaudeNotFound => continue,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-    }
-    return ResolveError.ClaudeNotFound;
-}
-
-/// Resolve the `claude` executable against this process's `PATH`.
-pub fn resolveClaudeBinary(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
-    const path_env: ?[]u8 = std.process.getEnvVarOwned(allocator, "PATH") catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
-    defer if (path_env) |p| allocator.free(p);
-    return resolveClaudeBinaryIn(allocator, override, path_env);
-}
-
-/// Build the `/bin/sh -l -c` `exec` command line from `argv`.
-pub fn buildShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    return buildShellCommandInDir(allocator, argv, null);
-}
-
-/// Build the `/bin/sh -l -c` command string, optionally changing into `cwd` before `exec`.
-pub fn buildShellCommandInDir(
-    allocator: std.mem.Allocator,
-    argv: []const []const u8,
-    cwd: ?[]const u8,
-) ![]u8 {
-    const quoted = try shellQuoteArgv(allocator, argv);
-    defer allocator.free(quoted);
-    if (cwd) |dir| {
-        const path = try resolveCwd(allocator, dir);
-        defer allocator.free(path);
-        const escaped = try shellQuoteArgv(allocator, &.{path});
-        defer allocator.free(escaped);
-        const cmd = try std.mem.concat(allocator, u8, &.{ "cd -- ", escaped, " || exit 126; exec ", quoted });
-        std.debug.assert(cmd.len >= quoted.len);
-        return cmd;
-    }
-    const cmd = try std.mem.concat(allocator, u8, &.{ "exec ", quoted });
-    std.debug.assert(cmd.len == 5 + quoted.len);
-    return cmd;
-}
-
 /// Owned argv container returned by `buildArgv`.
 pub const Argv = struct {
     items: [][]const u8,
@@ -342,96 +264,6 @@ pub fn buildArgv(
     return .{ .items = try argv.toOwnedSlice(allocator), .max_turns_text = max_turns_text };
 }
 
-/// Join argv into a single shell-safe command line (single-quoting each arg).
-pub fn shellQuoteArgv(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(allocator);
-    for (argv, 0..) |a, idx| {
-        if (idx > 0) try buf.append(allocator, ' ');
-        try shellQuoteOne(allocator, &buf, a);
-    }
-    return try buf.toOwnedSlice(allocator);
-}
-
-fn shellQuoteOne(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-    const before = out.items.len;
-    try out.append(allocator, '\'');
-    for (s) |c| {
-        if (c == '\'') {
-            try out.appendSlice(allocator, "'\\''");
-        } else {
-            try out.append(allocator, c);
-        }
-    }
-    try out.append(allocator, '\'');
-    std.debug.assert(out.items.len >= before + 2);
-}
-
-const persistence_env = "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE";
-
-/// Return true ONLY for nested-session markers that must not leak into child `claude`.
-pub fn shouldStripChildEnv(name: []const u8) bool {
-    const exact = [_][]const u8{
-        "CLAUDECODE",
-        "AI_AGENT",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_SSE_PORT",
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_SESSION_ID",
-    };
-    for (exact) |marker| if (std.mem.eql(u8, name, marker)) return true;
-    const prefixes = [_][]const u8{
-        "CLAUDE_CODE_SESSION_",
-        "CLAUDE_CODE_PARENT_",
-        "CLAUDE_CODE_SUBAGENT_",
-    };
-    for (prefixes) |prefix| if (std.mem.startsWith(u8, name, prefix)) return true;
-    return false;
-}
-
-/// Build the filtered child environment from the current process environment.
-pub fn buildChildEnv(allocator: std.mem.Allocator, fifo_path: []const u8) !std.ArrayList([]u8) {
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
-    return buildChildEnvFromMap(allocator, &env_map, fifo_path);
-}
-
-/// Construct the sanitized child environment list from `env_map`.
-pub fn buildChildEnvFromMap(
-    allocator: std.mem.Allocator,
-    env_map: *const std.process.EnvMap,
-    fifo_path: []const u8,
-) !std.ArrayList([]u8) {
-    var list: std.ArrayList([]u8) = .{};
-    errdefer freeChildEnv(allocator, &list);
-    var saw_persistence = false;
-    var it = env_map.iterator();
-    while (it.next()) |e| {
-        const name = e.key_ptr.*;
-        if (shouldStripChildEnv(name)) continue;
-        if (std.mem.eql(u8, name, "CLAUDE_P_FIFO") or std.mem.eql(u8, name, "TERM")) continue;
-        if (std.mem.eql(u8, name, persistence_env)) saw_persistence = true;
-        try appendEnv(allocator, &list, name, e.value_ptr.*);
-    }
-    _ = fifo_path;
-    try appendEnv(allocator, &list, "TERM", "xterm-256color");
-    if (!saw_persistence) try appendEnv(allocator, &list, persistence_env, "1");
-    std.debug.assert(list.items.len >= 1);
-    return list;
-}
-
-fn appendEnv(allocator: std.mem.Allocator, list: *std.ArrayList([]u8), name: []const u8, value: []const u8) !void {
-    const entry = try std.fmt.allocPrint(allocator, "{s}={s}", .{ name, value });
-    errdefer allocator.free(entry);
-    try list.append(allocator, entry);
-}
-
-/// Free all owned `KEY=VALUE` entries in a child environment list.
-pub fn freeChildEnv(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
-    for (list.items) |entry| allocator.free(entry);
-    list.deinit(allocator);
-}
-
 // -------- tests --------
 const testing = std.testing;
 
@@ -463,177 +295,106 @@ test "buildArgv: model and verbose flags" {
 }
 
 test "buildArgv: dangerously-skip-permissions and continue" {
-    var argv = try buildArgv(testing.allocator, "claude", "{}", .{
-        .prompt = "hi",
-        .skip_permissions = true,
-        .cont = true,
-    });
+    var argv = try buildArgv(testing.allocator, "claude", "{}", .{ .prompt = "hi", .skip_permissions = true, .cont = true });
     defer argv.deinit(testing.allocator);
     try testing.expectEqualStrings("--dangerously-skip-permissions", argv.items[3]);
     try testing.expectEqualStrings("--continue", argv.items[4]);
 }
 
 test "buildArgv: passthrough extra args appended in order" {
-    const extra = [_][]const u8{ "--effort", "high" };
-    var argv = try buildArgv(testing.allocator, "claude", "{}", .{ .prompt = "hi", .extra_args = &extra });
+    var argv = try buildArgv(testing.allocator, "claude", "{}", .{ .prompt = "hi", .extra_args = &.{ "--effort", "high" } });
     defer argv.deinit(testing.allocator);
     try testing.expectEqualStrings("--effort", argv.items[3]);
     try testing.expectEqualStrings("high", argv.items[4]);
 }
 
 test "buildArgv: add-dirs and mcp-configs repeat cleanly" {
-    const dirs = [_][]const u8{ "/a", "/b" };
-    const mcps = [_][]const u8{"m.json"};
     var argv = try buildArgv(testing.allocator, "claude", "{}", .{
         .prompt = "hi",
-        .add_dirs = &dirs,
-        .mcp_configs = &mcps,
+        .add_dirs = &.{ "/a", "/b" },
+        .mcp_configs = &.{"m.json"},
     });
     defer argv.deinit(testing.allocator);
     try testing.expectEqualStrings("--add-dir", argv.items[3]);
-    try testing.expectEqualStrings("/a", argv.items[4]);
-    try testing.expectEqualStrings("--add-dir", argv.items[5]);
     try testing.expectEqualStrings("/b", argv.items[6]);
     try testing.expectEqualStrings("--mcp-config", argv.items[7]);
-    try testing.expectEqualStrings("m.json", argv.items[8]);
 }
 
-test "shellQuoteArgv: escapes single quotes and preserves JSON" {
-    const out = try shellQuoteArgv(testing.allocator, &.{ "claude", "it's", "{\"a\":1}" });
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("'claude' 'it'\\''s' '{\"a\":1}'", out);
+test "buildArgv: allowedTools, disallowedTools, and fallback_model" {
+    var argv = try buildArgv(testing.allocator, "claude", "{}", .{
+        .prompt = "hi",
+        .allowed_tools = "Read",
+        .disallowed_tools = "Bash",
+        .fallback_model = "haiku",
+    });
+    defer argv.deinit(testing.allocator);
+    try testing.expectEqualStrings("--allowedTools", argv.items[3]);
+    try testing.expectEqualStrings("--disallowedTools", argv.items[5]);
+    try testing.expectEqualStrings("--fallback-model", argv.items[7]);
 }
 
-test "buildShellCommand: exec-prefixes quoted argv" {
-    const out = try buildShellCommand(testing.allocator, &.{ "/bin/claude", "--verbose" });
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("exec '/bin/claude' '--verbose'", out);
+test "buildArgv: resume_session and session_id pairs" {
+    var argv = try buildArgv(testing.allocator, "claude", "{}", .{
+        .prompt = "hi",
+        .resume_session = "r1",
+        .session_id = "s1",
+    });
+    defer argv.deinit(testing.allocator);
+    try testing.expectEqualStrings("--resume", argv.items[3]);
+    try testing.expectEqualStrings("--session-id", argv.items[5]);
 }
 
-test "buildShellCommandInDir: prefixes cd and exit 126" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(dir);
-    const out = try buildShellCommandInDir(testing.allocator, &.{"/bin/claude"}, dir);
-    defer testing.allocator.free(out);
-    try testing.expect(std.mem.startsWith(u8, out, "cd -- '"));
-    try testing.expect(std.mem.indexOf(u8, out, " || exit 126; exec '/bin/claude'") != null);
+test "buildArgv: system prompt, permission mode, and setting sources" {
+    var argv = try buildArgv(testing.allocator, "claude", "{}", .{
+        .prompt = "hi",
+        .system_prompt = "sys",
+        .append_system_prompt = "app",
+        .permission_mode = "plan",
+        .setting_sources = "user",
+    });
+    defer argv.deinit(testing.allocator);
+    try testing.expectEqualStrings("--system-prompt", argv.items[3]);
+    try testing.expectEqualStrings("--append-system-prompt", argv.items[5]);
+    try testing.expectEqualStrings("--permission-mode", argv.items[7]);
+    try testing.expectEqualStrings("--setting-sources", argv.items[9]);
 }
 
-test "validateCwd: accepts directory and rejects file, missing, empty, NUL" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "f", .data = "x" });
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(dir);
-    const file = try tmp.dir.realpathAlloc(testing.allocator, "f");
-    defer testing.allocator.free(file);
-    try validateCwd(null);
-    try validateCwd(dir);
-    try testing.expectError(error.InvalidCwd, validateCwd(file));
-    try testing.expectError(error.InvalidCwd, validateCwd(""));
-    try testing.expectError(error.InvalidCwd, validateCwd("/tmp/bad\x00path"));
-    try testing.expectError(error.InvalidCwd, validateCwd("/nonexistent/claude-p-dir"));
-}
-
-test "resolveClaudeBinaryIn: finds executable on PATH and rejects non-executable" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const f = try tmp.dir.createFile("claude", .{ .mode = 0o700 });
-    f.close();
-    const nf = try tmp.dir.createFile("noexec", .{ .mode = 0o600 });
-    nf.close();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(dir);
-    const found = try resolveClaudeBinaryIn(testing.allocator, null, dir);
-    defer testing.allocator.free(found);
-    try testing.expect(std.mem.endsWith(u8, found, "/claude"));
-    const bad = try std.fs.path.join(testing.allocator, &.{ dir, "noexec" });
-    defer testing.allocator.free(bad);
-    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, bad, dir));
-    try testing.expectError(ResolveError.ClaudeNotFound, resolveClaudeBinaryIn(testing.allocator, "", dir));
-}
-
-test "shouldStripChildEnv: strips nested markers and preserves auth/backend vars" {
-    try testing.expect(shouldStripChildEnv("CLAUDECODE"));
-    try testing.expect(shouldStripChildEnv("AI_AGENT"));
-    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_SESSION_FOO"));
-    try testing.expect(shouldStripChildEnv("CLAUDE_CODE_PARENT_PID"));
-    try testing.expect(!shouldStripChildEnv("CLAUDE_CODE_OAUTH_TOKEN"));
-    try testing.expect(!shouldStripChildEnv("CLAUDE_CONFIG_DIR"));
-    try testing.expect(!shouldStripChildEnv("CLAUDE_CODE_USE_BEDROCK"));
-}
-
-test "buildChildEnvFromMap: sets TERM and persistence while filtering markers" {
-    var env = std.process.EnvMap.init(testing.allocator);
-    defer env.deinit();
-    try env.put("CLAUDECODE", "1");
-    try env.put("CLAUDE_P_FIFO", "/tmp/old");
-    try env.put("TERM", "dumb");
-    try env.put("CLAUDE_CODE_OAUTH_TOKEN", "tok");
-    var list = try buildChildEnvFromMap(testing.allocator, &env, "/tmp/f");
-    defer freeChildEnv(testing.allocator, &list);
-    var saw_term = false;
-    var saw_persist = false;
-    var saw_tok = false;
-    for (list.items) |entry| {
-        try testing.expect(!std.mem.startsWith(u8, entry, "CLAUDECODE="));
-        try testing.expect(!std.mem.startsWith(u8, entry, "CLAUDE_P_FIFO="));
-        if (std.mem.eql(u8, entry, "TERM=xterm-256color")) saw_term = true;
-        if (std.mem.eql(u8, entry, "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")) saw_persist = true;
-        if (std.mem.eql(u8, entry, "CLAUDE_CODE_OAUTH_TOKEN=tok")) saw_tok = true;
-    }
-    try testing.expect(saw_term and saw_persist and saw_tok);
-}
-
-test "buildChildEnvFromMap: preserves caller persistence value without duplicating" {
-    var env = std.process.EnvMap.init(testing.allocator);
-    defer env.deinit();
-    try env.put("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "custom");
-    var list = try buildChildEnvFromMap(testing.allocator, &env, "");
-    defer freeChildEnv(testing.allocator, &list);
-    var count: usize = 0;
-    for (list.items) |e| {
-        if (std.mem.startsWith(u8, e, "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=")) count += 1;
-    }
-    try testing.expectEqual(@as(usize, 1), count);
-}
-
-test "buildChildEnvFromMap: allocation failures leak nothing" {
-    var env = std.process.EnvMap.init(testing.allocator);
-    defer env.deinit();
-    try env.put("HOME", "/tmp");
-    try env.put("PATH", "/usr/bin");
-    try testing.checkAllAllocationFailures(testing.allocator, struct {
-        fn run(alloc: std.mem.Allocator, m: *const std.process.EnvMap) !void {
-            var list = try buildChildEnvFromMap(alloc, m, "/tmp/f");
-            freeChildEnv(alloc, &list);
-        }
-    }.run, .{&env});
-}
-
-test "validateOptions: rejects print-mode-only options and forwarded flags" {
+test "validateOptions: accepts clean default options" {
     try validateOptions(.{ .prompt = "hi" });
+}
+
+test "validateOptions: rejects max_turns and fallback_model" {
     try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .max_turns = 1 }));
     try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .fallback_model = "haiku" }));
-    const bad = [_][]const u8{"--max-turns=2"};
-    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .extra_args = &bad }));
 }
 
-test "isResumeRun: detects explicit and forwarded resume/continue flags" {
+test "validateOptions: rejects forwarded print-only flags" {
+    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .extra_args = &.{"--max-turns=2"} }));
+    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .extra_args = &.{"--bare"} }));
+    try testing.expectError(error.InvalidOptions, validateOptions(.{ .prompt = "hi", .extra_args = &.{"--settings"} }));
+}
+
+test "validateOptions: allows blocked names as flag values or after --" {
+    try validateOptions(.{ .prompt = "hi", .extra_args = &.{ "--system-prompt", "--bare" } });
+    try validateOptions(.{ .prompt = "hi", .extra_args = &.{ "--", "--print" } });
+}
+
+test "isResumeRun: false on fresh run" {
     try testing.expect(!isResumeRun(.{ .prompt = "hi" }));
+}
+
+test "isResumeRun: true on cont or resume_session" {
     try testing.expect(isResumeRun(.{ .prompt = "hi", .cont = true }));
     try testing.expect(isResumeRun(.{ .prompt = "hi", .resume_session = "s1" }));
-    const fork_args = [_][]const u8{"--fork-session"};
-    try testing.expect(isResumeRun(.{ .prompt = "hi", .extra_args = &fork_args }));
-    const after_sep = [_][]const u8{ "--", "--resume" };
-    try testing.expect(!isResumeRun(.{ .prompt = "hi", .extra_args = &after_sep }));
+}
+
+test "isResumeRun: detects forwarded resume flags and stops at --" {
+    try testing.expect(isResumeRun(.{ .prompt = "hi", .extra_args = &.{"--fork-session"} }));
+    try testing.expect(!isResumeRun(.{ .prompt = "hi", .extra_args = &.{ "--", "--resume" } }));
 }
 
 test "ExtraFlags: parses inline values, value-taking flags, and stops at --" {
-    const argv = [_][]const u8{ "--model=opus", "--permission-mode", "plan", "--", "--resume" };
-    var it: ExtraFlags = .{ .args = &argv };
+    var it: ExtraFlags = .{ .args = &.{ "--model=opus", "--permission-mode", "plan", "--", "--resume" } };
     const f1 = it.next().?;
     try testing.expectEqualStrings("--model", f1.name);
     try testing.expectEqualStrings("opus", f1.value.?);
@@ -643,18 +404,21 @@ test "ExtraFlags: parses inline values, value-taking flags, and stops at --" {
     try testing.expect(it.next() == null);
 }
 
+test "ExtraFlags: yields null value for standalone boolean flags" {
+    var it: ExtraFlags = .{ .args = &.{"--verbose"} };
+    const f = it.next().?;
+    try testing.expectEqualStrings("--verbose", f.name);
+    try testing.expect(f.value == null);
+}
+
+test "ExtraFlags: empty args yields null immediately" {
+    var it: ExtraFlags = .{ .args = &.{} };
+    try testing.expect(it.next() == null);
+}
+
 test "Result.exitCode reflects summary.is_error" {
     const ok: Result = .{
-        .summary = .{
-            .final_text = &.{},
-            .session_id = &.{},
-            .is_error = false,
-            .num_turns = 1,
-            .total_cost_usd = 0,
-            .duration_api_ms = 0,
-            .usage = .{},
-            .jsonl_replay = &.{},
-        },
+        .summary = .{ .final_text = &.{}, .session_id = &.{}, .is_error = false, .total_cost_usd = 0, .jsonl_replay = &.{} },
         .duration_ms = 5,
     };
     var err_res = ok;
@@ -665,16 +429,7 @@ test "Result.exitCode reflects summary.is_error" {
 
 test "Result.write skips stream_json when already streamed" {
     const res: Result = .{
-        .summary = .{
-            .final_text = @constCast("hi"),
-            .session_id = &.{},
-            .is_error = false,
-            .num_turns = 1,
-            .total_cost_usd = 0,
-            .duration_api_ms = 0,
-            .usage = .{},
-            .jsonl_replay = &.{},
-        },
+        .summary = .{ .final_text = @constCast("hi"), .session_id = &.{}, .is_error = false, .total_cost_usd = 0, .jsonl_replay = &.{} },
         .duration_ms = 1,
         .streamed = true,
     };

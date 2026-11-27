@@ -22,6 +22,8 @@ pub const driver = @import("driver.zig");
 pub const stream = @import("stream.zig");
 /// Persistent multi-turn JSON-line daemon over a warm PTY session.
 pub const daemon = @import("daemon.zig");
+/// Bounded non-blocking stdin reader, prompt composition, and timeout helpers.
+pub const stdin = @import("stdin.zig");
 
 /// Error set returned by single-shot PTY session execution.
 pub const RunError = driver.RunError;

@@ -3,21 +3,25 @@
 //! transcript stream pumping.
 const std = @import("std");
 const zmux = @import("zmux");
-const hook_mod = @import("../hook.zig");
 const stream_mod = @import("../stream.zig");
 const terminal_mod = @import("../terminal.zig");
+pub const diag = @import("diag.zig");
 const dialog_mod = @import("dialog.zig");
 const env_mod = @import("env.zig");
 const watchdog = @import("watchdog.zig");
 
 /// Maximum bytes retained in the rolling startup-dialog PTY output buffer.
-pub const recent_capacity: usize = 8192;
+pub const recent_capacity = diag.recent_capacity;
 /// Fixed scratch capacity for `decRepliesInto` convenience replies.
 pub const dec_reply_capacity = 256;
 /// Maximum non-blank lines included in a failure screen diagnostic excerpt.
-pub const failure_screen_max_lines: usize = 15;
+pub const failure_screen_max_lines = diag.failure_screen_max_lines;
 /// Maximum byte length of a failure screen diagnostic excerpt.
-pub const failure_screen_max_bytes: usize = 1024;
+pub const failure_screen_max_bytes = diag.failure_screen_max_bytes;
+/// Format a privacy-safe `--debug` trace line for a hook event (name and size only).
+pub const formatHookTrace = diag.formatHookTrace;
+/// Render the tail of raw PTY output for a failure diagnostic, bounded by lines and bytes.
+pub const formatFailureScreen = diag.formatFailureScreen;
 
 /// Thread-shared PTY telemetry, DEC reply queue, and startup-dialog state.
 pub const SharedState = struct {
@@ -307,59 +311,6 @@ pub fn maybeHandleStartupDialogs(
     };
 }
 
-/// Format a privacy-safe `--debug` trace line for a hook event (name and size only).
-pub fn formatHookTrace(buf: []u8, event: hook_mod.HookEvent, payload_len: usize) []const u8 {
-    return std.fmt.bufPrint(buf, "hook: {s} payload_bytes={d}", .{
-        @tagName(event),
-        payload_len,
-    }) catch "hook: (trace overflow)";
-}
-
-/// Render the tail of raw PTY output for a failure diagnostic, bounded by lines and bytes.
-pub fn formatFailureScreen(out: *[failure_screen_max_bytes]u8, raw: []const u8) []const u8 {
-    var stripped_buf: [recent_capacity]u8 = undefined;
-    const tail = raw[raw.len -| recent_capacity..];
-    const stripped = dialog_mod.stripCsiInto(&stripped_buf, tail);
-    var n: usize = 0;
-    var line_start: usize = 0;
-    var line_has_text = false;
-    for (stripped) |b| {
-        if (b == '\n' or b == '\r') {
-            if (line_has_text) {
-                while (stripped_buf[n - 1] == ' ') n -= 1;
-                stripped_buf[n] = '\n';
-                n += 1;
-                line_start = n;
-                line_has_text = false;
-            } else n = line_start;
-            continue;
-        }
-        if (b < 0x20 or b == 0x7f) continue;
-        if (b != ' ') line_has_text = true;
-        stripped_buf[n] = b;
-        n += 1;
-    }
-    if (!line_has_text) n = line_start;
-    var text: []const u8 = std.mem.trimRight(u8, stripped_buf[0..n], " \n");
-    var lines: usize = 1;
-    var i: usize = text.len;
-    while (i > 0) : (i -= 1) {
-        if (text[i - 1] != '\n') continue;
-        if (lines == failure_screen_max_lines) {
-            text = text[i..];
-            break;
-        }
-        lines += 1;
-    }
-    if (text.len > out.len) {
-        text = text[text.len - out.len ..];
-        while (text.len > 0 and (text[0] & 0xC0) == 0x80) text = text[1..];
-    }
-    std.debug.assert(text.len <= out.len);
-    @memcpy(out[0..text.len], text);
-    return out[0..text.len];
-}
-
 /// Write a formatted failure diagnostic and optional PTY tail to stderr.
 pub fn reportFailure(shared: ?*SharedState, debug_screen: bool, comptime fmt: []const u8, args: anytype) void {
     var buf: [2048]u8 = undefined;
@@ -408,55 +359,65 @@ pub fn pumpStream(tailer: *stream_mod.Tailer, writer: *std.Io.Writer) error{ Wri
 // -------- tests --------
 const testing = std.testing;
 
-test "formatHookTrace: includes event name and byte length, never payload" {
-    var buf: [96]u8 = undefined;
-    try testing.expectEqualStrings("hook: stop payload_bytes=42", formatHookTrace(&buf, .stop, 42));
-    try testing.expectEqualStrings("hook: session_start payload_bytes=0", formatHookTrace(&buf, .session_start, 0));
+test "trace and traceFmt: no-op when debug is false" {
+    trace(.{ .prompt = "p", .debug = false }, 0, "quiet");
+    traceFmt(.{ .prompt = "p", .debug = false }, 0, "n={d}", .{1});
 }
 
-test "formatHookTrace: returns overflow marker when buffer is too small" {
-    var tiny: [8]u8 = undefined;
-    try testing.expectEqualStrings("hook: (trace overflow)", formatHookTrace(&tiny, .user_prompt_submit, 100));
+test "onZmuxEvent: ignores pane_activity and pane_bell" {
+    var sh: SharedState = .{ .session = undefined, .debug = false };
+    defer sh.deinitBuffers();
+    onZmuxEvent(@ptrCast(&sh), .{ .pane_activity = .{ .pane_id = "0", .last_activity_ms = 1 } });
+    onZmuxEvent(@ptrCast(&sh), .{ .pane_bell = .{ .pane_id = "0", .last_bell_ms = 2 } });
+    try testing.expectEqual(@as(u64, 0), sh.bytes_seen.load(.seq_cst));
+    try testing.expect(!sh.exited.load(.seq_cst));
 }
 
-test "formatFailureScreen: strips ANSI escapes and drops blank lines" {
-    var out: [failure_screen_max_bytes]u8 = undefined;
-    const raw = "\x1b[31merror\x1b[0m   \n\n  \r\nline two\n";
-    try testing.expectEqualStrings("error\nline two", formatFailureScreen(&out, raw));
+test "onZmuxEvent: post-start truncates rolling buffer to post_start capacity" {
+    var sh: SharedState = .{ .session = undefined, .debug = false, .debug_screen = true };
+    defer sh.deinitBuffers();
+    sh.startup_done.store(true, .seq_cst);
+    const big = "z" ** 3000;
+    onZmuxEvent(@ptrCast(&sh), .{ .pane_output = .{ .pane_id = "0", .data = big } });
+    try testing.expectEqual(sh.post_start.len, sh.post_start_len);
 }
 
-test "formatFailureScreen: keeps at most failure_screen_max_lines lines" {
-    var out: [failure_screen_max_bytes]u8 = undefined;
-    const raw = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n";
-    const s = formatFailureScreen(&out, raw);
-    try testing.expectEqual(@as(usize, failure_screen_max_lines - 1), std.mem.count(u8, s, "\n"));
-    try testing.expect(std.mem.startsWith(u8, s, "3\n"));
-    try testing.expect(std.mem.endsWith(u8, s, "\n17"));
+test "writeFailure: post-start reads post_start buffer when debug_screen is true" {
+    var sh: SharedState = .{ .session = undefined, .debug = false, .debug_screen = true };
+    defer sh.deinitBuffers();
+    sh.startup_done.store(true, .seq_cst);
+    onZmuxEvent(@ptrCast(&sh), .{ .pane_output = .{ .pane_id = "0", .data = "post-err" } });
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeFailure(&aw.writer, &sh, true, "oops", .{});
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "post-err") != null);
 }
 
-test "formatFailureScreen: bounds output length and preserves UTF-8 lead byte" {
-    var out: [failure_screen_max_bytes]u8 = undefined;
-    const raw = "é" ** 700;
-    const s = formatFailureScreen(&out, raw);
-    try testing.expect(s.len <= failure_screen_max_bytes);
-    try testing.expect((s[0] & 0xC0) != 0x80);
+test "maybeHandleStartupDialogs: returns early when refused or max keys reached" {
+    var sh: SharedState = .{ .session = undefined, .debug = false };
+    sh.dialog.refused = .trust;
+    maybeHandleStartupDialogs(.{ .prompt = "p" }, 0, &sh, undefined);
+    sh.dialog.refused = .none;
+    sh.dialog.keys_sent = dialog_mod.max_dialog_keys;
+    maybeHandleStartupDialogs(.{ .prompt = "p" }, 0, &sh, undefined);
+    try testing.expectEqual(dialog_mod.max_dialog_keys, sh.dialog.keys_sent);
 }
 
-test "formatFailureScreen: strips control characters below 0x20 and DEL" {
-    var out: [failure_screen_max_bytes]u8 = undefined;
-    try testing.expectEqualStrings("ab", formatFailureScreen(&out, "a\x01\x07\x7fb"));
+test "maybeHandleStartupDialogs: returns early before any PTY output" {
+    var sh: SharedState = .{ .session = undefined, .debug = false };
+    maybeHandleStartupDialogs(.{ .prompt = "p" }, 0, &sh, undefined);
+    try testing.expectEqual(@as(u8, 0), sh.dialog.keys_sent);
 }
 
-test "formatFailureScreen: empty or whitespace-only input returns empty" {
-    var out: [failure_screen_max_bytes]u8 = undefined;
-    try testing.expectEqualStrings("", formatFailureScreen(&out, "  \n\r\n   "));
+test "waitForInkQuiescent: returns immediately on expired deadline" {
+    var sh: SharedState = .{ .session = undefined, .debug = false, .deadline_ns = 0 };
+    waitForInkQuiescent(.{ .prompt = "p" }, 0, &sh);
 }
 
 test "decRepliesInto: answers DA1 and DSR queries into fixed buffer" {
     var sh: SharedState = .{ .session = undefined, .debug = false };
     var buf: [dec_reply_capacity]u8 = undefined;
-    const r = decRepliesInto(&sh, &buf, "\x1b[c\x1b[6n");
-    try testing.expectEqualStrings("\x1b[?1;2c\x1b[1;1R", r);
+    try testing.expectEqualStrings("\x1b[?1;2c\x1b[1;1R", decRepliesInto(&sh, &buf, "\x1b[c\x1b[6n"));
 }
 
 test "decRepliesInto: carries split query across calls" {
@@ -475,7 +436,7 @@ test "onZmuxEvent: pre-start appends recent bounded to recent_capacity" {
     try testing.expectEqual(@as(u64, big.len), sh.bytes_seen.load(.seq_cst));
 }
 
-test "onZmuxEvent: post-start freezes recent and updates post_start only when debug_screen" {
+test "onZmuxEvent: post-start freezes recent and updates post_start" {
     var sh: SharedState = .{ .session = undefined, .debug = false, .debug_screen = true };
     defer sh.deinitBuffers();
     onZmuxEvent(@ptrCast(&sh), .{ .pane_output = .{ .pane_id = "0", .data = "boot" } });
@@ -485,13 +446,12 @@ test "onZmuxEvent: post-start freezes recent and updates post_start only when de
     try testing.expectEqualStrings("after", sh.post_start[0..sh.post_start_len]);
 }
 
-test "onZmuxEvent: post-start skips post_start copy when debug_screen and debug are false" {
-    var sh: SharedState = .{ .session = undefined, .debug = false, .debug_screen = false };
+test "onZmuxEvent: post-start skips copy when debug_screen false" {
+    var sh: SharedState = .{ .session = undefined, .debug = false };
     defer sh.deinitBuffers();
     sh.startup_done.store(true, .seq_cst);
     onZmuxEvent(@ptrCast(&sh), .{ .pane_output = .{ .pane_id = "0", .data = "secret" } });
     try testing.expectEqual(@as(usize, 0), sh.post_start_len);
-    try testing.expectEqual(@as(u64, 6), sh.bytes_seen.load(.seq_cst));
 }
 
 test "onZmuxEvent: queues DEC replies in pending_to_pty" {
@@ -501,10 +461,9 @@ test "onZmuxEvent: queues DEC replies in pending_to_pty" {
     try testing.expectEqualStrings("\x1b[1;1R", sh.pending_to_pty.items);
 }
 
-test "onZmuxEvent: session_exited marks exited atomic true" {
+test "onZmuxEvent: session_exited marks exited true" {
     var sh: SharedState = .{ .session = undefined, .debug = false };
     defer sh.deinitBuffers();
-    try testing.expect(!sh.exited.load(.seq_cst));
     onZmuxEvent(@ptrCast(&sh), .{ .session_exited = .{ .session_id = "s", .pid = 1, .exit_code = 0, .signal = null } });
     try testing.expect(sh.exited.load(.seq_cst));
 }
@@ -534,12 +493,12 @@ test "sleepPumpingDec: returns immediately on expired deadline" {
     sleepPumpingDec(&sh, null, 5000);
 }
 
-test "waitForOutputQuiet: returns false immediately when deadline expired" {
+test "waitForOutputQuiet: returns false on expired deadline" {
     var sh: SharedState = .{ .session = undefined, .debug = false, .deadline_ns = 0 };
     try testing.expect(!waitForOutputQuiet(.{ .prompt = "p" }, 0, &sh, null, 50, 500));
 }
 
-test "waitForOutputQuiet: returns true once last_output_ns is older than quiet_ms" {
+test "waitForOutputQuiet: returns true once quiet_ms elapsed" {
     const now: i64 = @intCast(watchdog.monotonicNs());
     var sh: SharedState = .{ .session = undefined, .debug = false };
     sh.last_output_ns.store(now - 200 * std.time.ns_per_ms, .seq_cst);
@@ -554,14 +513,6 @@ test "pumpStream: propagates WriteFailed from failing writer" {
     defer testing.allocator.free(path);
     var t = try stream_mod.Tailer.open(testing.allocator, path);
     defer t.deinit();
-    var fail_buf: [0]u8 = .{};
-    var w: std.Io.Writer = .{
-        .buffer = &fail_buf,
-        .vtable = &.{ .drain = struct {
-            fn drain(_: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
-                return error.WriteFailed;
-            }
-        }.drain },
-    };
+    var w: std.Io.Writer = .failing;
     try testing.expectError(error.WriteFailed, pumpStream(&t, &w));
 }

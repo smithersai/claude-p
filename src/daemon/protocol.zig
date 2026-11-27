@@ -1,6 +1,49 @@
 //! Daemon NDJSON input framing, watchdog predicates, and wire emitters.
 const std = @import("std");
 const emit_mod = @import("../emit.zig");
+const hook_mod = @import("../hook.zig");
+
+/// Options for persistent multi-turn daemon mode.
+pub const Options = struct {
+    model: ?[]const u8 = null,
+    allowed_tools: ?[]const u8 = null,
+    skip_permissions: bool = false,
+    resume_session: ?[]const u8 = null,
+    cont: bool = false,
+    session_id: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
+    extra_args: []const []const u8 = &.{},
+    system_prompt: ?[]const u8 = null,
+    append_system_prompt: ?[]const u8 = null,
+    permission_mode: ?[]const u8 = null,
+    disallowed_tools: ?[]const u8 = null,
+    fallback_model: ?[]const u8 = null,
+    setting_sources: ?[]const u8 = null,
+    add_dirs: []const []const u8 = &.{},
+    mcp_configs: []const []const u8 = &.{},
+    verbose: bool = false,
+    claude_path: ?[]const u8 = null,
+    cols: u16 = 120,
+    rows: u16 = 40,
+    debug: bool = false,
+    session_start_timeout_ms: u64 = 300_000,
+    idle_progress_timeout_ms: u64 = 180_000,
+    transcript_idle_timeout_ms: u64 = 600_000,
+    extra_hooks: []const hook_mod.ExtraHook = &.{},
+    extra_settings_json: ?[]const u8 = null,
+};
+
+/// Error set returned by persistent daemon initialization and I/O failures.
+pub const RunError = error{
+    InvalidExtraSettings,
+    InvalidOptions,
+    IoFailure,
+} || std.mem.Allocator.Error;
+
+/// Maximum queued prompt count allowed before rejecting with `queue_full`.
+pub const max_queued_prompts: usize = 64;
+/// Maximum total queued prompt bytes allowed before rejecting with `queue_full`.
+pub const max_queued_bytes: usize = 64 * 1024 * 1024;
 
 /// Lifecycle state of the persistent multi-turn daemon.
 pub const State = enum {

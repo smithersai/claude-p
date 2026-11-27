@@ -6,7 +6,11 @@ const emit_mod = @import("../emit.zig");
 const hook_mod = @import("../hook.zig");
 const stream_mod = @import("../stream.zig");
 const transcript_mod = @import("../transcript.zig");
+pub const paste = @import("paste.zig");
 const protocol = @import("protocol.zig");
+
+/// Non-blocking state machine that paces bracketed-paste writes between loop ticks.
+pub const PendingPaste = paste.PendingPaste;
 
 fn monotonicNs() i64 {
     return @intCast(driver_mod.monotonicNs());
@@ -155,48 +159,6 @@ pub const PendingStop = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => .none,
             };
-    }
-};
-
-/// Non-blocking state machine that paces bracketed-paste writes between loop ticks.
-pub const PendingPaste = struct {
-    chunker: driver_mod.PasteChunker,
-    stage: enum { chunks, enter_debounce } = .chunks,
-    next_at_ns: i128 = 0,
-    is_reinject: bool,
-
-    pub fn init(text: []const u8, is_reinject: bool) PendingPaste {
-        return .{ .chunker = .{ .text = text }, .is_reinject = is_reinject };
-    }
-
-    pub fn advance(self: *PendingPaste, sink: anytype) !bool {
-        const now: i128 = monotonicNs();
-        if (now < self.next_at_ns) return false;
-        switch (self.stage) {
-            .chunks => {
-                if (self.chunker.pos == 0) try sink.writeInput(driver_mod.paste_start);
-                var buf: [driver_mod.paste_chunk_bytes]u8 = undefined;
-                if (self.chunker.next(&buf)) |chunk| {
-                    std.debug.assert(chunk.len > 0 and chunk.len <= buf.len);
-                    try sink.writeInput(chunk);
-                    self.next_at_ns = now + driver_mod.paste_chunk_gap_ms * std.time.ns_per_ms;
-                } else {
-                    try sink.writeInput(driver_mod.paste_end);
-                    self.stage = .enter_debounce;
-                    self.next_at_ns = now + driver_mod.ink_enter_debounce_ms * std.time.ns_per_ms;
-                }
-                return false;
-            },
-            .enter_debounce => {
-                try sink.writeInput("\r");
-                return true;
-            },
-        }
-    }
-
-    pub fn cancel(self: PendingPaste, sink: anytype) !void {
-        if (self.stage == .chunks and self.chunker.pos != 0) try sink.writeInput(driver_mod.paste_end);
-        try sink.writeInput("\x15");
     }
 };
 
@@ -479,12 +441,7 @@ test "TurnTranscript: refresh detects truncation and recovers matched prompt" {
 }
 
 test "PendingStop: clearStop frees payload and nulls slot" {
-    var ps: ?PendingStop = .{
-        .payload = try testing.allocator.dupe(u8, "{}"),
-        .deadline = 0,
-        .inode = null,
-        .scan_pos = 0,
-    };
+    var ps: ?PendingStop = .{ .payload = try testing.allocator.dupe(u8, "{}"), .deadline = 0, .inode = null, .scan_pos = 0 };
     clearStop(testing.allocator, &ps);
     try testing.expect(ps == null);
 }
@@ -492,12 +449,7 @@ test "PendingStop: clearStop frees payload and nulls slot" {
 test "PendingStop: status returns none without path" {
     var tr: TurnTranscript = .{ .initial_resume = false };
     defer tr.deinit(testing.allocator);
-    var ps: PendingStop = .{
-        .payload = try testing.allocator.dupe(u8, "{}"),
-        .deadline = 0,
-        .inode = null,
-        .scan_pos = 0,
-    };
+    var ps: PendingStop = .{ .payload = try testing.allocator.dupe(u8, "{}"), .deadline = 0, .inode = null, .scan_pos = 0 };
     defer testing.allocator.free(ps.payload);
     try testing.expectEqual(driver_mod.StopSummaryStatus.none, try ps.status(testing.allocator, &tr, "hi"));
 }
@@ -512,63 +464,48 @@ test "PendingStop: status confirms stop_hook_summary record" {
     var tr: TurnTranscript = .{ .initial_resume = false, .path = try testing.allocator.dupe(u8, path) };
     defer tr.deinit(testing.allocator);
     tr.refresh(testing.allocator, "p", false);
-    var ps: PendingStop = .{
-        .payload = try testing.allocator.dupe(u8, "{}"),
-        .deadline = 0,
-        .inode = tr.inode,
-        .scan_pos = 0,
-    };
+    var ps: PendingStop = .{ .payload = try testing.allocator.dupe(u8, "{}"), .deadline = 0, .inode = tr.inode, .scan_pos = 0 };
     defer testing.allocator.free(ps.payload);
     try testing.expectEqual(driver_mod.StopSummaryStatus.confirmed, try ps.status(testing.allocator, &tr, "p"));
 }
 
-test "PendingPaste: advances through paste_start, chunk, paste_end, and CR" {
-    const Sink = struct {
-        buf: std.ArrayList(u8) = .{},
-        alloc: std.mem.Allocator,
-        pub fn writeInput(self: *@This(), data: []const u8) !void {
-            try self.buf.appendSlice(self.alloc, data);
-        }
-    };
-    var sink: Sink = .{ .alloc = testing.allocator };
-    defer sink.buf.deinit(testing.allocator);
-    var paste = PendingPaste.init("hello", false);
-    while (true) {
-        paste.next_at_ns = 0;
-        if (try paste.advance(&sink)) break;
-    }
-    try testing.expectEqualStrings(driver_mod.paste_start ++ "hello" ++ driver_mod.paste_end ++ "\r", sink.buf.items);
+test "pumpTranscript: returns zero on empty file and writes complete lines" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = "{\"ok\":1}\n" });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
+    defer testing.allocator.free(path);
+    var t = try stream_mod.Tailer.open(testing.allocator, path);
+    defer t.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expectEqual(@as(usize, 1), try pumpTranscript(&t, &aw.writer));
+    try testing.expectEqual(@as(usize, 0), try pumpTranscript(&t, &aw.writer));
 }
 
-test "PendingPaste: cancel mid-paste closes bracketed paste before Ctrl-U" {
-    const Sink = struct {
-        buf: std.ArrayList(u8) = .{},
-        alloc: std.mem.Allocator,
-        pub fn writeInput(self: *@This(), data: []const u8) !void {
-            try self.buf.appendSlice(self.alloc, data);
-        }
-    };
-    var sink: Sink = .{ .alloc = testing.allocator };
-    defer sink.buf.deinit(testing.allocator);
-    var paste = PendingPaste.init("a" ** 600, false);
-    try testing.expect(!(try paste.advance(&sink)));
-    try paste.cancel(&sink);
-    try testing.expect(std.mem.endsWith(u8, sink.buf.items, driver_mod.paste_end ++ "\x15"));
+test "PendingStop: status resets scan_pos when inode changes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const line = "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\",\"preventedContinuation\":false}\n";
+    try tmp.dir.writeFile(.{ .sub_path = "t.jsonl", .data = line });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "t.jsonl");
+    defer testing.allocator.free(path);
+    var tr: TurnTranscript = .{ .initial_resume = false, .path = try testing.allocator.dupe(u8, path) };
+    defer tr.deinit(testing.allocator);
+    tr.refresh(testing.allocator, "p", false);
+    tr.start = 0;
+    var ps: PendingStop = .{ .payload = try testing.allocator.dupe(u8, "{}"), .deadline = 0, .inode = 0, .scan_pos = 9999 };
+    defer testing.allocator.free(ps.payload);
+    try testing.expectEqual(driver_mod.StopSummaryStatus.confirmed, try ps.status(testing.allocator, &tr, "p"));
 }
 
-test "PendingPaste: cancel before first byte sends only Ctrl-U" {
-    const Sink = struct {
-        buf: std.ArrayList(u8) = .{},
-        alloc: std.mem.Allocator,
-        pub fn writeInput(self: *@This(), data: []const u8) !void {
-            try self.buf.appendSlice(self.alloc, data);
-        }
-    };
-    var sink: Sink = .{ .alloc = testing.allocator };
-    defer sink.buf.deinit(testing.allocator);
-    const paste = PendingPaste.init("abc", true);
-    try paste.cancel(&sink);
-    try testing.expectEqualStrings("\x15", sink.buf.items);
+test "TurnTranscript: refresh on missing file without prior inode keeps state empty" {
+    var tr: TurnTranscript = .{ .initial_resume = false };
+    defer tr.deinit(testing.allocator);
+    try tr.observePath(testing.allocator, "{\"transcript_path\":\"/nonexistent/claude-p-ref.jsonl\"}");
+    tr.refresh(testing.allocator, "p", true);
+    try testing.expect(tr.inode == null);
+    try testing.expect(tr.tailer == null);
 }
 
 test "emitTurnResult: uses stop_last fallback when transcript unavailable" {
